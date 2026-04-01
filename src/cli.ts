@@ -3,7 +3,7 @@ import { writeFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
-import { GET_CLICK_COORDS, SET_VALUE, FOCUS_AND_CLEAR, PAGE_DIMENSIONS, elementRect } from './page-scripts.js';
+import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect } from './page-scripts.js';
 import type { Transport } from './transport.js';
 
 const program = new Command();
@@ -36,8 +36,8 @@ Edge cases:
   bp upload <ref> <filepath>                         # file input upload
   bp auth <user> <pass>                              # HTTP Basic Auth
   bp frame                                           # list iframes
-  bp frame switch 1                                  # eval in iframe context
-  bp tabs --adopt                                    # adopt popup windows
+  bp frame 1                                         # eval in iframe context
+  bp frame 0                                         # back to top frame
   Dialogs (alert/confirm) are auto-handled by the daemon.
 
 Eval (replaces scroll, back, forward, extract, etc.):
@@ -284,26 +284,15 @@ program.command('type <ref> <text>')
   .description('Type text into element and return page snapshot')
   .option('-c, --clear', 'clear field before typing')
   .option('-s, --submit', 'press Enter after typing')
-  .option('-k, --keys', 'type with individual key events (slower, more realistic)')
   .option('-l, --limit <n>', 'max elements in snapshot', '50')
   .addHelpText('after', '\nExamples:\n  bp type 2 "hello world"\n  bp type 5 "query" --submit\n  bp type 3 "new value" --clear')
   .action(action(async (ref, text, opts) => {
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
       const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
-      if (opts.keys) {
-        await transport.send('Runtime.callFunctionOn', {
-          objectId, functionDeclaration: FOCUS_AND_CLEAR, arguments: [{ value: !!opts.clear }],
-        }, sessionId);
-        for (const char of text) {
-          await transport.send('Input.dispatchKeyEvent', { type: 'keyDown', text: char, key: char, unmodifiedText: char }, sessionId);
-          await transport.send('Input.dispatchKeyEvent', { type: 'keyUp', key: char }, sessionId);
-        }
-      } else {
-        await transport.send('Runtime.callFunctionOn', {
-          objectId, functionDeclaration: SET_VALUE, arguments: [{ value: text }, { value: !!opts.clear }],
-        }, sessionId);
-      }
+      await transport.send('Runtime.callFunctionOn', {
+        objectId, functionDeclaration: SET_VALUE, arguments: [{ value: text }, { value: !!opts.clear }],
+      }, sessionId);
       if (opts.submit) await dispatchKey(transport, sessionId, 'Enter');
       emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
     });
@@ -445,58 +434,48 @@ program.command('cookies [domain]')
 
 // ─── frame ──────────────────────────────────────────
 
-program.command('frame [action]')
-  .description('List or switch iframe context (list, switch <index>, top)')
-  .argument('[index]', 'frame index to switch to')
-  .addHelpText('after', '\nActions:\n  bp frame              # list all frames\n  bp frame switch 1     # switch eval context to frame 1\n  bp frame top          # switch back to top frame\n\nExamples:\n  bp frame\n  bp frame switch 0\n  bp frame top')
-  .action(action(async (act, index) => {
+program.command('frame [target]')
+  .description('List frames, or switch to a frame by index (0=top)')
+  .addHelpText('after', '\nExamples:\n  bp frame          # list all frames\n  bp frame 1        # switch eval context to frame 1\n  bp frame 0        # switch back to top frame')
+  .action(action(async (target) => {
     await withPilot(async ({ transport, sessionId, state }) => {
-      if (!act || act === 'list') {
-        const { frameTree } = await transport.send('Page.getFrameTree', {}, sessionId);
-        const frames: Array<{ index: number; id: string; url: string; name: string }> = [];
-        function walk(node: any, depth = 0) {
-          frames.push({ index: frames.length, id: node.frame.id, url: node.frame.url, name: node.frame.name || '' });
-          for (const child of node.childFrames || []) walk(child, depth + 1);
-        }
-        walk(frameTree);
+      const { frameTree } = await transport.send('Page.getFrameTree', {}, sessionId);
+      const frames: Array<{ id: string; url: string; name: string }> = [];
+      function collect(node: any) {
+        frames.push({ id: node.frame.id, url: node.frame.url, name: node.frame.name || '' });
+        for (const child of node.childFrames || []) collect(child);
+      }
+      collect(frameTree);
+
+      if (target === undefined) {
+        // List frames
+        const list = frames.map((f, i) => ({ index: i, ...f }));
         if (useJson()) {
-          console.log(JSON.stringify({ ok: true, frames }));
+          console.log(JSON.stringify({ ok: true, frames: list }));
         } else {
-          for (const f of frames) {
-            const prefix = f.index === 0 ? '* ' : '  ';
-            console.log(`${prefix}${f.index}  ${f.url}  ${f.name}`);
+          for (const [i, f] of frames.entries()) {
+            console.log(`${i === 0 ? '* ' : '  '}${i}  ${f.url}  ${f.name}`);
           }
         }
-      } else if (act === 'top') {
-        state.frameContextId = undefined;
-        saveState(state);
-        emit({ ok: true, frame: 'top' }, '\u2713 Switched to top frame');
-      } else if (act === 'switch' && index) {
-        const frameIndex = parseInt(index, 10);
-        const { frameTree } = await transport.send('Page.getFrameTree', {}, sessionId);
-        const frames: any[] = [];
-        function collect(node: any) {
-          frames.push(node.frame);
-          for (const child of node.childFrames || []) collect(child);
-        }
-        collect(frameTree);
-        if (frameIndex < 0 || frameIndex >= frames.length) {
+      } else {
+        // Switch to frame by index (0 = top frame)
+        const idx = parseInt(target, 10);
+        if (isNaN(idx) || idx < 0 || idx >= frames.length) {
           throw new Error(`Frame index out of range (0-${frames.length - 1})`);
         }
-        // Get the execution context for this frame
-        const frame = frames[frameIndex];
-        // Create an isolated world or use the frame's default context
-        const { executionContextId } = await transport.send('Page.createIsolatedWorld', {
-          frameId: frame.id,
-        }, sessionId);
-        state.frameContextId = executionContextId;
+        if (idx === 0) {
+          state.frameContextId = undefined;
+        } else {
+          const { executionContextId } = await transport.send('Page.createIsolatedWorld', {
+            frameId: frames[idx].id,
+          }, sessionId);
+          state.frameContextId = executionContextId;
+        }
         saveState(state);
         emit(
-          { ok: true, frame: frameIndex, url: frame.url, contextId: executionContextId },
-          `\u2713 Switched to frame ${frameIndex}: ${frame.url}`,
+          { ok: true, frame: idx, url: frames[idx].url },
+          `\u2713 Switched to frame ${idx}: ${frames[idx].url}`,
         );
-      } else {
-        throw new Error('Usage: bp frame [list | switch <index> | top]');
       }
     });
   }));
@@ -527,26 +506,26 @@ program.command('auth [username] [password]')
 // ─── tabs ───────────────────────────────────────────
 
 program.command('tabs')
-  .description('List pilot tabs and discovered popups')
-  .option('--adopt', 'adopt all discovered popups into pilot tabs')
-  .action(action(async (opts) => {
+  .description('List pilot tabs (auto-adopts discovered popups)')
+  .action(action(async () => {
     const existing = await resumeExisting();
     if (!existing) throw new Error('Not connected');
     const { client, state } = existing;
     const { targetInfos } = await client.send('Target.getTargets');
 
-    // Discovered popups not yet in pilot tabs
+    // Auto-adopt discovered popups
     const discovered = await client.discoveredTargets();
     const knownIds = new Set(state.pilotTargetIds);
     const existingIds = new Set(targetInfos.map((t: any) => t.targetId));
-    const popups = discovered.filter(d => !knownIds.has(d.targetId) && existingIds.has(d.targetId));
-
-    if (opts.adopt && popups.length > 0) {
-      for (const p of popups) {
-        state.pilotTargetIds.push(p.targetId);
+    let adopted = 0;
+    for (const d of discovered) {
+      if (!knownIds.has(d.targetId) && existingIds.has(d.targetId)) {
+        state.pilotTargetIds.push(d.targetId);
+        knownIds.add(d.targetId);
+        adopted++;
       }
-      saveState(state);
     }
+    if (adopted > 0) saveState(state);
 
     const tabs = state.pilotTargetIds.map((id, i) => {
       const t = targetInfos.find((t: any) => t.targetId === id);
@@ -554,14 +533,11 @@ program.command('tabs')
     }).filter(Boolean) as { index: number; url: string; title: string; active: boolean }[];
 
     if (useJson()) {
-      console.log(JSON.stringify({ ok: true, tabs, popups: popups.map(p => p.url) }));
+      console.log(JSON.stringify({ ok: true, tabs }));
+    } else if (tabs.length === 0) {
+      console.log('No pilot tabs open.');
     } else {
-      if (tabs.length === 0) console.log('No pilot tabs open.');
-      else for (const t of tabs) console.log(`${t.active ? '*' : ' '} ${t.index}  ${t.url}  ${t.title}`);
-      if (popups.length > 0 && !opts.adopt) {
-        console.log(`\n${popups.length} popup(s) detected. Run 'bp tabs --adopt' to add them.`);
-        for (const p of popups) console.log(`  + ${p.url}`);
-      }
+      for (const t of tabs) console.log(`${t.active ? '*' : ' '} ${t.index}  ${t.url}  ${t.title}`);
     }
   }));
 
