@@ -1,15 +1,46 @@
 # browser-pilot
 
-CLI tool that controls your real browser. Uses your logged-in sessions, cookies, and extensions — no separate browser instance needed. Designed for LLM agents.
+CLI tool that gives LLM agents control of your real browser — with your logins, cookies, and extensions intact.
 
-## Why
+```bash
+bp open https://github.com       # navigate — returns interactive elements
+bp click 3                        # click [3] — returns updated page
+bp type 5 "hello" --submit        # type + Enter — returns updated page
+bp eval "document.title"          # run any JavaScript
+```
 
-Browser automation tools typically launch a clean, isolated browser. But you're already logged into dozens of sites. `browser-pilot` connects to **your running Chrome** via CDP and operates in a **separate window**, so it can:
+## Comparison
 
-- Access content behind login walls and paywalls
-- Use your existing cookies and sessions
-- Work with your extensions (password managers, ad blockers, etc.)
-- Never interfere with your browsing
+| | browser-pilot | Playwright MCP | Chrome DevTools MCP | browser-use |
+|---|---|---|---|---|
+| **Interface** | CLI (bash) | MCP protocol | MCP protocol | Python SDK |
+| **Login session reuse** | Yes | No | Depends | Yes |
+| **Element refs** | Numbered (accessibility tree) | Named refs (ARIA) | CSS selectors | Numbered (DOM) |
+| **Auto-snapshot after action** | Yes | Yes | No | Yes |
+| **Network interception** | No | Yes | Yes | No |
+| **Drag and drop** | No | Yes | Yes | No |
+| **Mobile emulation** | No | Yes | Yes | Yes |
+| **Multi-browser** | Chromium-only | Chromium + Firefox + WebKit | Chromium-only | Chromium-only |
+| **Connection model** | Daemon (one-time Allow) | MCP server | MCP server | Python process |
+| **Dialog auto-handling** | Yes | Yes | No | Yes |
+| **JSON output** | Default | MCP structured | MCP structured | Python objects |
+| **Visual indicator** | Pulsing glow | None | None | None |
+| **File upload** | Auto-detect input | Yes | No | Yes |
+| **Autonomous agent** | No (tool, not agent) | No (tool) | No (tool) | Yes (plans + executes) |
+
+**browser-pilot is best when:**
+- You need your existing login sessions (paywalled content, internal tools)
+- Your LLM has bash access but no MCP support
+- You want every action to return page state automatically
+
+**Use Playwright MCP when:**
+- You need network interception, multi-browser, or mobile emulation
+- Your LLM supports MCP natively
+- You don't need existing login sessions
+
+**Use browser-use when:**
+- You want an autonomous agent that plans and executes multi-step tasks
+- You're building in Python
 
 ## Quick Start
 
@@ -24,12 +55,12 @@ npm install -g browser-pilot
 bp connect
 
 # Use
-bp open https://github.com       # navigate — returns interactive elements
-bp click 3                        # click element [3] — returns updated page
-bp type 5 "hello" --submit        # type into element [5], press Enter
-bp eval "document.title"          # run any JavaScript
-bp screenshot page.png            # capture screenshot
-bp disconnect                     # done
+bp open https://github.com
+bp click 3
+bp type 5 "hello" --submit
+bp eval "document.title"
+bp screenshot page.png
+bp disconnect
 ```
 
 ## How It Works
@@ -47,9 +78,7 @@ CLI Process ──── HTTP/Unix Socket ──── Daemon Process (persisten
                                        └── Pilot window (bp operates here)
 ```
 
-The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog appears once per session. All CLI commands go through the daemon — no repeated auth prompts.
-
-A pulsing blue glow around the Pilot window indicates the agent is active.
+The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog appears once per session. A pulsing blue glow around the Pilot window indicates the agent is active.
 
 ## Commands
 
@@ -82,7 +111,7 @@ A pulsing blue glow around the Pilot window indicates the agent is active.
 | `bp auth <user> <pass>` | Set HTTP Basic Auth credentials (`--clear`) |
 | `bp frame [index]` | List or switch iframe context (0 = top) |
 
-Dialogs (`alert`/`confirm`/`prompt`) are auto-handled by the daemon — no more 30s hangs.
+Dialogs (`alert`/`confirm`/`prompt`) are auto-handled by the daemon.
 
 Popup windows (target="_blank", window.open) are auto-detected. Run `bp tabs` to see and switch to them.
 
