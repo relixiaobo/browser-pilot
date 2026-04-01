@@ -44,9 +44,9 @@ export const INJECT_BORDER = `(() => {
   Object.assign(d.style, {position:'fixed',inset:'0',zIndex:'2147483647',pointerEvents:'none'});
   document.documentElement.appendChild(d);
   try{d.animate([
-    {boxShadow:'inset 0 0 10px rgba(59,130,246,.5),inset 0 0 20px rgba(59,130,246,.3),inset 0 0 30px rgba(59,130,246,.1)'},
-    {boxShadow:'inset 0 0 15px rgba(59,130,246,.7),inset 0 0 25px rgba(59,130,246,.5),inset 0 0 35px rgba(59,130,246,.2)'},
-    {boxShadow:'inset 0 0 10px rgba(59,130,246,.5),inset 0 0 20px rgba(59,130,246,.3),inset 0 0 30px rgba(59,130,246,.1)'},
+    {boxShadow:'inset 0 0 20px rgba(59,130,246,.8),inset 0 0 40px rgba(59,130,246,.4),inset 0 0 80px rgba(59,130,246,.15)'},
+    {boxShadow:'inset 0 0 30px rgba(59,130,246,1),inset 0 0 60px rgba(59,130,246,.5),inset 0 0 100px rgba(59,130,246,.2)'},
+    {boxShadow:'inset 0 0 20px rgba(59,130,246,.8),inset 0 0 40px rgba(59,130,246,.4),inset 0 0 80px rgba(59,130,246,.15)'},
   ],{duration:2500,iterations:Infinity,easing:'ease-in-out'})}catch(e){}
 })()`;
 
