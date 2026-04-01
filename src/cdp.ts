@@ -5,11 +5,19 @@ export class CDPClient implements Transport {
   private ws!: WebSocket;
   private nextId = 1;
   private callbacks = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-  private eventHandlers = new Map<string, Array<(params: any) => void>>();
+  private eventHandlers = new Map<string, Array<(params: any, sessionId?: string) => void>>();
 
   connect(wsUrl: string): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(wsUrl);
+
+      // Persistent error handler — prevents Node crash on late WebSocket errors
+      this.ws.on('error', (err: Error) => {
+        for (const cb of this.callbacks.values()) {
+          cb.reject(new Error(`WebSocket error: ${err.message}`));
+        }
+        this.callbacks.clear();
+      });
 
       const onError = (err: Error) => {
         this.ws.removeListener('open', onOpen);
@@ -78,7 +86,7 @@ export class CDPClient implements Transport {
     });
   }
 
-  on(method: string, handler: (params: any) => void): void {
+  on(method: string, handler: (params: any, sessionId?: string) => void): void {
     const handlers = this.eventHandlers.get(method) ?? [];
     handlers.push(handler);
     this.eventHandlers.set(method, handlers);

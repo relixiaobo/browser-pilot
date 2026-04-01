@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "test": "bash tests/run.sh"
   },
   "dependencies": {
     "commander": "^13.1.0",

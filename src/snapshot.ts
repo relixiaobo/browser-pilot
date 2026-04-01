@@ -36,7 +36,7 @@ export interface SnapshotResult {
 // ── Ref persistence (scoped to targetId) ────────────
 
 function saveRefs(targetId: string, entries: RefEntry[]): void {
-  writeFileSync(REFS_FILE, JSON.stringify({ targetId, entries } satisfies StoredRefs));
+  writeFileSync(REFS_FILE, JSON.stringify({ targetId, entries } satisfies StoredRefs), { mode: 0o600 });
 }
 
 export function loadRefs(expectedTargetId?: string): RefEntry[] {

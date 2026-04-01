@@ -16,8 +16,8 @@ export function loadState(): PilotState | null {
 }
 
 export function saveState(state: PilotState): void {
-  if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
 }
 
 export function clearState(): void {

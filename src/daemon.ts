@@ -1,11 +1,12 @@
 import http from 'node:http';
-import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { STATE_DIR, SOCKET_PATH, PID_FILE } from './paths.js';
 import { CDPClient } from './cdp.js';
 
 const wsUrl = process.argv[2];
 if (!wsUrl) { process.stderr.write('Usage: daemon <wsUrl>\n'); process.exit(1); }
-if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
+if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+else try { chmodSync(STATE_DIR, 0o700); } catch { /* ignore */ }
 try { unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
 
 function cleanup() {
@@ -91,8 +92,17 @@ async function enableNetworkTracking(cdp: CDPClient, sessionId: string) {
 // Ensure both Network + Fetch are enabled for a session
 async function ensureNetSession(cdp: CDPClient, sessionId: string) {
   await enableNetworkTracking(cdp, sessionId);
-  if (interceptRules.length > 0 && !fetchEnabledSessions.has(sessionId)) {
+  if ((interceptRules.length > 0 || authCredentials) && !fetchEnabledSessions.has(sessionId)) {
     await syncFetch(cdp, sessionId);
+  }
+}
+
+// Sync Fetch state across ALL known sessions (after rule/auth changes)
+async function syncFetchAll(cdp: CDPClient, currentSessionId?: string) {
+  const allSessions = new Set([...fetchEnabledSessions, ...networkEnabledSessions]);
+  if (currentSessionId) allSessions.add(currentSessionId);
+  for (const sid of allSessions) {
+    await syncFetch(cdp, sid);
   }
 }
 
@@ -202,7 +212,7 @@ async function main() {
     try {
       // ── Core endpoints ────────────────────────────
       if (req.method === 'GET' && url.pathname === '/health') {
-        res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
+        res.writeHead(200); res.end(JSON.stringify({ ok: true, wsUrl })); return;
       }
       if (req.method === 'POST' && url.pathname === '/cdp') {
         const body = await readBody(req);
@@ -218,6 +228,7 @@ async function main() {
         const body = await readBody(req);
         const { username, password } = JSON.parse(body);
         authCredentials = username ? { username, password } : null;
+        await syncFetchAll(cdp, activeSessionId);
         res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
       }
       if (req.method === 'GET' && url.pathname === '/discovered') {
@@ -304,7 +315,7 @@ async function main() {
           rule = { id: nextRuleId++, type: 'headers', pattern: b.pattern, headers: b.headers };
         } else { res.writeHead(400); res.end(JSON.stringify({ error: `Unknown rule type: ${b.type}` })); return; }
         interceptRules.push(rule);
-        await syncFetch(cdp, activeSessionId);
+        await syncFetchAll(cdp, activeSessionId);
         res.writeHead(200); res.end(JSON.stringify({ ok: true, rule })); return;
       }
 
@@ -321,7 +332,7 @@ async function main() {
           const idx = interceptRules.findIndex(r => r.id === b.id);
           if (idx >= 0) interceptRules.splice(idx, 1);
         }
-        await syncFetch(cdp, activeSessionId);
+        await syncFetchAll(cdp, activeSessionId);
         res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
       }
 
@@ -331,7 +342,10 @@ async function main() {
     }
   });
 
-  server.listen(SOCKET_PATH, () => { writeFileSync(PID_FILE, String(process.pid)); });
+  server.listen(SOCKET_PATH, () => {
+    try { chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
+    writeFileSync(PID_FILE, String(process.pid), { mode: 0o600 });
+  });
   process.on('SIGTERM', () => { cdp.close(); cleanup(); process.exit(0); });
   process.on('SIGINT', () => { cdp.close(); cleanup(); process.exit(0); });
 }

@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { DaemonClient, isDaemonRunning } from './client.js';
 import { discoverChrome } from './chrome.js';
 import { loadState, saveState, clearState, type PilotState } from './state.js';
+import { SOCKET_PATH } from './paths.js';
 import { INJECT_BORDER } from './page-scripts.js';
 import type { Transport } from './transport.js';
 
@@ -33,12 +35,16 @@ async function startDaemon(wsUrl: string): Promise<DaemonClient> {
 async function getDaemon(wsUrl: string): Promise<DaemonClient> {
   if (isDaemonRunning()) {
     const client = new DaemonClient();
-    if (await client.health()) {
+    const info = await client.healthInfo();
+    if (info.ok) {
       // Verify daemon controls the expected Chrome instance
-      const state = loadState();
-      if (state && state.wsEndpoint === wsUrl) return client;
-      // Wrong Chrome — restart daemon
+      if (info.wsUrl === wsUrl) return client;
+      // Wrong Chrome — restart daemon; wait for old socket to disappear
       await client.shutdown();
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline && existsSync(SOCKET_PATH)) {
+        await new Promise(r => setTimeout(r, 100));
+      }
     }
   }
   return startDaemon(wsUrl);

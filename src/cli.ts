@@ -168,7 +168,8 @@ async function dispatchKey(t: Transport, sid: string, combo: string): Promise<vo
   for (const m of mods) {
     await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key: m.key, code: m.code, windowsVirtualKeyCode: m.keyCode, modifiers: modifierFlags }, sid);
   }
-  await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text: kd ? '' : mainKey, modifiers: modifierFlags }, sid);
+  const text = key === 'Enter' ? '\r' : (kd ? '' : mainKey);
+  await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text, modifiers: modifierFlags }, sid);
   await t.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, modifiers: modifierFlags }, sid);
   for (const m of mods.reverse()) {
     await t.send('Input.dispatchKeyEvent', { type: 'keyUp', key: m.key, code: m.code, windowsVirtualKeyCode: m.keyCode }, sid);
@@ -239,6 +240,8 @@ program.command('open <url>')
         tid = targetId;
       } else {
         await transport.send('Page.navigate', { url }, sid);
+        state.frameContextId = undefined;
+        saveState(state);
       }
 
       await waitForLoad(transport, sid);
@@ -269,11 +272,15 @@ program.command('click <ref>')
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
       const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
-      const { result } = await transport.send('Runtime.callFunctionOn', {
-        objectId, functionDeclaration: GET_CLICK_COORDS, returnByValue: true,
-      }, sessionId);
-      const { x, y } = JSON.parse(result.value);
-      await dispatchClick(transport, sessionId, x, y);
+      try {
+        const { result } = await transport.send('Runtime.callFunctionOn', {
+          objectId, functionDeclaration: GET_CLICK_COORDS, returnByValue: true,
+        }, sessionId);
+        const { x, y } = JSON.parse(result.value);
+        await dispatchClick(transport, sessionId, x, y);
+      } finally {
+        await transport.send('Runtime.releaseObject', { objectId }, sessionId).catch(() => {});
+      }
       emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
     });
   }));
@@ -290,10 +297,14 @@ program.command('type <ref> <text>')
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
       const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
-      await transport.send('Runtime.callFunctionOn', {
-        objectId, functionDeclaration: SET_VALUE, arguments: [{ value: text }, { value: !!opts.clear }],
-      }, sessionId);
-      if (opts.submit) await dispatchKey(transport, sessionId, 'Enter');
+      try {
+        await transport.send('Runtime.callFunctionOn', {
+          objectId, functionDeclaration: SET_VALUE, arguments: [{ value: text }, { value: !!opts.clear }],
+        }, sessionId);
+        if (opts.submit) await dispatchKey(transport, sessionId, 'Enter');
+      } finally {
+        await transport.send('Runtime.releaseObject', { objectId }, sessionId).catch(() => {});
+      }
       emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
     });
   }));
@@ -366,11 +377,17 @@ program.command('upload <filepath>')
       const { result: elResult } = await transport.send('Runtime.evaluate', {
         expression: `document.querySelectorAll('input[type=file]')[${nth - 1}]`,
       }, sessionId);
-      const { node } = await transport.send('DOM.describeNode', { objectId: elResult.objectId }, sessionId);
-      await transport.send('DOM.setFileInputFiles', {
-        files: [absPath],
-        backendNodeId: node.backendNodeId,
-      }, sessionId);
+      try {
+        const { node } = await transport.send('DOM.describeNode', { objectId: elResult.objectId }, sessionId);
+        await transport.send('DOM.setFileInputFiles', {
+          files: [absPath],
+          backendNodeId: node.backendNodeId,
+        }, sessionId);
+      } finally {
+        if (elResult.objectId) {
+          await transport.send('Runtime.releaseObject', { objectId: elResult.objectId }, sessionId).catch(() => {});
+        }
+      }
 
       emitSnapshot(await snap(transport, sessionId, state.activeTargetId));
     });
@@ -516,9 +533,6 @@ program.command('auth [username] [password]')
     }
     if (!password) throw new Error('Usage: bp auth <username> <password>');
     await client.setAuth(username, password);
-    if (state.activeSessionId) {
-      await client.send('Fetch.enable', { handleAuthRequests: true }, state.activeSessionId);
-    }
     emit({ ok: true }, '\u2713 Auth credentials set (scoped to HTTP 401 challenges)');
   }));
 

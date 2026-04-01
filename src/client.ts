@@ -51,6 +51,10 @@ export class DaemonClient implements Transport {
     try { await this.request('/health'); return true; } catch { return false; }
   }
 
+  async healthInfo(): Promise<{ ok: boolean; wsUrl?: string }> {
+    try { return await this.request('/health'); } catch { return { ok: false }; }
+  }
+
   async shutdown(): Promise<void> {
     try { await this.request('/shutdown', {}); } catch { /* may already be gone */ }
   }

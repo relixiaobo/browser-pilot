@@ -34,7 +34,7 @@ bp eval "document.title"          # run any JavaScript
 - You want every action to return page state automatically
 
 **Use Playwright MCP when:**
-- You need network interception, multi-browser, or mobile emulation
+- You need multi-browser or mobile emulation
 - Your LLM supports MCP natively
 - You don't need existing login sessions
 
@@ -82,7 +82,7 @@ The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog 
 
 ## Commands
 
-17 commands. Run `bp --help` for full details including workflow, refs, and eval examples.
+Run `bp --help` for full details including workflow, refs, and eval examples.
 
 ### Core Loop
 
@@ -114,6 +114,19 @@ The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog 
 Dialogs (`alert`/`confirm`/`prompt`) are auto-handled by the daemon.
 
 Popup windows (target="_blank", window.open) are auto-detected. Run `bp tabs` to see and switch to them.
+
+### Network
+
+| Command | Description |
+|---------|-------------|
+| `bp net` | List recent requests (`--url`, `--method`, `--status`, `--type`) |
+| `bp net show <id>` | Full request/response details (`--save <file>`) |
+| `bp net block <pattern>` | Block requests matching URL pattern |
+| `bp net mock <pattern>` | Mock responses (`--body`, `--file`, `--status`) |
+| `bp net headers <pattern> <header...>` | Add/override request headers |
+| `bp net rules` | List active interception rules |
+| `bp net remove [id]` | Remove rule(s) (`--all`) |
+| `bp net clear` | Clear captured request log |
 
 ### Session
 
@@ -177,6 +190,34 @@ echo 'complex js here' | bp eval                    # stdin for complex JS
 bp open https://images.google.com
 bp click 5                        # click "Search by image"
 bp upload ~/Downloads/photo.jpg    # auto-finds file input, triggers upload
+```
+
+## Network Interception
+
+Monitor, block, and mock HTTP requests:
+
+```bash
+# Monitor traffic
+bp net                                 # list recent requests
+bp net --url "*api*" --method POST     # filter by URL and method
+bp net show 3                          # full details + response body
+
+# Block requests
+bp net block "*tracking*"              # block analytics/tracking
+bp net block "*ads*"
+
+# Mock API responses
+bp net mock "*api/data*" --body '{"ok":true}'
+bp net mock "*api/users*" --file mock.json --status 200
+
+# Override request headers
+bp net headers "*api*" "Authorization:Bearer test123"
+
+# Manage rules
+bp net rules                           # list active rules
+bp net remove 2                        # remove rule #2
+bp net remove --all                    # clear all rules
+bp net clear                           # clear captured request log
 ```
 
 ## Requirements
