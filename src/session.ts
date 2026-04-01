@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { DaemonClient, isDaemonRunning } from './client.js';
 import { discoverChrome } from './chrome.js';
 import { loadState, saveState, clearState, type PilotState } from './state.js';
+import { INJECT_BORDER } from './page-scripts.js';
 import type { Transport } from './transport.js';
 
 export { saveState, clearState, type PilotState } from './state.js';
@@ -72,6 +73,8 @@ async function ensureSession(client: DaemonClient, state: PilotState): Promise<s
   });
   // Enable Page domain so daemon receives dialog events for this session
   await client.send('Page.enable', {}, sessionId).catch(() => {});
+  // Inject visual border indicator
+  await client.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
   state.activeSessionId = sessionId;
   saveState(state);
   return sessionId;
@@ -155,7 +158,11 @@ export async function waitForLoad(transport: Transport, sessionId: string, timeo
       const { result } = await transport.send('Runtime.evaluate', {
         expression: 'document.readyState',
       }, sessionId);
-      if (result.value === 'complete') return;
+      if (result.value === 'complete') {
+        // Re-inject border (navigation destroys the old page's DOM)
+        await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
+        return;
+      }
     } catch { /* page navigating */ }
     await new Promise(r => setTimeout(r, 200));
   }

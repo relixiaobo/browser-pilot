@@ -3,7 +3,7 @@ import { writeFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
-import { GET_CLICK_COORDS, SET_VALUE, FOCUS_AND_CLEAR, PAGE_DIMENSIONS, elementRect } from './page-scripts.js';
+import { GET_CLICK_COORDS, SET_VALUE, FOCUS_AND_CLEAR, PAGE_DIMENSIONS, INJECT_BORDER, elementRect } from './page-scripts.js';
 import type { Transport } from './transport.js';
 
 const program = new Command();
@@ -114,7 +114,10 @@ async function snap(t: Transport, sid: string, tid: string, limit?: number): Pro
   while (Date.now() < deadline) {
     try {
       const { result } = await t.send('Runtime.evaluate', { expression: 'document.readyState' }, sid);
-      if (result.value === 'complete') break;
+      if (result.value === 'complete') {
+        await t.send('Runtime.evaluate', { expression: INJECT_BORDER }, sid).catch(() => {});
+        break;
+      }
     } catch { /* page navigating, context destroyed — retry */ }
     await new Promise(r => setTimeout(r, 200));
   }
