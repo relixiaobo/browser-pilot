@@ -70,6 +70,8 @@ async function ensureSession(client: DaemonClient, state: PilotState): Promise<s
   const { sessionId } = await client.send('Target.attachToTarget', {
     targetId: state.activeTargetId, flatten: true,
   });
+  // Enable Page domain so daemon receives dialog events for this session
+  await client.send('Page.enable', {}, sessionId).catch(() => {});
   state.activeSessionId = sessionId;
   saveState(state);
   return sessionId;

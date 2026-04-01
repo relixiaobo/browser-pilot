@@ -55,6 +55,16 @@ export class DaemonClient implements Transport {
     try { await this.request('/shutdown', {}); } catch { /* may already be gone */ }
   }
 
+  async dialogs(): Promise<any[]> {
+    const res = await this.request('/dialogs');
+    return res.dialogs ?? [];
+  }
+
+  async discoveredTargets(): Promise<Array<{ targetId: string; url: string; openerTargetId?: string }>> {
+    const res = await this.request('/discovered');
+    return res.targets ?? [];
+  }
+
   close(): void {
     // No-op — daemon manages the connection
   }

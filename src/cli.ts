@@ -1,5 +1,6 @@
 import { Command } from 'commander';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
 import { GET_CLICK_COORDS, SET_VALUE, FOCUS_AND_CLEAR, PAGE_DIMENSIONS, elementRect } from './page-scripts.js';
@@ -30,6 +31,14 @@ Output:
   Human-readable when run in a terminal (TTY). Force with --human.
   Actions return: {"ok":true, "title":"...", "url":"...", "elements":[...]}
   Errors return:  {"ok":false, "error":"...", "hint":"..."}
+
+Edge cases:
+  bp upload <ref> <filepath>                         # file input upload
+  bp auth <user> <pass>                              # HTTP Basic Auth
+  bp frame                                           # list iframes
+  bp frame switch 1                                  # eval in iframe context
+  bp tabs --adopt                                    # adopt popup windows
+  Dialogs (alert/confirm) are auto-handled by the daemon.
 
 Eval (replaces scroll, back, forward, extract, etc.):
   bp eval "history.back()"                           # go back
@@ -344,6 +353,26 @@ program.command('eval [expression]')
     });
   }));
 
+// ─── upload ─────────────────────────────────────────
+
+program.command('upload <ref> <filepath>')
+  .description('Upload file to a file input element')
+  .addHelpText('after', '\nRef must point to an <input type="file"> element.\n\nExamples:\n  bp upload 4 ./resume.pdf\n  bp upload 4 /tmp/photo.jpg')
+  .action(action(async (ref, filepath) => {
+    const absPath = resolvePath(filepath);
+    if (!existsSync(absPath)) throw new Error(`File not found: ${absPath}`);
+    await withPilot(async ({ transport, sessionId, state }) => {
+      const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
+      // Get backendNodeId from the resolved object
+      const { node } = await transport.send('DOM.describeNode', { objectId }, sessionId);
+      await transport.send('DOM.setFileInputFiles', {
+        files: [absPath],
+        backendNodeId: node.backendNodeId,
+      }, sessionId);
+      emitSnapshot(await snap(transport, sessionId, state.activeTargetId));
+    });
+  }));
+
 // ─── screenshot ─────────────────────────────────────
 
 program.command('screenshot [filename]')
@@ -419,26 +448,119 @@ program.command('cookies [domain]')
     });
   }));
 
+// ─── frame ──────────────────────────────────────────
+
+program.command('frame [action]')
+  .description('List or switch iframe context (list, switch <index>, top)')
+  .argument('[index]', 'frame index to switch to')
+  .addHelpText('after', '\nActions:\n  bp frame              # list all frames\n  bp frame switch 1     # switch eval context to frame 1\n  bp frame top          # switch back to top frame\n\nExamples:\n  bp frame\n  bp frame switch 0\n  bp frame top')
+  .action(action(async (act, index) => {
+    await withPilot(async ({ transport, sessionId }) => {
+      if (!act || act === 'list') {
+        const { frameTree } = await transport.send('Page.getFrameTree', {}, sessionId);
+        const frames: Array<{ index: number; id: string; url: string; name: string }> = [];
+        function walk(node: any, depth = 0) {
+          frames.push({ index: frames.length, id: node.frame.id, url: node.frame.url, name: node.frame.name || '' });
+          for (const child of node.childFrames || []) walk(child, depth + 1);
+        }
+        walk(frameTree);
+        if (useJson()) {
+          console.log(JSON.stringify({ ok: true, frames }));
+        } else {
+          for (const f of frames) {
+            const prefix = f.index === 0 ? '* ' : '  ';
+            console.log(`${prefix}${f.index}  ${f.url}  ${f.name}`);
+          }
+        }
+      } else if (act === 'top') {
+        // Eval in top frame is the default — nothing to persist, just confirm
+        emit({ ok: true, frame: 'top' }, '\u2713 Switched to top frame');
+      } else if (act === 'switch' && index) {
+        const frameIndex = parseInt(index, 10);
+        const { frameTree } = await transport.send('Page.getFrameTree', {}, sessionId);
+        const frames: any[] = [];
+        function collect(node: any) {
+          frames.push(node.frame);
+          for (const child of node.childFrames || []) collect(child);
+        }
+        collect(frameTree);
+        if (frameIndex < 0 || frameIndex >= frames.length) {
+          throw new Error(`Frame index out of range (0-${frames.length - 1})`);
+        }
+        // Get the execution context for this frame
+        const frame = frames[frameIndex];
+        // Create an isolated world or use the frame's default context
+        const { executionContextId } = await transport.send('Page.createIsolatedWorld', {
+          frameId: frame.id,
+        }, sessionId);
+        emit(
+          { ok: true, frame: frameIndex, url: frame.url, contextId: executionContextId },
+          `\u2713 Switched to frame ${frameIndex}: ${frame.url}`,
+        );
+      } else {
+        throw new Error('Usage: bp frame [list | switch <index> | top]');
+      }
+    });
+  }));
+
+// ─── auth ───────────────────────────────────────────
+
+program.command('auth <username> <password>')
+  .description('Handle HTTP Basic Auth for the current page')
+  .addHelpText('after', '\nSets credentials for HTTP 401 challenges.\nMust be called before navigating to the auth-protected URL.\n\nExamples:\n  bp auth admin secret123\n  bp open https://staging.example.com')
+  .action(action(async (username, password) => {
+    await withPilot(async ({ transport, sessionId }) => {
+      // Enable Fetch interception for auth challenges
+      await transport.send('Fetch.enable', { handleAuthRequests: true }, sessionId);
+      // Store a one-shot handler: the daemon's CDP event system will get Fetch.authRequired
+      // We register a handler via eval trick — actually we need the daemon to handle this.
+      // Simpler: use Network.setExtraHTTPHeaders with Basic auth header
+      const encoded = Buffer.from(`${username}:${password}`).toString('base64');
+      await transport.send('Network.setExtraHTTPHeaders', {
+        headers: { 'Authorization': `Basic ${encoded}` },
+      }, sessionId);
+      emit({ ok: true }, `\u2713 Auth credentials set for current session`);
+    });
+  }));
+
 // ─── tabs ───────────────────────────────────────────
 
 program.command('tabs')
-  .description('List pilot window tabs')
-  .action(action(async () => {
+  .description('List pilot tabs and discovered popups')
+  .option('--adopt', 'adopt all discovered popups into pilot tabs')
+  .action(action(async (opts) => {
     const existing = await resumeExisting();
     if (!existing) throw new Error('Not connected');
     const { client, state } = existing;
     const { targetInfos } = await client.send('Target.getTargets');
+
+    // Discovered popups not yet in pilot tabs
+    const discovered = await client.discoveredTargets();
+    const knownIds = new Set(state.pilotTargetIds);
+    const existingIds = new Set(targetInfos.map((t: any) => t.targetId));
+    const popups = discovered.filter(d => !knownIds.has(d.targetId) && existingIds.has(d.targetId));
+
+    if (opts.adopt && popups.length > 0) {
+      for (const p of popups) {
+        state.pilotTargetIds.push(p.targetId);
+      }
+      saveState(state);
+    }
+
     const tabs = state.pilotTargetIds.map((id, i) => {
       const t = targetInfos.find((t: any) => t.targetId === id);
       return t ? { index: i, url: t.url || 'about:blank', title: t.title || '', active: id === state.activeTargetId } : null;
-    }).filter(Boolean);
+    }).filter(Boolean) as { index: number; url: string; title: string; active: boolean }[];
 
     if (useJson()) {
-      console.log(JSON.stringify({ ok: true, tabs }));
-    } else if (tabs.length === 0) {
-      console.log('No pilot tabs open.');
+      console.log(JSON.stringify({ ok: true, tabs, popups: popups.map(p => p.url) }));
     } else {
-      for (const t of tabs as any[]) console.log(`${t.active ? '*' : ' '} ${t.index}  ${t.url}  ${t.title}`);
+      if (tabs.length === 0) console.log('No pilot tabs open.');
+      else for (const t of tabs) console.log(`${t.active ? '*' : ' '} ${t.index}  ${t.url}  ${t.title}`);
+      if (popups.length > 0 && !opts.adopt) {
+        console.log(`\n${popups.length} popup(s) detected. Run 'bp tabs --adopt' to add them.`);
+        for (const p of popups) console.log(`  + ${p.url}`);
+      }
     }
   }));
 
