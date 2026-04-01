@@ -61,6 +61,12 @@ async function verifyPilotTargets(client: DaemonClient, state: PilotState): Prom
   return true;
 }
 
+/** Run once after attaching to any target: Page.enable + border overlay. */
+export async function initSession(transport: Transport, sessionId: string): Promise<void> {
+  await transport.send('Page.enable', {}, sessionId).catch(() => {});
+  await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
+}
+
 async function ensureSession(client: DaemonClient, state: PilotState): Promise<string> {
   if (state.activeSessionId) {
     try {
@@ -71,10 +77,7 @@ async function ensureSession(client: DaemonClient, state: PilotState): Promise<s
   const { sessionId } = await client.send('Target.attachToTarget', {
     targetId: state.activeTargetId, flatten: true,
   });
-  // Enable Page domain so daemon receives dialog events for this session
-  await client.send('Page.enable', {}, sessionId).catch(() => {});
-  // Inject visual border indicator
-  await client.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
+  await initSession(client, sessionId);
   state.activeSessionId = sessionId;
   saveState(state);
   return sessionId;
@@ -100,6 +103,7 @@ export async function connectFresh(browserFilter?: string): Promise<{ client: Da
   const { sessionId } = await client.send('Target.attachToTarget', {
     targetId, flatten: true,
   });
+  await initSession(client, sessionId);
 
   const state: PilotState = {
     wsEndpoint: chrome.wsUrl,

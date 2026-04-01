@@ -1,9 +1,9 @@
 import { Command } from 'commander';
 import { writeFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState } from './session.js';
+import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
-import { GET_CLICK_COORDS, SET_VALUE, FOCUS_AND_CLEAR, PAGE_DIMENSIONS, INJECT_BORDER, elementRect } from './page-scripts.js';
+import { GET_CLICK_COORDS, SET_VALUE, FOCUS_AND_CLEAR, PAGE_DIMENSIONS, elementRect } from './page-scripts.js';
 import type { Transport } from './transport.js';
 
 const program = new Command();
@@ -108,19 +108,9 @@ function readStdin(): Promise<string> {
 }
 
 async function snap(t: Transport, sid: string, tid: string, limit?: number): Promise<SnapshotResult> {
-  // Wait for page to settle (click/press may trigger navigation)
-  await new Promise(r => setTimeout(r, 500));
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    try {
-      const { result } = await t.send('Runtime.evaluate', { expression: 'document.readyState' }, sid);
-      if (result.value === 'complete') {
-        await t.send('Runtime.evaluate', { expression: INJECT_BORDER }, sid).catch(() => {});
-        break;
-      }
-    } catch { /* page navigating, context destroyed — retry */ }
-    await new Promise(r => setTimeout(r, 200));
-  }
+  // Brief pause for DOM to settle after click/press, then wait for load
+  await new Promise(r => setTimeout(r, 300));
+  await waitForLoad(t, sid, 10_000);
   return takeSnapshot(t, sid, tid, limit);
 }
 
@@ -186,7 +176,7 @@ async function dispatchKey(t: Transport, sid: string, combo: string): Promise<vo
 }
 
 // ═══════════════════════════════════════════════════════
-//  12 COMMANDS
+//  COMMANDS
 // ═══════════════════════════════════════════════════════
 
 // ─── connect ────────────────────────────────────────
@@ -239,6 +229,7 @@ program.command('open <url>')
       if (opts.new) {
         const { targetId } = await transport.send('Target.createTarget', { url });
         const r = await transport.send('Target.attachToTarget', { targetId, flatten: true });
+        await initSession(transport, r.sessionId);
         state.pilotTargetIds.push(targetId);
         state.activeTargetId = targetId;
         state.activeSessionId = r.sessionId;
@@ -512,25 +503,23 @@ program.command('frame [action]')
 
 // ─── auth ───────────────────────────────────────────
 
-program.command('auth <username> <password>')
-  .description('Handle HTTP Basic Auth for the current page')
-  .addHelpText('after', '\nSets credentials for HTTP 401 challenges.\nCall before navigating to the auth-protected URL.\nCredentials are scoped to auth challenges only (not sent on every request).\n\nExamples:\n  bp auth admin secret123\n  bp open https://staging.example.com\n  bp auth --clear')
+program.command('auth [username] [password]')
+  .description('Set or clear HTTP Basic Auth credentials')
   .option('--clear', 'clear stored credentials')
+  .addHelpText('after', '\nSets credentials for HTTP 401 challenges.\nCall before navigating to the auth-protected URL.\n\nExamples:\n  bp auth admin secret123\n  bp open https://staging.example.com\n  bp auth --clear')
   .action(action(async (username, password, opts) => {
     const existing = await resumeExisting();
     if (!existing) throw new Error('Not connected');
     const { client, state } = existing;
-    if (opts.clear) {
+    if (opts.clear || !username) {
       await client.clearAuth();
       emit({ ok: true }, '\u2713 Auth credentials cleared');
       return;
     }
-    // Store credentials in daemon for Fetch.authRequired handling
+    if (!password) throw new Error('Usage: bp auth <username> <password>');
     await client.setAuth(username, password);
-    // Enable Fetch with auth interception on the active session
-    const sessionId = state.activeSessionId;
-    if (sessionId) {
-      await client.send('Fetch.enable', { handleAuthRequests: true }, sessionId);
+    if (state.activeSessionId) {
+      await client.send('Fetch.enable', { handleAuthRequests: true }, state.activeSessionId);
     }
     emit({ ok: true }, '\u2713 Auth credentials set (scoped to HTTP 401 challenges)');
   }));
@@ -590,6 +579,7 @@ program.command('tab <index>')
     }
     state.activeTargetId = state.pilotTargetIds[index];
     state.activeSessionId = undefined;
+    state.frameContextId = undefined;
     saveState(state);
     await client.send('Target.activateTarget', { targetId: state.activeTargetId });
     emit({ ok: true, index }, `\u2713 Switched to tab ${index}`);
@@ -616,6 +606,7 @@ program.command('close')
       if (state.pilotTargetIds.length > 0) {
         state.activeTargetId = state.pilotTargetIds[0];
         state.activeSessionId = undefined;
+        state.frameContextId = undefined;
         saveState(state);
         emit({ ok: true, remaining: state.pilotTargetIds.length }, '\u2713 Tab closed');
       } else {
