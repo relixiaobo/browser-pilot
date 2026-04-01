@@ -337,61 +337,6 @@ program.command('eval [expression]')
     });
   }));
 
-// ─── read ───────────────────────────────────────────
-
-program.command('read')
-  .description('Extract main article content from page (strips nav, ads, boilerplate)')
-  .option('--html', 'return cleaned HTML instead of plain text')
-  .addHelpText('after', '\nUses Defuddle to extract the article body, stripping navigation,\nadvertisements, sidebars, and other boilerplate.\n\nExamples:\n  bp read              # plain text content\n  bp read --html       # cleaned HTML')
-  .action(action(async (opts) => {
-    await withPilot(async ({ transport, sessionId }) => {
-      // Inject defuddle bundle (idempotent — checks __defuddle_loaded)
-      const { DEFUDDLE_BUNDLE } = await import('./defuddle-bundle.js');
-      await transport.send('Runtime.evaluate', { expression: DEFUDDLE_BUNDLE }, sessionId);
-
-      // Extract content
-      const { result, exceptionDetails } = await transport.send('Runtime.evaluate', {
-        expression: `JSON.stringify((() => {
-          const r = new Defuddle(document, { url: location.href }).parse();
-          return { title: r.title, author: r.author, published: r.published,
-                   wordCount: r.wordCount, content: r.content };
-        })())`,
-        returnByValue: true,
-      }, sessionId);
-
-      if (exceptionDetails) throw new Error('Defuddle extraction failed');
-      const data = JSON.parse(result.value);
-
-      if (useJson()) {
-        console.log(JSON.stringify({ ok: true, ...data }));
-      } else {
-        if (data.title) console.log(`# ${data.title}\n`);
-        if (data.author || data.published) {
-          console.log([data.author, data.published].filter(Boolean).join(' | ') + '\n');
-        }
-        // Convert HTML to plain text for human output
-        if (opts.html) {
-          console.log(data.content);
-        } else {
-          // Strip HTML tags for plain text
-          const text = data.content
-            .replace(/<br\s*\/?>/gi, '\n')
-            .replace(/<\/p>/gi, '\n\n')
-            .replace(/<[^>]+>/g, '')
-            .replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
-          console.log(text);
-        }
-        console.log(`\n[${data.wordCount} words]`);
-      }
-    });
-  }));
-
 // ─── upload ─────────────────────────────────────────
 
 program.command('upload <filepath>')
