@@ -339,20 +339,39 @@ program.command('eval [expression]')
 
 // ─── upload ─────────────────────────────────────────
 
-program.command('upload <ref> <filepath>')
-  .description('Upload file to a file input element')
-  .addHelpText('after', '\nRef must point to an <input type="file"> element.\n\nExamples:\n  bp upload 4 ./resume.pdf\n  bp upload 4 /tmp/photo.jpg')
-  .action(action(async (ref, filepath) => {
+program.command('upload <filepath>')
+  .description('Upload file (auto-finds <input type="file"> on the page)')
+  .option('--nth <n>', 'which file input to use if multiple exist', '1')
+  .addHelpText('after', '\nAuto-detects file inputs on the page. No ref needed.\n\nExamples:\n  bp upload ./photo.jpg\n  bp upload /tmp/resume.pdf\n  bp upload ./doc.pdf --nth 2    # if multiple file inputs')
+  .action(action(async (filepath, opts) => {
     const absPath = resolvePath(filepath);
     if (!existsSync(absPath)) throw new Error(`File not found: ${absPath}`);
     await withPilot(async ({ transport, sessionId, state }) => {
-      const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
-      // Get backendNodeId from the resolved object
-      const { node } = await transport.send('DOM.describeNode', { objectId }, sessionId);
+      // Auto-find all <input type="file"> elements
+      const { result } = await transport.send('Runtime.evaluate', {
+        expression: `JSON.stringify(Array.from(document.querySelectorAll('input[type=file]')).map((el,i) => ({index:i+1, name:el.name||el.id||'unnamed', accept:el.accept||'*'})))`,
+        returnByValue: true,
+      }, sessionId);
+      const inputs: Array<{ index: number; name: string; accept: string }> = JSON.parse(result.value);
+
+      if (inputs.length === 0) throw new Error('No <input type="file"> found on this page.');
+
+      const nth = parseInt(opts.nth, 10);
+      if (nth < 1 || nth > inputs.length) {
+        const list = inputs.map(i => `  ${i.index}. ${i.name} (${i.accept})`).join('\n');
+        throw new Error(`${inputs.length} file input(s) found. Use --nth to choose:\n${list}`);
+      }
+
+      // Resolve the nth file input
+      const { result: elResult } = await transport.send('Runtime.evaluate', {
+        expression: `document.querySelectorAll('input[type=file]')[${nth - 1}]`,
+      }, sessionId);
+      const { node } = await transport.send('DOM.describeNode', { objectId: elResult.objectId }, sessionId);
       await transport.send('DOM.setFileInputFiles', {
         files: [absPath],
         backendNodeId: node.backendNodeId,
       }, sessionId);
+
       emitSnapshot(await snap(transport, sessionId, state.activeTargetId));
     });
   }));
