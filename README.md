@@ -17,7 +17,7 @@ bp eval "document.title"          # run any JavaScript
 | **Login session reuse** | Yes | No | Depends | Yes |
 | **Element refs** | Numbered (accessibility tree) | Named refs (ARIA) | CSS selectors | Numbered (DOM) |
 | **Auto-snapshot after action** | Yes | Yes | No | Yes |
-| **Network interception** | No | Yes | Yes | No |
+| **Network interception** | Yes (block/mock/headers) | Yes | Yes | No |
 | **Drag and drop** | No | Yes | Yes | No |
 | **Mobile emulation** | No | Yes | Yes | Yes |
 | **Multi-browser** | Chromium-only | Chromium + Firefox + WebKit | Chromium-only | Chromium-only |
