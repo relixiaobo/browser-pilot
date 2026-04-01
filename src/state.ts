@@ -7,6 +7,7 @@ export interface PilotState {
   pilotTargetIds: string[];
   activeTargetId: string;
   activeSessionId?: string;
+  frameContextId?: number;  // set by `bp frame switch`, used by `bp eval`
 }
 
 export function loadState(): PilotState | null {

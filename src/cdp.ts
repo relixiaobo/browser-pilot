@@ -38,12 +38,12 @@ export class CDPClient implements Transport {
           // Fire handlers with session-scoped key
           if (msg.sessionId) {
             for (const h of this.eventHandlers.get(`${msg.sessionId}:${msg.method}`) ?? []) {
-              h(msg.params);
+              h(msg.params, msg.sessionId);
             }
           }
           // Fire handlers without session scope (catch-all)
           for (const h of this.eventHandlers.get(msg.method) ?? []) {
-            h(msg.params);
+            h(msg.params, msg.sessionId);
           }
         }
       });

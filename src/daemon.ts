@@ -27,6 +27,9 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 
 // ── Stateful event tracking ─────────────────────────
 
+// HTTP Basic Auth credentials (set via /auth endpoint)
+let authCredentials: { username: string; password: string } | null = null;
+
 interface DialogInfo {
   url: string;
   message: string;
@@ -48,21 +51,20 @@ async function main() {
 
   // ── Dialog auto-handling ──────────────────────────
   // Register on every session that gets attached
-  cdp.on('Page.javascriptDialogOpening', (params: any) => {
+  cdp.on('Page.javascriptDialogOpening', (params: any, sessionId?: string) => {
     const info: DialogInfo = {
       url: params.url,
       message: params.message,
       type: params.type,
       defaultPrompt: params.defaultPrompt || '',
+      sessionId,
       timestamp: Date.now(),
     };
     handledDialogs.push(info);
-    // Keep last 20
     if (handledDialogs.length > 20) handledDialogs.shift();
 
-    // Auto-accept (beforeunload needs accept to allow navigation; others dismiss is fine too)
-    // We accept all to avoid blocking — the LLM can check handledDialogs for context
-    cdp.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
+    // Auto-accept with correct sessionId (required for flattened sessions)
+    cdp.send('Page.handleJavaScriptDialog', { accept: true }, sessionId).catch(() => {});
   });
 
   // ── Popup / new window tracking ───────────────────
@@ -71,16 +73,47 @@ async function main() {
 
   cdp.on('Target.targetCreated', (params: any) => {
     const { targetInfo } = params;
-    if (targetInfo.type === 'page' && targetInfo.url !== 'about:blank') {
+    // Track all new page targets (popups start as about:blank then navigate)
+    if (targetInfo.type === 'page' && targetInfo.openerId) {
       discoveredTargets.push({
         targetId: targetInfo.targetId,
-        url: targetInfo.url,
+        url: targetInfo.url || 'about:blank',
         openerTargetId: targetInfo.openerId,
         timestamp: Date.now(),
       });
-      // Keep last 50
       if (discoveredTargets.length > 50) discoveredTargets.shift();
     }
+  });
+
+  // ── HTTP Auth handling ─────────────────────────────
+  cdp.on('Fetch.authRequired', (params: any, sessionId?: string) => {
+    if (authCredentials) {
+      cdp.send('Fetch.continueWithAuth', {
+        requestId: params.requestId,
+        authChallengeResponse: {
+          response: 'ProvideCredentials',
+          username: authCredentials.username,
+          password: authCredentials.password,
+        },
+      }, sessionId).catch(() => {});
+    } else {
+      cdp.send('Fetch.continueWithAuth', {
+        requestId: params.requestId,
+        authChallengeResponse: { response: 'CancelAuth' },
+      }, sessionId).catch(() => {});
+    }
+  });
+
+  // Continue non-auth paused requests (Fetch.enable intercepts all when handleAuthRequests is on)
+  cdp.on('Fetch.requestPaused', (params: any, sessionId?: string) => {
+    cdp.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId).catch(() => {});
+  });
+
+  // Update URL when targets navigate
+  cdp.on('Target.targetInfoChanged', (params: any) => {
+    const { targetInfo } = params;
+    const existing = discoveredTargets.find(d => d.targetId === targetInfo.targetId);
+    if (existing) existing.url = targetInfo.url;
   });
 
   // ── HTTP server ───────────────────────────────────
@@ -107,6 +140,16 @@ async function main() {
       if (req.method === 'GET' && req.url === '/dialogs') {
         res.writeHead(200);
         res.end(JSON.stringify({ dialogs: handledDialogs }));
+        return;
+      }
+
+      // Set auth credentials
+      if (req.method === 'POST' && req.url === '/auth') {
+        const body = await readBody(req);
+        const { username, password } = JSON.parse(body);
+        authCredentials = username ? { username, password } : null;
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true }));
         return;
       }
 

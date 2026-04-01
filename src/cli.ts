@@ -239,6 +239,7 @@ program.command('open <url>')
         state.pilotTargetIds.push(targetId);
         state.activeTargetId = targetId;
         state.activeSessionId = r.sessionId;
+        state.frameContextId = undefined;
         saveState(state);
         sid = r.sessionId;
         tid = targetId;
@@ -338,10 +339,10 @@ program.command('eval [expression]')
       expression = await readStdin();
       if (!expression) throw new Error('No expression. Pass as argument or pipe via stdin.');
     }
-    await withPilot(async ({ transport, sessionId }) => {
-      const { result, exceptionDetails } = await transport.send('Runtime.evaluate', {
-        expression, returnByValue: true, awaitPromise: true,
-      }, sessionId);
+    await withPilot(async ({ transport, sessionId, state }) => {
+      const evalParams: Record<string, any> = { expression, returnByValue: true, awaitPromise: true };
+      if (state.frameContextId) evalParams.contextId = state.frameContextId;
+      const { result, exceptionDetails } = await transport.send('Runtime.evaluate', evalParams, sessionId);
       if (exceptionDetails) {
         throw new Error(exceptionDetails.exception?.description || exceptionDetails.text || 'Evaluation error');
       }
@@ -455,7 +456,7 @@ program.command('frame [action]')
   .argument('[index]', 'frame index to switch to')
   .addHelpText('after', '\nActions:\n  bp frame              # list all frames\n  bp frame switch 1     # switch eval context to frame 1\n  bp frame top          # switch back to top frame\n\nExamples:\n  bp frame\n  bp frame switch 0\n  bp frame top')
   .action(action(async (act, index) => {
-    await withPilot(async ({ transport, sessionId }) => {
+    await withPilot(async ({ transport, sessionId, state }) => {
       if (!act || act === 'list') {
         const { frameTree } = await transport.send('Page.getFrameTree', {}, sessionId);
         const frames: Array<{ index: number; id: string; url: string; name: string }> = [];
@@ -473,7 +474,8 @@ program.command('frame [action]')
           }
         }
       } else if (act === 'top') {
-        // Eval in top frame is the default — nothing to persist, just confirm
+        state.frameContextId = undefined;
+        saveState(state);
         emit({ ok: true, frame: 'top' }, '\u2713 Switched to top frame');
       } else if (act === 'switch' && index) {
         const frameIndex = parseInt(index, 10);
@@ -493,6 +495,8 @@ program.command('frame [action]')
         const { executionContextId } = await transport.send('Page.createIsolatedWorld', {
           frameId: frame.id,
         }, sessionId);
+        state.frameContextId = executionContextId;
+        saveState(state);
         emit(
           { ok: true, frame: frameIndex, url: frame.url, contextId: executionContextId },
           `\u2713 Switched to frame ${frameIndex}: ${frame.url}`,
@@ -507,20 +511,25 @@ program.command('frame [action]')
 
 program.command('auth <username> <password>')
   .description('Handle HTTP Basic Auth for the current page')
-  .addHelpText('after', '\nSets credentials for HTTP 401 challenges.\nMust be called before navigating to the auth-protected URL.\n\nExamples:\n  bp auth admin secret123\n  bp open https://staging.example.com')
-  .action(action(async (username, password) => {
-    await withPilot(async ({ transport, sessionId }) => {
-      // Enable Fetch interception for auth challenges
-      await transport.send('Fetch.enable', { handleAuthRequests: true }, sessionId);
-      // Store a one-shot handler: the daemon's CDP event system will get Fetch.authRequired
-      // We register a handler via eval trick — actually we need the daemon to handle this.
-      // Simpler: use Network.setExtraHTTPHeaders with Basic auth header
-      const encoded = Buffer.from(`${username}:${password}`).toString('base64');
-      await transport.send('Network.setExtraHTTPHeaders', {
-        headers: { 'Authorization': `Basic ${encoded}` },
-      }, sessionId);
-      emit({ ok: true }, `\u2713 Auth credentials set for current session`);
-    });
+  .addHelpText('after', '\nSets credentials for HTTP 401 challenges.\nCall before navigating to the auth-protected URL.\nCredentials are scoped to auth challenges only (not sent on every request).\n\nExamples:\n  bp auth admin secret123\n  bp open https://staging.example.com\n  bp auth --clear')
+  .option('--clear', 'clear stored credentials')
+  .action(action(async (username, password, opts) => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const { client, state } = existing;
+    if (opts.clear) {
+      await client.clearAuth();
+      emit({ ok: true }, '\u2713 Auth credentials cleared');
+      return;
+    }
+    // Store credentials in daemon for Fetch.authRequired handling
+    await client.setAuth(username, password);
+    // Enable Fetch with auth interception on the active session
+    const sessionId = state.activeSessionId;
+    if (sessionId) {
+      await client.send('Fetch.enable', { handleAuthRequests: true }, sessionId);
+    }
+    emit({ ok: true }, '\u2713 Auth credentials set (scoped to HTTP 401 challenges)');
   }));
 
 // ─── tabs ───────────────────────────────────────────

@@ -65,6 +65,14 @@ export class DaemonClient implements Transport {
     return res.targets ?? [];
   }
 
+  async setAuth(username: string, password: string): Promise<void> {
+    await this.request('/auth', { username, password });
+  }
+
+  async clearAuth(): Promise<void> {
+    await this.request('/auth', { username: '', password: '' });
+  }
+
   close(): void {
     // No-op — daemon manages the connection
   }
