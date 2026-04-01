@@ -611,4 +611,142 @@ program.command('close')
     }
   }));
 
+// ─── net (network monitoring & interception) ────────
+
+const netCmd = program.command('net')
+  .description('Network monitoring and interception')
+  .option('-l, --limit <n>', 'max requests to show', '20')
+  .option('--url <pattern>', 'filter by URL wildcard')
+  .option('--method <method>', 'filter by HTTP method')
+  .option('--status <code>', 'filter by status (200, 4xx, 5xx)')
+  .option('--type <types>', 'filter by resource type (xhr,fetch,document)')
+  .option('--after <id>', 'show requests after this ID')
+  .addHelpText('after', '\nExamples:\n  bp net                              # list recent requests\n  bp net --url "*api*" --method POST  # filter\n  bp net show 3                       # full details + body\n  bp net block "*tracking*"           # block URLs\n  bp net mock "*api/data*" --body \'{"ok":true}\'\n  bp net rules                        # list active rules\n  bp net remove --all                 # clear rules')
+  .action(action(async (opts) => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const { client, state } = existing;
+    if (state.activeSessionId) await client.enableNetwork(state.activeSessionId);
+
+    const { requests, total } = await client.netRequests({
+      limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
+      url: opts.url, method: opts.method, status: opts.status, type: opts.type,
+      after: opts.after ? parseInt(opts.after, 10) : undefined,
+    });
+
+    if (useJson()) {
+      console.log(JSON.stringify({ ok: true, requests, total }));
+    } else if (requests.length === 0) {
+      console.log('No requests captured.');
+    } else {
+      console.log(` ${'#'.padStart(4)}  ${'METHOD'.padEnd(7)} ${'STATUS'.padEnd(7)} ${'TYPE'.padEnd(8)} ${'TIME'.padEnd(8)} URL`);
+      for (const r of requests) {
+        const time = r.time ? `${r.time}ms` : r.error ? 'FAIL' : '...';
+        const status = r.status ? String(r.status) : r.error ? 'ERR' : '...';
+        console.log(` ${String(r.id).padStart(4)}  ${r.method.padEnd(7)} ${status.padEnd(7)} ${(r.type || '').padEnd(8)} ${time.padEnd(8)} ${r.url}`);
+      }
+    }
+  }));
+
+netCmd.command('show <id>')
+  .description('Show full request/response details')
+  .option('--save <file>', 'save response body to file')
+  .action(action(async (idStr, opts) => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const { client } = existing;
+    const id = parseInt(idStr, 10);
+
+    if (opts.save) {
+      const { body } = await client.netBody(id);
+      writeFileSync(opts.save, body);
+      emit({ ok: true, file: opts.save }, `Saved to ${opts.save}`);
+      return;
+    }
+
+    const detail = await client.netRequestDetail(id);
+    let responseBody: string | undefined;
+    try { responseBody = (await client.netBody(id)).body; } catch { /* not available */ }
+
+    if (useJson()) {
+      console.log(JSON.stringify({ ok: true, ...detail, responseBody }));
+    } else {
+      console.log(`#${detail.id} ${detail.method} ${detail.url}`);
+      console.log(`Status: ${detail.status ?? 'pending'} ${detail.statusText ?? ''}`);
+      if (detail.postData) console.log(`\nRequest Body:\n${detail.postData}`);
+      if (responseBody) {
+        console.log(`\nResponse (${detail.mimeType}):`);
+        console.log(responseBody.length > 2000 ? responseBody.slice(0, 2000) + '\n... (truncated)' : responseBody);
+      }
+    }
+  }));
+
+netCmd.command('block <pattern>')
+  .description('Block requests matching URL pattern')
+  .action(action(async (pattern) => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const { rule } = await existing.client.netAddRule({ type: 'block', pattern });
+    emit({ ok: true, rule }, `Rule #${rule.id}: blocking "${pattern}"`);
+  }));
+
+netCmd.command('mock <pattern>')
+  .description('Mock responses for matching URLs')
+  .option('--body <json>', 'response body')
+  .option('--file <path>', 'read body from file')
+  .option('--status <code>', 'HTTP status', '200')
+  .action(action(async (pattern, opts) => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const { rule } = await existing.client.netAddRule({
+      type: 'mock', pattern, status: parseInt(opts.status, 10),
+      body: opts.body, file: opts.file,
+    });
+    emit({ ok: true, rule }, `Rule #${rule.id}: mocking "${pattern}" -> ${opts.status}`);
+  }));
+
+netCmd.command('headers <pattern> <header...>')
+  .description('Add/override request headers for matching URLs')
+  .action(action(async (pattern, headerStrs) => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const headers = headerStrs.map((h: string) => {
+      const [name, ...rest] = h.split(':');
+      return { name: name.trim(), value: rest.join(':').trim() };
+    });
+    const { rule } = await existing.client.netAddRule({ type: 'headers', pattern, headers });
+    emit({ ok: true, rule }, `Rule #${rule.id}: headers for "${pattern}"`);
+  }));
+
+netCmd.command('rules')
+  .description('List active interception rules')
+  .action(action(async () => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const { rules } = await existing.client.netRules();
+    if (useJson()) { console.log(JSON.stringify({ ok: true, rules })); }
+    else if (rules.length === 0) { console.log('No active rules.'); }
+    else { for (const r of rules) console.log(`  #${r.id}  ${r.type.toUpperCase()} "${r.pattern}"`); }
+  }));
+
+netCmd.command('remove [ruleId]')
+  .description('Remove interception rule(s)')
+  .option('-a, --all', 'remove all rules')
+  .action(action(async (ruleId, opts) => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    if (opts.all) { await existing.client.netRemoveRule(); emit({ ok: true }, 'All rules removed'); }
+    else if (ruleId) { await existing.client.netRemoveRule(parseInt(ruleId, 10)); emit({ ok: true }, `Rule #${ruleId} removed`); }
+    else throw new Error('Specify a rule ID or use --all');
+  }));
+
+netCmd.command('clear')
+  .description('Clear captured request log')
+  .action(action(async () => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    await existing.client.netClear();
+    emit({ ok: true }, 'Request log cleared');
+  }));
+
 program.parse();

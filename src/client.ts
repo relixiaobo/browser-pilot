@@ -73,6 +73,44 @@ export class DaemonClient implements Transport {
     await this.request('/auth', { username: '', password: '' });
   }
 
+  // ── Network methods ──────────────────────────────
+
+  async enableNetwork(sessionId: string): Promise<void> {
+    await this.request('/net/enable', { sessionId });
+  }
+
+  async netRequests(opts?: { limit?: number; url?: string; method?: string; status?: string; type?: string; after?: number }): Promise<{ requests: any[]; total: number }> {
+    const p = new URLSearchParams();
+    if (opts?.limit) p.set('limit', String(opts.limit));
+    if (opts?.url) p.set('url', opts.url);
+    if (opts?.method) p.set('method', opts.method);
+    if (opts?.status) p.set('status', opts.status);
+    if (opts?.type) p.set('type', opts.type);
+    if (opts?.after) p.set('after', String(opts.after));
+    const qs = p.toString();
+    return this.request(`/net/requests${qs ? '?' + qs : ''}`);
+  }
+
+  async netRequestDetail(id: number): Promise<any> {
+    return this.request(`/net/request/${id}`);
+  }
+
+  async netBody(id: number): Promise<{ id: number; body: string; mimeType: string }> {
+    return this.request(`/net/body/${id}`);
+  }
+
+  async netClear(): Promise<void> { await this.request('/net/clear', {}); }
+
+  async netAddRule(rule: { type: string; pattern: string; status?: number; body?: string; file?: string; headers?: Array<{ name: string; value: string }> }): Promise<any> {
+    return this.request('/net/rules', rule);
+  }
+
+  async netRules(): Promise<{ rules: any[] }> { return this.request('/net/rules'); }
+
+  async netRemoveRule(id?: number): Promise<void> {
+    await this.request('/net/rules/remove', id !== undefined ? { id } : { all: true });
+  }
+
   close(): void {
     // No-op — daemon manages the connection
   }
