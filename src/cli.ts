@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { writeFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
@@ -613,6 +613,15 @@ program.command('close')
 
 // ─── net (network monitoring & interception) ────────
 
+// Fix 5: shared helper — all net commands ensure network is enabled
+async function ensureNet() {
+  const existing = await resumeExisting();
+  if (!existing) throw new Error('Not connected');
+  const { client, state } = existing;
+  if (state.activeSessionId) await client.enableNetwork(state.activeSessionId);
+  return { client, state };
+}
+
 const netCmd = program.command('net')
   .description('Network monitoring and interception')
   .option('-l, --limit <n>', 'max requests to show', '20')
@@ -623,10 +632,7 @@ const netCmd = program.command('net')
   .option('--after <id>', 'show requests after this ID')
   .addHelpText('after', '\nExamples:\n  bp net                              # list recent requests\n  bp net --url "*api*" --method POST  # filter\n  bp net show 3                       # full details + body\n  bp net block "*tracking*"           # block URLs\n  bp net mock "*api/data*" --body \'{"ok":true}\'\n  bp net rules                        # list active rules\n  bp net remove --all                 # clear rules')
   .action(action(async (opts) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const { client, state } = existing;
-    if (state.activeSessionId) await client.enableNetwork(state.activeSessionId);
+    const { client } = await ensureNet();
 
     const { requests, total } = await client.netRequests({
       limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
@@ -652,9 +658,7 @@ netCmd.command('show <id>')
   .description('Show full request/response details')
   .option('--save <file>', 'save response body to file')
   .action(action(async (idStr, opts) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const { client } = existing;
+    const { client } = await ensureNet();
     const id = parseInt(idStr, 10);
 
     if (opts.save) {
@@ -684,9 +688,8 @@ netCmd.command('show <id>')
 netCmd.command('block <pattern>')
   .description('Block requests matching URL pattern')
   .action(action(async (pattern) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const { rule } = await existing.client.netAddRule({ type: 'block', pattern });
+    const { client } = await ensureNet();
+    const { rule } = await client.netAddRule({ type: 'block', pattern });
     emit({ ok: true, rule }, `Rule #${rule.id}: blocking "${pattern}"`);
   }));
 
@@ -696,11 +699,15 @@ netCmd.command('mock <pattern>')
   .option('--file <path>', 'read body from file')
   .option('--status <code>', 'HTTP status', '200')
   .action(action(async (pattern, opts) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const { rule } = await existing.client.netAddRule({
-      type: 'mock', pattern, status: parseInt(opts.status, 10),
-      body: opts.body, file: opts.file,
+    const { client } = await ensureNet();
+    let body = opts.body || '';
+    if (opts.file) {
+      const filePath = resolvePath(opts.file);
+      if (!existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
+      body = readFileSync(filePath, 'utf-8');
+    }
+    const { rule } = await client.netAddRule({
+      type: 'mock', pattern, status: parseInt(opts.status, 10), body,
     });
     emit({ ok: true, rule }, `Rule #${rule.id}: mocking "${pattern}" -> ${opts.status}`);
   }));
@@ -708,22 +715,20 @@ netCmd.command('mock <pattern>')
 netCmd.command('headers <pattern> <header...>')
   .description('Add/override request headers for matching URLs')
   .action(action(async (pattern, headerStrs) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
+    const { client } = await ensureNet();
     const headers = headerStrs.map((h: string) => {
       const [name, ...rest] = h.split(':');
       return { name: name.trim(), value: rest.join(':').trim() };
     });
-    const { rule } = await existing.client.netAddRule({ type: 'headers', pattern, headers });
+    const { rule } = await client.netAddRule({ type: 'headers', pattern, headers });
     emit({ ok: true, rule }, `Rule #${rule.id}: headers for "${pattern}"`);
   }));
 
 netCmd.command('rules')
   .description('List active interception rules')
   .action(action(async () => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const { rules } = await existing.client.netRules();
+    const { client } = await ensureNet();
+    const { rules } = await client.netRules();
     if (useJson()) { console.log(JSON.stringify({ ok: true, rules })); }
     else if (rules.length === 0) { console.log('No active rules.'); }
     else { for (const r of rules) console.log(`  #${r.id}  ${r.type.toUpperCase()} "${r.pattern}"`); }
@@ -733,19 +738,17 @@ netCmd.command('remove [ruleId]')
   .description('Remove interception rule(s)')
   .option('-a, --all', 'remove all rules')
   .action(action(async (ruleId, opts) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    if (opts.all) { await existing.client.netRemoveRule(); emit({ ok: true }, 'All rules removed'); }
-    else if (ruleId) { await existing.client.netRemoveRule(parseInt(ruleId, 10)); emit({ ok: true }, `Rule #${ruleId} removed`); }
+    const { client } = await ensureNet();
+    if (opts.all) { await client.netRemoveRule(); emit({ ok: true }, 'All rules removed'); }
+    else if (ruleId) { await client.netRemoveRule(parseInt(ruleId, 10)); emit({ ok: true }, `Rule #${ruleId} removed`); }
     else throw new Error('Specify a rule ID or use --all');
   }));
 
 netCmd.command('clear')
   .description('Clear captured request log')
   .action(action(async () => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    await existing.client.netClear();
+    const { client } = await ensureNet();
+    await client.netClear();
     emit({ ok: true }, 'Request log cleared');
   }));
 

@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
 import { STATE_DIR, SOCKET_PATH, PID_FILE } from './paths.js';
 import { CDPClient } from './cdp.js';
 
@@ -14,10 +14,11 @@ function cleanup() {
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
     req.on('end', () => resolve(body));
+    req.on('error', reject);
   });
 }
 
@@ -27,29 +28,17 @@ let authCredentials: { username: string; password: string } | null = null;
 
 interface DialogInfo { url: string; message: string; type: string; defaultPrompt: string; sessionId?: string; timestamp: number; }
 const handledDialogs: DialogInfo[] = [];
-
 const discoveredTargets: Array<{ targetId: string; url: string; openerTargetId?: string; timestamp: number }> = [];
 
 // ── Network monitoring state ────────────────────────
 
 interface TrackedRequest {
-  id: number;
-  networkId: string;
-  sessionId?: string;
-  method: string;
-  url: string;
-  type: string;
-  requestHeaders: Record<string, string>;
-  postData?: string;
-  status?: number;
-  statusText?: string;
-  responseHeaders?: Record<string, string>;
-  mimeType?: string;
-  size?: number;
-  startTime: number;
-  endTime?: number;
-  error?: string;
-  bodyAvailable: boolean;
+  id: number; networkId: string; sessionId?: string;
+  method: string; url: string; type: string;
+  requestHeaders: Record<string, string>; postData?: string;
+  status?: number; statusText?: string; responseHeaders?: Record<string, string>;
+  mimeType?: string; size?: number; startTime: number; endTime?: number;
+  error?: string; bodyAvailable: boolean;
 }
 
 let nextReqId = 1;
@@ -67,33 +56,44 @@ type InterceptRule = BlockRule | MockRule | HeaderRule;
 
 let nextRuleId = 1;
 const interceptRules: InterceptRule[] = [];
-let fetchEnabledForIntercept = false;
+const fetchEnabledSessions = new Set<string>(); // Fix 2: per-session tracking
 
 function wildcardMatch(url: string, pattern: string): boolean {
-  const re = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', 'i');
-  return re.test(url);
+  try {
+    const re = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', 'i');
+    return re.test(url);
+  } catch { return false; }
 }
 
 async function syncFetch(cdp: CDPClient, sessionId?: string) {
   if (!sessionId) return;
   const need = interceptRules.length > 0;
-  if (need && !fetchEnabledForIntercept) {
+  if (need) {
     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }], handleAuthRequests: !!authCredentials }, sessionId).catch(() => {});
-    fetchEnabledForIntercept = true;
-  } else if (!need && fetchEnabledForIntercept) {
+    fetchEnabledSessions.add(sessionId);
+  } else if (fetchEnabledSessions.has(sessionId)) {
     if (authCredentials) {
       await cdp.send('Fetch.enable', { handleAuthRequests: true }, sessionId).catch(() => {});
     } else {
       await cdp.send('Fetch.disable', {}, sessionId).catch(() => {});
     }
-    fetchEnabledForIntercept = false;
+    fetchEnabledSessions.delete(sessionId);
   }
 }
 
-function enableNetworkTracking(cdp: CDPClient, sessionId: string) {
-  if (networkEnabledSessions.has(sessionId)) return Promise.resolve();
+// Fix 4: only add to Set after success
+async function enableNetworkTracking(cdp: CDPClient, sessionId: string) {
+  if (!sessionId || networkEnabledSessions.has(sessionId)) return;
+  await cdp.send('Network.enable', { maxPostDataSize: 65536 }, sessionId);
   networkEnabledSessions.add(sessionId);
-  return cdp.send('Network.enable', { maxPostDataSize: 65536 }, sessionId);
+}
+
+// Ensure both Network + Fetch are enabled for a session
+async function ensureNetSession(cdp: CDPClient, sessionId: string) {
+  await enableNetworkTracking(cdp, sessionId);
+  if (interceptRules.length > 0 && !fetchEnabledSessions.has(sessionId)) {
+    await syncFetch(cdp, sessionId);
+  }
 }
 
 // ── Main ────────────────────────────────────────────
@@ -101,8 +101,6 @@ function enableNetworkTracking(cdp: CDPClient, sessionId: string) {
 async function main() {
   const cdp = new CDPClient();
   await cdp.connect(wsUrl);
-
-  // Track active session for Network.getResponseBody calls
   let activeSessionId: string | undefined;
 
   // ── Dialog auto-handling ──────────────────────────
@@ -134,29 +132,35 @@ async function main() {
     cdp.send('Fetch.continueWithAuth', { requestId: params.requestId, authChallengeResponse: resp }, sessionId).catch(() => {});
   });
 
-  // ── Fetch interception (rules + passthrough) ──────
+  // ── Fetch interception — Fix 1: try/catch with fallback ──
   cdp.on('Fetch.requestPaused', (params: any, sessionId?: string) => {
-    const url = params.request.url;
-    for (const rule of interceptRules) {
-      if (!wildcardMatch(url, rule.pattern)) continue;
-      if (rule.type === 'block') {
-        cdp.send('Fetch.failRequest', { requestId: params.requestId, reason: 'BlockedByClient' }, sessionId).catch(() => {});
-        return;
+    try {
+      const url = params.request?.url || '';
+      for (const rule of interceptRules) {
+        if (!wildcardMatch(url, rule.pattern)) continue;
+        if (rule.type === 'block') {
+          cdp.send('Fetch.failRequest', { requestId: params.requestId, reason: 'BlockedByClient' }, sessionId).catch(() => {});
+          return;
+        }
+        if (rule.type === 'mock') {
+          cdp.send('Fetch.fulfillRequest', { requestId: params.requestId, responseCode: rule.status, responseHeaders: rule.headers, body: rule.body }, sessionId).catch(() => {});
+          return;
+        }
+        if (rule.type === 'headers' && Array.isArray(rule.headers)) {
+          const existing = Object.entries(params.request?.headers || {}).map(([name, value]) => ({ name, value: value as string }));
+          const overrides = new Set(rule.headers.map(h => h.name.toLowerCase()));
+          const merged = existing.filter(h => !overrides.has(h.name.toLowerCase()));
+          merged.push(...rule.headers);
+          cdp.send('Fetch.continueRequest', { requestId: params.requestId, headers: merged }, sessionId).catch(() => {});
+          return;
+        }
       }
-      if (rule.type === 'mock') {
-        cdp.send('Fetch.fulfillRequest', { requestId: params.requestId, responseCode: rule.status, responseHeaders: rule.headers, body: rule.body }, sessionId).catch(() => {});
-        return;
-      }
-      if (rule.type === 'headers') {
-        const existing = Object.entries(params.request.headers || {}).map(([name, value]) => ({ name, value: value as string }));
-        const overrides = new Set(rule.headers.map(h => h.name.toLowerCase()));
-        const merged = existing.filter(h => !overrides.has(h.name.toLowerCase()));
-        merged.push(...rule.headers);
-        cdp.send('Fetch.continueRequest', { requestId: params.requestId, headers: merged }, sessionId).catch(() => {});
-        return;
-      }
+      // No rule matched — pass through
+      cdp.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId).catch(() => {});
+    } catch {
+      // Last resort: always resolve the paused request to prevent Chrome hang
+      cdp.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId).catch(() => {});
     }
-    cdp.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId).catch(() => {});
   });
 
   // ── Network monitoring events ─────────────────────
@@ -191,7 +195,10 @@ async function main() {
 
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    const url = new URL(req.url || '/', 'http://localhost');
+    let url: URL;
+    try { url = new URL(req.url || '/', 'http://localhost'); } catch {
+      res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid URL' })); return;
+    }
     try {
       // ── Core endpoints ────────────────────────────
       if (req.method === 'GET' && url.pathname === '/health') {
@@ -225,19 +232,20 @@ async function main() {
       if (req.method === 'POST' && url.pathname === '/net/enable') {
         const body = await readBody(req);
         const { sessionId } = JSON.parse(body);
-        await enableNetworkTracking(cdp, sessionId);
-        if (sessionId) activeSessionId = sessionId;
+        if (!sessionId) { res.writeHead(400); res.end(JSON.stringify({ error: 'sessionId required' })); return; }
+        activeSessionId = sessionId;
+        await ensureNetSession(cdp, sessionId);
         res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
       }
 
       // ── Network: list requests ────────────────────
       if (req.method === 'GET' && url.pathname === '/net/requests') {
-        const limit = parseInt(url.searchParams.get('limit') || '20', 10);
+        const limit = Math.max(1, parseInt(url.searchParams.get('limit') || '20', 10) || 20);
         const urlF = url.searchParams.get('url');
         const methodF = url.searchParams.get('method')?.toUpperCase();
         const statusF = url.searchParams.get('status');
         const typeF = url.searchParams.get('type')?.split(',').map(t => t.trim().toLowerCase());
-        const afterId = parseInt(url.searchParams.get('after') || '0', 10);
+        const afterId = Math.max(0, parseInt(url.searchParams.get('after') || '0', 10) || 0);
 
         let results = trackedRequests.slice();
         if (afterId > 0) results = results.filter(r => r.id > afterId);
@@ -245,7 +253,7 @@ async function main() {
         if (methodF) results = results.filter(r => r.method === methodF);
         if (statusF) {
           if (statusF.endsWith('xx')) { const p = parseInt(statusF[0], 10); results = results.filter(r => r.status && Math.floor(r.status / 100) === p); }
-          else { const c = parseInt(statusF, 10); results = results.filter(r => r.status === c); }
+          else { const c = parseInt(statusF, 10); if (!isNaN(c)) results = results.filter(r => r.status === c); }
         }
         if (typeF) results = results.filter(r => typeF.includes(r.type.toLowerCase()));
 
@@ -256,6 +264,7 @@ async function main() {
       // ── Network: request detail ────────────────────
       if (req.method === 'GET' && url.pathname.startsWith('/net/request/')) {
         const id = parseInt(url.pathname.split('/').pop()!, 10);
+        if (isNaN(id)) { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid request ID' })); return; }
         const entry = trackedRequests.find(r => r.id === id);
         if (!entry) { res.writeHead(404); res.end(JSON.stringify({ error: 'Request not found' })); return; }
         res.writeHead(200); res.end(JSON.stringify(entry)); return;
@@ -264,6 +273,7 @@ async function main() {
       // ── Network: response body ────────────────────
       if (req.method === 'GET' && url.pathname.startsWith('/net/body/')) {
         const id = parseInt(url.pathname.split('/').pop()!, 10);
+        if (isNaN(id)) { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid request ID' })); return; }
         const entry = trackedRequests.find(r => r.id === id);
         if (!entry) { res.writeHead(404); res.end(JSON.stringify({ error: 'Request not found' })); return; }
         if (!entry.bodyAvailable) { res.writeHead(400); res.end(JSON.stringify({ error: 'Body not available' })); return; }
@@ -279,16 +289,18 @@ async function main() {
         res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
       }
 
-      // ── Network: add rule ─────────────────────────
+      // ── Network: add rule (Fix 3: no file read in daemon) ──
       if (req.method === 'POST' && url.pathname === '/net/rules') {
         const b = JSON.parse(await readBody(req));
+        if (!b.pattern || typeof b.pattern !== 'string') { res.writeHead(400); res.end(JSON.stringify({ error: 'pattern is required' })); return; }
         let rule: InterceptRule;
         if (b.type === 'block') {
           rule = { id: nextRuleId++, type: 'block', pattern: b.pattern };
         } else if (b.type === 'mock') {
-          const content = b.file ? readFileSync(b.file, 'utf-8') : (b.body || '');
-          rule = { id: nextRuleId++, type: 'mock', pattern: b.pattern, status: b.status || 200, headers: b.headers || [{ name: 'Content-Type', value: 'application/json' }], body: Buffer.from(content).toString('base64') };
+          const content = b.body || '';
+          rule = { id: nextRuleId++, type: 'mock', pattern: b.pattern, status: b.status || 200, headers: Array.isArray(b.headers) ? b.headers : [{ name: 'Content-Type', value: 'application/json' }], body: Buffer.from(content).toString('base64') };
         } else if (b.type === 'headers') {
+          if (!Array.isArray(b.headers)) { res.writeHead(400); res.end(JSON.stringify({ error: 'headers array required' })); return; }
           rule = { id: nextRuleId++, type: 'headers', pattern: b.pattern, headers: b.headers };
         } else { res.writeHead(400); res.end(JSON.stringify({ error: `Unknown rule type: ${b.type}` })); return; }
         interceptRules.push(rule);
@@ -305,7 +317,7 @@ async function main() {
       if (req.method === 'POST' && url.pathname === '/net/rules/remove') {
         const b = JSON.parse(await readBody(req));
         if (b.all) { interceptRules.length = 0; }
-        else if (b.id !== undefined) {
+        else if (typeof b.id === 'number') {
           const idx = interceptRules.findIndex(r => r.id === b.id);
           if (idx >= 0) interceptRules.splice(idx, 1);
         }

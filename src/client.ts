@@ -101,7 +101,7 @@ export class DaemonClient implements Transport {
 
   async netClear(): Promise<void> { await this.request('/net/clear', {}); }
 
-  async netAddRule(rule: { type: string; pattern: string; status?: number; body?: string; file?: string; headers?: Array<{ name: string; value: string }> }): Promise<any> {
+  async netAddRule(rule: { type: string; pattern: string; status?: number; body?: string; headers?: Array<{ name: string; value: string }> }): Promise<any> {
     return this.request('/net/rules', rule);
   }
 
