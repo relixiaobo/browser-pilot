@@ -49,9 +49,11 @@ CLI Process ──── HTTP/Unix Socket ──── Daemon Process (persisten
 
 The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog appears once per session. All CLI commands go through the daemon — no repeated auth prompts.
 
+A pulsing blue glow around the Pilot window indicates the agent is active.
+
 ## Commands
 
-14 commands. Run `bp --help` for full details including workflow, refs, and eval examples.
+17 commands. Run `bp --help` for full details including workflow, refs, and eval examples.
 
 ### Core Loop
 
@@ -60,8 +62,8 @@ The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog 
 | `bp open <url>` | snapshot | Navigate to URL |
 | `bp snapshot` | snapshot | Get interactive elements |
 | `bp click <ref>` | snapshot | Click element by ref number |
-| `bp type <ref> <text>` | snapshot | Type into element |
-| `bp press <key>` | snapshot | Press key (Enter, Escape, Control+a) |
+| `bp type <ref> <text>` | snapshot | Type into element (`--clear`, `--submit`) |
+| `bp press <key>` | snapshot | Press key (Enter, Escape, Control+a, Meta+c) |
 | `bp eval [js]` | value | Run JavaScript (escape hatch for anything) |
 
 ### Utilities
@@ -69,8 +71,20 @@ The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog 
 | Command | Description |
 |---------|-------------|
 | `bp screenshot [file]` | Capture screenshot (`--full`, `--selector`) |
-| `bp pdf [file]` | Save page as PDF |
+| `bp pdf [file]` | Save page as PDF (`--landscape`) |
 | `bp cookies [domain]` | View cookies (includes HttpOnly) |
+
+### Edge Cases
+
+| Command | Description |
+|---------|-------------|
+| `bp upload <filepath>` | Upload file (auto-finds `<input type="file">`) |
+| `bp auth <user> <pass>` | Set HTTP Basic Auth credentials (`--clear`) |
+| `bp frame [index]` | List or switch iframe context (0 = top) |
+
+Dialogs (`alert`/`confirm`/`prompt`) are auto-handled by the daemon — no more 30s hangs.
+
+Popup windows (target="_blank", window.open) are auto-detected. Run `bp tabs` to see and switch to them.
 
 ### Session
 
@@ -78,9 +92,9 @@ The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog 
 |---------|-------------|
 | `bp connect` | Connect to Chrome, create pilot window |
 | `bp disconnect` | Close pilot window, stop daemon |
-| `bp tabs` | List pilot tabs |
+| `bp tabs` | List pilot tabs (auto-adopts popups) |
 | `bp tab <n>` | Switch tab |
-| `bp close` | Close current tab |
+| `bp close` | Close current tab (`--all`) |
 
 ## Refs
 
@@ -124,6 +138,16 @@ bp eval "document.querySelector('h1').textContent"   # extract text
 bp eval "document.querySelector('div').innerHTML"    # extract HTML
 bp eval "JSON.stringify(localStorage)"               # read storage
 echo 'complex js here' | bp eval                    # stdin for complex JS
+```
+
+## File Upload
+
+`bp upload` auto-detects `<input type="file">` on the page:
+
+```bash
+bp open https://images.google.com
+bp click 5                        # click "Search by image"
+bp upload ~/Downloads/photo.jpg    # auto-finds file input, triggers upload
 ```
 
 ## Requirements
