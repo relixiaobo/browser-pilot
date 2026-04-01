@@ -34,24 +34,25 @@ export const PAGE_DIMENSIONS = `JSON.stringify({
   height: Math.max(document.documentElement.scrollHeight, document.documentElement.clientHeight)
 })`;
 
-/** Inject pulsing top-bar overlay to indicate agent is active. */
+/** Inject pulsing glow overlay to indicate agent is active. CSP-safe via Web Animations API. */
 export const INJECT_BORDER = `(() => {
   if (document.getElementById('__bp_overlay')) return;
-  const s = document.createElement('style');
-  s.id = '__bp_style';
-  s.textContent = '@keyframes __bp{0%,100%{opacity:.5}50%{opacity:1}}';
-  document.head.appendChild(s);
   const d = document.createElement('div');
   d.id = '__bp_overlay';
   d.setAttribute('aria-hidden','true');
-  d.style.cssText = 'position:fixed;top:0;left:0;right:0;height:3px;pointer-events:none;z-index:2147483647;background:linear-gradient(90deg,#6366f1,#a855f7,#3b82f6,#6366f1);background-size:300% 100%;animation:__bp 2.5s ease-in-out infinite;';
+  d.setAttribute('role','presentation');
+  Object.assign(d.style, {position:'fixed',inset:'0',zIndex:'2147483647',pointerEvents:'none'});
   document.documentElement.appendChild(d);
+  try{d.animate([
+    {boxShadow:'inset 0 0 10px rgba(59,130,246,.5),inset 0 0 20px rgba(59,130,246,.3),inset 0 0 30px rgba(59,130,246,.1)'},
+    {boxShadow:'inset 0 0 15px rgba(59,130,246,.7),inset 0 0 25px rgba(59,130,246,.5),inset 0 0 35px rgba(59,130,246,.2)'},
+    {boxShadow:'inset 0 0 10px rgba(59,130,246,.5),inset 0 0 20px rgba(59,130,246,.3),inset 0 0 30px rgba(59,130,246,.1)'},
+  ],{duration:2500,iterations:Infinity,easing:'ease-in-out'})}catch(e){}
 })()`;
 
 /** Remove border overlay. */
 export const REMOVE_BORDER = `(() => {
   document.getElementById('__bp_overlay')?.remove();
-  document.getElementById('__bp_style')?.remove();
 })()`;
 
 /** Return bounding rect of a querySelector match (or null). */
