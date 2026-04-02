@@ -18,7 +18,7 @@ Open `chrome://inspect/#remote-debugging` in Chrome (144+) and click Allow. No c
 
 **Claude Code:**
 ```
-/plugin marketplace add relixiaobo/browser-pilot
+/plugin marketplace add https://github.com/relixiaobo/browser-pilot.git
 /plugin install browser-pilot@browser-pilot-marketplace
 ```
 

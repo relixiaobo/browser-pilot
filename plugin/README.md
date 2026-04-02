@@ -17,7 +17,7 @@ Enable Chrome remote debugging: open `chrome://inspect/#remote-debugging` and to
 Add this repo as a marketplace and install:
 
 ```
-/plugin marketplace add relixiaobo/browser-pilot
+/plugin marketplace add https://github.com/relixiaobo/browser-pilot.git
 /plugin install browser-pilot@browser-pilot-marketplace
 ```
 
