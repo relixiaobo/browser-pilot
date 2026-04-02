@@ -46,7 +46,7 @@ bp eval "document.title"          # run any JavaScript
 
 ```bash
 # Install
-npm install -g browser-pilot
+npm install -g browser-pilot-cli
 
 # Enable debugging in Chrome (one-time)
 # Open chrome://inspect/#remote-debugging → toggle ON
@@ -219,6 +219,37 @@ bp net remove 2                        # remove rule #2
 bp net remove --all                    # clear all rules
 bp net clear                           # clear captured request log
 ```
+
+## Agent Integration
+
+Install the plugin so your AI agent automatically learns to use `bp` via bash:
+
+### Claude Code
+
+```
+/plugin marketplace add relixiaobo/browser-pilot
+/plugin install browser-pilot@browser-pilot-marketplace
+```
+
+### Codex CLI
+
+```bash
+npx skills add relixiaobo/browser-pilot
+```
+
+### OpenClaw
+
+```bash
+cp -r plugin/skills/browser-pilot ~/.agents/skills/
+```
+
+### Cursor / VS Code Copilot
+
+```bash
+npx skills add relixiaobo/browser-pilot
+```
+
+After installation, just tell your agent to "open a website" or "browse https://..." — it knows how to use `bp`.
 
 ## Requirements
 
