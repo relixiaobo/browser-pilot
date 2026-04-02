@@ -16,9 +16,9 @@ snapshot of interactive elements with `[ref]` numbers you can use in follow-up c
 
 ## Prerequisites
 
-- `browser-pilot-cli` must be installed: `npm install -g browser-pilot-cli`
 - Chrome remote debugging must be enabled: `chrome://inspect/#remote-debugging` toggle ON
 - Run `bp connect` once per session (user clicks "Allow" in Chrome)
+- If `bp` command is not found, install it first: `npm install -g browser-pilot-cli`
 
 ## Core Workflow
 
