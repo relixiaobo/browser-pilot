@@ -1,13 +1,59 @@
 # browser-pilot
 
-CLI tool that gives LLM agents control of your real browser — with your logins, cookies, and extensions intact.
+Give your AI agent control of your real browser — with your logins, cookies, and extensions intact. No extension needed.
 
 ```bash
-bp open https://github.com       # navigate — returns interactive elements
-bp click 3                        # click [3] — returns updated page
-bp type 5 "hello" --submit        # type + Enter — returns updated page
-bp eval "document.title"          # run any JavaScript
+npm install -g browser-pilot-cli
 ```
+
+## Agent Setup
+
+### 1. Enable Chrome remote debugging (one-time)
+
+Open `chrome://inspect/#remote-debugging` in Chrome (144+) and click Allow. No command-line flags, no restart needed.
+
+> Chrome 136 disabled the old `--remote-debugging-port` flag for security. Chrome 144 introduced this new UI toggle as the replacement — browser-pilot uses this.
+
+### 2. Install the plugin for your agent
+
+**Claude Code:**
+```
+/plugin marketplace add relixiaobo/browser-pilot
+/plugin install browser-pilot@browser-pilot-marketplace
+```
+
+**Codex CLI:**
+```bash
+npx skills add relixiaobo/browser-pilot
+```
+
+**OpenClaw:**
+```bash
+cp -r plugin/skills/browser-pilot ~/.agents/skills/
+```
+
+**Cursor / VS Code Copilot:**
+```bash
+npx skills add relixiaobo/browser-pilot
+```
+
+### 3. Use it
+
+Just tell your agent what you want to do:
+
+- "Open GitHub and check my notifications"
+- "Go to Hacker News and summarize the top 5 posts"
+- "Fill out the form on this page"
+
+The agent will use `bp` commands automatically. Your real login sessions are preserved — no need to re-authenticate.
+
+## Why browser-pilot?
+
+- **No extension required** — Uses Chrome 144's native remote debugging toggle, not the Extension Debugger API
+- **Real login sessions** — Operates your actual browser profile. Cookies, extensions, logins all intact
+- **CLI-native** — Any agent with bash access can use it. No MCP protocol, no SDK integration needed
+- **Auto-snapshot** — Every action returns page state with numbered `[ref]` elements, so the agent always knows what's on screen
+- **Lightweight** — 78KB npm package. No bundled Chromium (unlike Playwright's 400MB+)
 
 ## Comparison
 
@@ -15,74 +61,33 @@ bp eval "document.title"          # run any JavaScript
 |---|---|---|---|---|
 | **Interface** | CLI (bash) | MCP protocol | MCP protocol | Python SDK |
 | **Login session reuse** | Yes | No | Depends | Yes |
+| **Extension required** | No | No | No | No |
 | **Element refs** | Numbered (accessibility tree) | Named refs (ARIA) | CSS selectors | Numbered (DOM) |
 | **Auto-snapshot after action** | Yes | Yes | No | Yes |
 | **Network interception** | Yes (block/mock/headers) | Yes | Yes | No |
-| **Drag and drop** | No | Yes | Yes | No |
-| **Mobile emulation** | No | Yes | Yes | Yes |
 | **Multi-browser** | Chromium-only | Chromium + Firefox + WebKit | Chromium-only | Chromium-only |
-| **Connection model** | Daemon (one-time Allow) | MCP server | MCP server | Python process |
 | **Dialog auto-handling** | Yes | Yes | No | Yes |
 | **JSON output** | Default | MCP structured | MCP structured | Python objects |
-| **Visual indicator** | Pulsing glow | None | None | None |
 | **File upload** | Auto-detect input | Yes | No | Yes |
-| **Autonomous agent** | No (tool, not agent) | No (tool) | No (tool) | Yes (plans + executes) |
-
-**browser-pilot is best when:**
-- You need your existing login sessions (paywalled content, internal tools)
-- Your LLM has bash access but no MCP support
-- You want every action to return page state automatically
-
-**Use Playwright MCP when:**
-- You need multi-browser or mobile emulation
-- Your LLM supports MCP natively
-- You don't need existing login sessions
-
-**Use browser-use when:**
-- You want an autonomous agent that plans and executes multi-step tasks
-- You're building in Python
-
-## Quick Start
-
-```bash
-# Install
-npm install -g browser-pilot-cli
-
-# Enable debugging in Chrome (one-time)
-# Open chrome://inspect/#remote-debugging → toggle ON
-
-# Connect (click Allow in Chrome's dialog)
-bp connect
-
-# Use
-bp open https://github.com
-bp click 3
-bp type 5 "hello" --submit
-bp eval "document.title"
-bp screenshot page.png
-bp disconnect
-```
 
 ## How It Works
 
 ```
-LLM (bash tool)
+Agent (bash tool)
   │  bp open / bp click / bp eval ...
   ▼
 CLI Process ──── HTTP/Unix Socket ──── Daemon Process (persistent)
                                            │
-                                           │  WebSocket (CDP, one-time Allow)
+                                           │  WebSocket (CDP)
                                            ▼
                                        Chrome (your browser, your profile)
                                        ├── Your windows (untouched)
-                                       └── Pilot window (bp operates here)
+                                       └── Pilot window (agent operates here)
 ```
 
-The daemon maintains a single CDP WebSocket connection. Chrome's "Allow" dialog appears once per session. A pulsing blue glow around the Pilot window indicates the agent is active.
+The daemon maintains a single CDP WebSocket connection. A pulsing blue glow around the Pilot window indicates the agent is active.
 
 ## Commands
-
-Run `bp --help` for full details including workflow, refs, and eval examples.
 
 ### Core Loop
 
@@ -220,42 +225,11 @@ bp net remove --all                    # clear all rules
 bp net clear                           # clear captured request log
 ```
 
-## Agent Integration
-
-Install the plugin so your AI agent automatically learns to use `bp` via bash:
-
-### Claude Code
-
-```
-/plugin marketplace add relixiaobo/browser-pilot
-/plugin install browser-pilot@browser-pilot-marketplace
-```
-
-### Codex CLI
-
-```bash
-npx skills add relixiaobo/browser-pilot
-```
-
-### OpenClaw
-
-```bash
-cp -r plugin/skills/browser-pilot ~/.agents/skills/
-```
-
-### Cursor / VS Code Copilot
-
-```bash
-npx skills add relixiaobo/browser-pilot
-```
-
-After installation, just tell your agent to "open a website" or "browse https://..." — it knows how to use `bp`.
-
 ## Requirements
 
-- Chrome / Chromium / Edge / Brave (any Chromium-based browser)
+- Chrome 144+ / Edge / Brave (any Chromium-based browser)
 - Node.js >= 18
-- Chrome remote debugging enabled (`chrome://inspect/#remote-debugging`)
+- Remote debugging enabled (`chrome://inspect/#remote-debugging`)
 
 ## License
 
