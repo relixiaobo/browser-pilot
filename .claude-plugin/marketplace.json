@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "browser-pilot",
-      "source": "..",
+      "source": "./plugin",
       "description": "Control your real Chrome browser via CLI — navigate, click, type, screenshot, network monitoring",
       "version": "0.1.0"
     }
