@@ -1,0 +1,14 @@
+{
+  "name": "browser-pilot-marketplace",
+  "owner": {
+    "name": "browser-pilot"
+  },
+  "plugins": [
+    {
+      "name": "browser-pilot",
+      "source": "..",
+      "description": "Control your real Chrome browser via CLI — navigate, click, type, screenshot, network monitoring",
+      "version": "0.1.0"
+    }
+  ]
+}

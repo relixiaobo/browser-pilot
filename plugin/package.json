@@ -1,0 +1,37 @@
+{
+  "name": "browser-pilot-plugin",
+  "version": "0.1.0",
+  "description": "Agent plugin for browser-pilot — teach AI coding agents to control Chrome via CLI",
+  "keywords": [
+    "browser-pilot",
+    "agent-skills",
+    "claude-code",
+    "codex",
+    "openclaw",
+    "browser",
+    "automation"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/relixiaobo/browser-pilot",
+    "directory": "plugin"
+  },
+  "files": [
+    ".claude-plugin/",
+    "skills/",
+    "commands/",
+    "README.md"
+  ],
+  "agents": {
+    "skills": [
+      {
+        "name": "browser-pilot",
+        "path": "./skills/browser-pilot"
+      }
+    ]
+  },
+  "peerDependencies": {
+    "browser-pilot-cli": ">=0.1.0"
+  }
+}

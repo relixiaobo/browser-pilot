@@ -1,0 +1,8 @@
+node_modules/
+src/
+tests/
+.claude/
+tsconfig.json
+tsup.config.ts
+*.tgz
+.DS_Store

@@ -1,0 +1,14 @@
+{
+  "name": "browser-pilot",
+  "description": "Control your real Chrome browser via CLI — navigate, click, type, screenshot, network monitoring. Uses your existing login sessions.",
+  "version": "0.1.0",
+  "author": {
+    "name": "browser-pilot"
+  },
+  "homepage": "https://github.com/relixiaobo/browser-pilot",
+  "repository": "https://github.com/relixiaobo/browser-pilot",
+  "license": "MIT",
+  "keywords": ["browser", "automation", "chrome", "cdp", "web", "scraping"],
+  "skills": "./skills/",
+  "commands": ["./commands/browse.md"]
+}

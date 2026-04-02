@@ -1,11 +1,11 @@
 {
-  "name": "browser-pilot",
+  "name": "browser-pilot-cli",
   "version": "0.1.0",
   "description": "CLI tool to control your browser via Chrome DevTools Protocol",
   "type": "module",
   "bin": {
-    "bp": "./dist/cli.js",
-    "browser-pilot": "./dist/cli.js"
+    "bp": "dist/cli.js",
+    "browser-pilot": "dist/cli.js"
   },
   "scripts": {
     "build": "tsup",
