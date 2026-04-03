@@ -64,6 +64,9 @@ Use the `[ref]` number in subsequent commands. Refs refresh after every action.
 | `bp type <ref> "text" --submit` | Type then press Enter |
 | `bp press Enter` | Press a key (Enter, Tab, Escape, etc.) |
 | `bp press Control+a` | Key combo (Control, Shift, Alt, Meta) |
+| `bp keyboard "text"` | Type via keyboard events (no ref needed) |
+| `bp keyboard "text" --click ".selector"` | Click element first, then type |
+| `bp keyboard "text" --clear` | Select all + delete, then type |
 
 ### JavaScript (escape hatch for anything)
 | Command | Description |
@@ -165,6 +168,32 @@ Or wait for a specific element to appear:
 bp eval 'new Promise(r => { const i = setInterval(() => { if (document.querySelector("#result")) { clearInterval(i); r(); } }, 200); })'
 ```
 
+### Canvas Editors (Google Docs, Google Sheets, Figma)
+
+Canvas-based apps don't expose DOM inputs — `bp type` won't work. Use `bp keyboard` instead,
+which sends real keyboard events to whatever is currently focused:
+
+```bash
+bp keyboard "Hello Docs!" --click ".kix-appview-editor"   # Google Docs
+bp keyboard "cell value" --click ".waffle-cell"            # Google Sheets
+```
+
+Formatting with keyboard shortcuts:
+```bash
+bp press Meta+b                          # toggle bold
+bp keyboard "bold title"                 # type bold text
+bp press Meta+b                          # turn off bold
+bp press Enter                           # new line
+bp keyboard "normal paragraph"           # type normal text
+```
+
+Common Google Docs shortcuts:
+- **Bold/Italic/Underline**: `Meta+b`, `Meta+i`, `Meta+u`
+- **Heading 1/2/3**: `Meta+Alt+1`, `Meta+Alt+2`, `Meta+Alt+3`
+- **Bullet list**: `Meta+Shift+8`
+- **Numbered list**: `Meta+Shift+7`
+- **Select all**: `Meta+a`
+
 ### Iframe-based Editors (TinyMCE, CKEditor)
 
 Some editors use an iframe. Switch to the iframe first:
@@ -175,6 +204,15 @@ bp frame 1            # switch to it
 bp eval "document.body.innerHTML = 'new content'"   # edit via eval
 bp frame 0            # switch back to main page
 ```
+
+## When to Use `type` vs `keyboard`
+
+| Scenario | Command |
+|----------|---------|
+| Standard `<input>` / `<textarea>` | `bp type <ref> "text"` |
+| Contenteditable editors (Draft.js, Quill...) | `bp type <ref> "text"` |
+| Google Docs / Sheets / canvas apps | `bp keyboard "text" --click ".selector"` |
+| Any app where `bp type` doesn't work | `bp keyboard "text"` (focus first) |
 
 ## Tips
 

@@ -38,6 +38,21 @@ Press a keyboard key or combination.
 - Navigation: `Home`, `End`, `PageUp`, `PageDown`
 - Combos: `Control+a`, `Control+c`, `Meta+v`, `Shift+Enter`, `Alt+Tab`
 
+### `bp keyboard <text> [--click <selector>] [--clear] [--submit] [--delay <ms>]`
+Type text via real keyboard events. Works with canvas-based editors (Google Docs, Sheets, Figma) that don't expose DOM inputs.
+- `--click ".selector"` — click an element first to focus it (real CDP mouse click)
+- `--clear` — select all + delete before typing
+- `--submit` — press Enter after typing
+- `--delay 50` — delay between keystrokes in ms (for apps that need slower input)
+
+Unlike `bp type`, this does not target a specific `[ref]` element. It sends keyboard events to whatever is currently focused.
+
+```bash
+bp keyboard "Hello Docs!" --click ".kix-appview-editor"    # Google Docs
+bp keyboard "new content" --clear                           # replace focused content
+bp keyboard "slow input" --delay 100                        # type slowly
+```
+
 ## JavaScript
 
 ### `bp eval [expression]`

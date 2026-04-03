@@ -336,6 +336,89 @@ program.command('type <ref> <text>')
     });
   }));
 
+// ─── keyboard ──────────────────────────────────────
+
+async function typeViaKeyboard(t: Transport, sid: string, text: string): Promise<void> {
+  for (const char of text) {
+    if (char === '\n') {
+      await dispatchKey(t, sid, 'Enter');
+    } else if (char === '\t') {
+      await dispatchKey(t, sid, 'Tab');
+    } else if (char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126) {
+      // Printable ASCII: dispatch full key events
+      const code = char === ' ' ? 'Space' : `Key${char.toUpperCase()}`;
+      const keyCode = char.toUpperCase().charCodeAt(0);
+      await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key: char, code, windowsVirtualKeyCode: keyCode, text: char }, sid);
+      await t.send('Input.dispatchKeyEvent', { type: 'keyUp', key: char, code, windowsVirtualKeyCode: keyCode }, sid);
+    } else {
+      // Non-ASCII (CJK, emoji, etc.): use insertText per character
+      await t.send('Input.insertText', { text: char }, sid);
+    }
+  }
+}
+
+program.command('keyboard <text>')
+  .description('Type text via keyboard events (for canvas editors like Google Docs)')
+  .option('-c, --clear', 'select all + delete before typing')
+  .option('-s, --submit', 'press Enter after typing')
+  .option('-d, --delay <ms>', 'delay between keystrokes in ms')
+  .option('--click <selector>', 'click element by CSS selector first to focus it')
+  .option('-l, --limit <n>', 'max elements in snapshot', '50')
+  .addHelpText('after', `
+Unlike 'type', this does not target a specific element. It sends real
+keyboard events to whatever is currently focused — works with canvas-based
+editors (Google Docs, Google Sheets, Figma) that don't expose DOM inputs.
+
+Use --click to focus an element before typing (sends a real CDP mouse click).
+
+Examples:
+  bp keyboard "hello world"
+  bp keyboard "new content" --clear
+  bp keyboard "search query" --submit
+  bp keyboard "Hello Docs!" --click ".kix-appview-editor"
+  bp keyboard "slow typing" --delay 50`)
+  .action(action(async (text, opts) => {
+    const limit = parseLimit(opts.limit);
+    await withPilot(async ({ transport, sessionId, state }) => {
+      // Click to focus if selector provided
+      if (opts.click) {
+        const { result } = await transport.send('Runtime.evaluate', {
+          expression: `JSON.stringify((function(){var el=document.querySelector(${JSON.stringify(opts.click)});if(!el)return null;el.scrollIntoView({block:'center'});var r=el.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})())`,
+          returnByValue: true,
+        }, sessionId);
+        const coords = result.value ? JSON.parse(result.value) : null;
+        if (!coords) throw new Error(`Element not found: ${opts.click}`);
+        await dispatchClick(transport, sessionId, coords.x, coords.y);
+        await new Promise(r => setTimeout(r, 300)); // let focus settle
+      }
+
+      if (opts.clear) {
+        await dispatchKey(transport, sessionId, 'Meta+a');
+        await dispatchKey(transport, sessionId, 'Delete');
+      }
+      if (opts.delay) {
+        const delay = parseInt(opts.delay, 10);
+        for (const char of text) {
+          if (char === '\n') {
+            await dispatchKey(transport, sessionId, 'Enter');
+          } else if (char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126) {
+            const code = char === ' ' ? 'Space' : `Key${char.toUpperCase()}`;
+            const keyCode = char.toUpperCase().charCodeAt(0);
+            await transport.send('Input.dispatchKeyEvent', { type: 'keyDown', key: char, code, windowsVirtualKeyCode: keyCode, text: char }, sessionId);
+            await transport.send('Input.dispatchKeyEvent', { type: 'keyUp', key: char, code, windowsVirtualKeyCode: keyCode }, sessionId);
+          } else {
+            await transport.send('Input.insertText', { text: char }, sessionId);
+          }
+          await new Promise(r => setTimeout(r, delay));
+        }
+      } else {
+        await typeViaKeyboard(transport, sessionId, text);
+      }
+      if (opts.submit) await dispatchKey(transport, sessionId, 'Enter');
+      emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
+    });
+  }));
+
 // ─── press ──────────────────────────────────────────
 
 program.command('press <key>')
