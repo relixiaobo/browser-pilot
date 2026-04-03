@@ -36,11 +36,20 @@ Every action (`open`, `click`, `type`, `press`) returns a snapshot listing inter
 
 ```
 [1] link "Home"
-[2] textbox "Search"
-[3] button "Submit"
+[2] textbox "Search"              ← standard <input> or <textarea>
+[3] textbox "Editor"              ← contenteditable (rich text editors)
+[4] textbox ""                    ← unnamed input (still interactive)
+[5] combobox ""                   ← <select> dropdown
+[6] spinbutton "Quantity"         ← <input type="number">
+[7] button "Submit"
+[8] checkbox "Agree" checked
+[9] slider "Volume"               ← <input type="range">
 ```
 
 Use the `[ref]` number in subsequent commands. Refs refresh after every action.
+
+**Common roles:** `textbox` (inputs, textareas, contenteditable), `combobox` (select),
+`spinbutton` (number/date/time inputs), `slider` (range), `button`, `link`, `checkbox`, `radio`, `switch`, `tab`.
 
 ## Commands
 
@@ -116,6 +125,57 @@ Errors include hints:
 {"ok":false, "error":"Ref [99] not found.", "hint":"Run 'bp snapshot' to refresh element refs."}
 ```
 
+## Common Patterns
+
+### Rich Text Editors (contenteditable)
+
+`bp type` supports most contenteditable-based editors (Draft.js, ProseMirror, Quill, Slate, Lexical, etc.).
+They appear as `textbox` in the snapshot. Use `--clear` to replace existing content:
+
+```bash
+bp type 3 "new content" --clear   # works on contenteditable editors
+```
+
+If `bp type` doesn't trigger the editor's state update, fall back to `bp eval` with `document.execCommand` or the editor's API.
+
+### Shadow DOM
+
+bp traverses open Shadow DOM automatically. Elements inside shadow roots (even 3+ levels deep) appear in snapshots and can be clicked/typed normally. Closed shadow roots are not accessible.
+
+### Select Dropdowns
+
+`<select>` elements appear as `combobox` in snapshots. **Do not use `bp type`** — use `bp eval` to change the value:
+
+```bash
+bp eval 'document.querySelector("select").value = "option2"; document.querySelector("select").dispatchEvent(new Event("change", {bubbles:true}))'
+```
+
+### Waiting for Dynamic Content
+
+When content loads asynchronously (spinners, AJAX, animations), wait before interacting:
+
+```bash
+bp eval 'new Promise(r => setTimeout(r, 2000))'   # wait 2 seconds
+bp snapshot                                         # then get fresh elements
+```
+
+Or wait for a specific element to appear:
+
+```bash
+bp eval 'new Promise(r => { const i = setInterval(() => { if (document.querySelector("#result")) { clearInterval(i); r(); } }, 200); })'
+```
+
+### Iframe-based Editors (TinyMCE, CKEditor)
+
+Some editors use an iframe. Switch to the iframe first:
+
+```bash
+bp frame              # list frames — find the editor iframe index
+bp frame 1            # switch to it
+bp eval "document.body.innerHTML = 'new content'"   # edit via eval
+bp frame 0            # switch back to main page
+```
+
 ## Tips
 
 - Always read the snapshot output to find the correct `[ref]` numbers before clicking/typing
@@ -124,3 +184,4 @@ Errors include hints:
 - Popup windows are auto-detected — use `bp tabs` to see them
 - The browser uses the user's real profile — all logins and cookies are available
 - Use `--limit N` with `bp open` or `bp snapshot` to limit the number of elements returned
+- Elements without visible labels still appear in snapshots (as unnamed textbox, etc.)

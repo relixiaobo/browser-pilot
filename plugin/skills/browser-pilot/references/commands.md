@@ -129,10 +129,10 @@ Block all requests matching a URL pattern.
 - `bp net block "*tracking*"` — block analytics
 - `bp net block "*ads*"` — block ad requests
 
-### `bp net mock <pattern> [--body <json>] [--file <path>] [--status <code>]`
-Return a mock response for matching requests.
+### `bp net mock <pattern> [--body <json>] [--file <path>]`
+Return a mock response for matching requests (always returns status 200).
 - `bp net mock "*api/data*" --body '{"items":[]}'`
-- `bp net mock "*api/users*" --file mock.json --status 200`
+- `bp net mock "*api/users*" --file mock.json`
 
 ### `bp net headers <pattern> <header...>`
 Add or override request headers for matching URLs.
