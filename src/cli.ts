@@ -18,7 +18,8 @@ Workflow:
   bp open <url>                       # navigate — returns snapshot with [ref] numbers
   bp click <ref>                      # interact — returns updated snapshot
   bp type <ref> <text>                # input text — returns updated snapshot
-  bp press <key>                      # keyboard — returns updated snapshot
+  bp keyboard <text>                  # type via keyboard events (Google Docs etc.)
+  bp press <key>                      # press key — returns updated snapshot
   bp eval <js>                        # run JavaScript (escape hatch for anything)
 
 Refs:
@@ -32,12 +33,17 @@ Output:
   Actions return: {"ok":true, "title":"...", "url":"...", "elements":[...]}
   Errors return:  {"ok":false, "error":"...", "hint":"..."}
 
+Canvas editors (Google Docs, Sheets, Figma):
+  bp keyboard "text" --click ".editor"               # click to focus, then type
+  bp keyboard "text" --clear                          # select all + delete, then type
+  bp press Meta+b                                     # toggle bold (works in Docs)
+
 Edge cases:
-  bp upload <ref> <filepath>                         # file input upload
-  bp auth <user> <pass>                              # HTTP Basic Auth
-  bp frame                                           # list iframes
-  bp frame 1                                         # eval in iframe context
-  bp frame 0                                         # back to top frame
+  bp upload <filepath>                                # file input upload (auto-detect)
+  bp auth <user> <pass>                               # HTTP Basic Auth
+  bp frame                                            # list iframes
+  bp frame 1                                          # eval in iframe context
+  bp frame 0                                          # back to top frame
   Dialogs (alert/confirm) are auto-handled by the daemon.
 
 Eval (replaces scroll, back, forward, extract, etc.):
