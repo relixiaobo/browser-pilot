@@ -54,6 +54,7 @@ The agent will use `bp` commands automatically. Your real login sessions are pre
 - **CLI-native** — Any agent with bash access can use it. No MCP protocol, no SDK integration needed
 - **Auto-snapshot** — Every action returns page state with numbered `[ref]` elements, so the agent always knows what's on screen
 - **Lightweight** — 78KB npm package. No bundled Chromium (unlike Playwright's 400MB+)
+- **Rich editor support** — Works with contenteditable editors (Draft.js, ProseMirror, Quill, Slate) and Shadow DOM elements out of the box
 
 ## Comparison
 
@@ -127,7 +128,7 @@ Popup windows (target="_blank", window.open) are auto-detected. Run `bp tabs` to
 | `bp net` | List recent requests (`--url`, `--method`, `--status`, `--type`) |
 | `bp net show <id>` | Full request/response details (`--save <file>`) |
 | `bp net block <pattern>` | Block requests matching URL pattern |
-| `bp net mock <pattern>` | Mock responses (`--body`, `--file`, `--status`) |
+| `bp net mock <pattern>` | Mock responses (`--body`, `--file`) |
 | `bp net headers <pattern> <header...>` | Add/override request headers |
 | `bp net rules` | List active interception rules |
 | `bp net remove [id]` | Remove rule(s) (`--all`) |
@@ -149,13 +150,18 @@ Action commands return a snapshot of interactive elements, each with a `[ref]` n
 
 ```
 [1] link "Home"
-[2] textbox "Search"
-[3] button "Submit"
+[2] textbox "Search"                ← <input>, <textarea>, or contenteditable
+[3] textbox ""                      ← unnamed input (still interactive)
+[4] combobox ""                     ← <select> dropdown
+[5] spinbutton "Quantity"           ← <input type="number">
+[6] button "Submit"
+[7] checkbox "Agree" checked
+[8] slider "Volume"                 ← <input type="range">
 ```
 
 Use the number in subsequent commands: `bp click 1`, `bp type 2 "hello"`.
 
-Refs are scoped to the current page — they refresh automatically after every action.
+Refs are scoped to the current page — they refresh automatically after every action. Elements inside Shadow DOM are included automatically.
 
 ## Output
 
@@ -197,6 +203,22 @@ bp click 5                        # click "Search by image"
 bp upload ~/Downloads/photo.jpg    # auto-finds file input, triggers upload
 ```
 
+## Rich Text Editors & Shadow DOM
+
+`bp type` works with contenteditable-based editors (Draft.js, ProseMirror, Quill, Slate, Lexical). They appear as `textbox` in snapshots:
+
+```bash
+bp type 3 "new content" --clear     # replace content in a rich text editor
+```
+
+Shadow DOM elements are traversed automatically — no special commands needed. Elements inside open shadow roots (even deeply nested) appear in snapshots and can be clicked/typed normally.
+
+For `<select>` dropdowns (shown as `combobox`), use `bp eval`:
+
+```bash
+bp eval 'document.querySelector("select").value = "opt2"; document.querySelector("select").dispatchEvent(new Event("change",{bubbles:true}))'
+```
+
 ## Network Interception
 
 Monitor, block, and mock HTTP requests:
@@ -213,7 +235,7 @@ bp net block "*ads*"
 
 # Mock API responses
 bp net mock "*api/data*" --body '{"ok":true}'
-bp net mock "*api/users*" --file mock.json --status 200
+bp net mock "*api/users*" --file mock.json
 
 # Override request headers
 bp net headers "*api*" "Authorization:Bearer test123"
@@ -224,6 +246,23 @@ bp net remove 2                        # remove rule #2
 bp net remove --all                    # clear all rules
 bp net clear                           # clear captured request log
 ```
+
+## Testing
+
+121 tests across 4 Playwright projects, adapted from Playwright/Puppeteer test fixtures and real-world sites:
+
+```bash
+npm test                    # core + compat + network (105 tests, ~2min)
+npm run test:integration    # real-site tests against the-internet.herokuapp.com
+npm run test:all            # all 121 tests
+```
+
+| Project | Tests | Coverage |
+|---------|-------|----------|
+| **core** | 41 | lifecycle, nav, click, type, press, eval, screenshot, pdf, cookies, frames, upload, auth, tabs, dialogs |
+| **compat** | 46 | contenteditable (5 variants), Shadow DOM (3 levels), input types, scrollable, overlay, select |
+| **network** | 19 | request monitoring, block, mock, headers, rule management |
+| **integration** | 15 | checkboxes, dropdown, key presses, dynamic controls, Shadow DOM, nested frames, TinyMCE, large DOM |
 
 ## Requirements
 
