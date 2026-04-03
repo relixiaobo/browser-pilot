@@ -11,13 +11,16 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "start": "node dist/cli.js",
-    "test": "bash tests/run.sh"
+    "test": "tsup && npx playwright test --project core --project compat --project network",
+    "test:integration": "tsup && npx playwright test --project integration",
+    "test:all": "tsup && npx playwright test"
   },
   "dependencies": {
     "commander": "^13.1.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "tsup": "^8.0.0",
