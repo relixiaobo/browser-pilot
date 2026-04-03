@@ -30,14 +30,26 @@ export const IS_CONTENTEDITABLE = `function() {
   return this.isContentEditable && !(this instanceof HTMLInputElement) && !(this instanceof HTMLTextAreaElement);
 }`;
 
-/** Focus `this` contenteditable and select all content (for replacement). */
-export const CONTENTEDITABLE_SELECT_ALL = `function() {
+/** Focus `this` contenteditable element. */
+export const CONTENTEDITABLE_FOCUS = `function() {
   this.focus();
+}`;
+
+/** Select all content in `this` contenteditable (call after focus has settled). */
+export const CONTENTEDITABLE_SELECT_ALL = `function() {
   const range = document.createRange();
   range.selectNodeContents(this);
   const sel = window.getSelection();
   sel.removeAllRanges();
   sel.addRange(range);
+}`;
+
+/** Clear all content from `this` contenteditable via native editing commands.
+ *  Uses execCommand which triggers beforeinput/input events correctly. */
+export const CONTENTEDITABLE_CLEAR = `function() {
+  this.focus();
+  document.execCommand('selectAll');
+  document.execCommand('delete');
 }`;
 
 /** Return {title, url} of the current page. */

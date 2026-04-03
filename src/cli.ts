@@ -3,7 +3,7 @@ import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
-import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect, IS_CONTENTEDITABLE, CONTENTEDITABLE_SELECT_ALL } from './page-scripts.js';
+import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect, IS_CONTENTEDITABLE, CONTENTEDITABLE_CLEAR } from './page-scripts.js';
 import type { Transport } from './transport.js';
 
 const program = new Command();
@@ -306,14 +306,9 @@ program.command('type <ref> <text>')
         if (ceResult.value) {
           // Contenteditable path: use Input.insertText (same approach as Playwright)
           if (opts.clear) {
+            // Clear contenteditable directly — more reliable than selectAll + delete
             await transport.send('Runtime.callFunctionOn', {
-              objectId, functionDeclaration: CONTENTEDITABLE_SELECT_ALL,
-            }, sessionId);
-            await transport.send('Input.dispatchKeyEvent', {
-              type: 'rawKeyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46,
-            }, sessionId);
-            await transport.send('Input.dispatchKeyEvent', {
-              type: 'keyUp', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46,
+              objectId, functionDeclaration: CONTENTEDITABLE_CLEAR,
             }, sessionId);
           } else {
             // Focus and move cursor to end

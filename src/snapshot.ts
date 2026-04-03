@@ -9,6 +9,12 @@ const INTERACTIVE_ROLES = new Set([
   'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab',
 ]);
 
+// Roles where an empty name is acceptable (unnamed inputs are still interactive)
+const ALLOW_EMPTY_NAME = new Set([
+  'textbox', 'searchbox', 'combobox', 'listbox',
+  'checkbox', 'radio', 'spinbutton', 'slider', 'switch',
+]);
+
 // ── Types ───────────────────────────────────────────
 
 export interface RefEntry {
@@ -78,17 +84,25 @@ export async function takeSnapshot(transport: Transport, sessionId: string, targ
 
     if (!node.ignored) {
       const role = node.role?.value;
-      if (role && INTERACTIVE_ROLES.has(role) && node.backendDOMNodeId !== undefined) {
-        const props = Object.fromEntries(
-          (node.properties || []).map((p: any) => [p.name, p.value?.value]),
-        );
+      const props = Object.fromEntries(
+        (node.properties || []).map((p: any) => [p.name, p.value?.value]),
+      );
+
+      // Detect contenteditable elements (role=generic with editable=richtext in AX tree)
+      const isEditable = props.editable === 'richtext';
+      const isInteractive = role && (INTERACTIVE_ROLES.has(role) || isEditable);
+
+      if (isInteractive && node.backendDOMNodeId !== undefined) {
         const name = node.name?.value || '';
         const value = node.value?.value;
+        const effectiveRole = isEditable && role === 'generic' ? 'textbox' : role;
 
-        if (!props.disabled && (name || value) && refs.length < limit) {
+        // Allow empty name for input-like roles and editables; require name/value for buttons/links
+        const hasIdentity = name || value || ALLOW_EMPTY_NAME.has(effectiveRole) || isEditable;
+        if (!props.disabled && hasIdentity && refs.length < limit) {
           const checked = props.checked === 'true' || props.checked === true ? true : undefined;
-          refs.push({ backendNodeId: node.backendDOMNodeId, role, name });
-          elements.push({ ref: refs.length, backendNodeId: node.backendDOMNodeId, role, name, value, checked });
+          refs.push({ backendNodeId: node.backendDOMNodeId, role: effectiveRole, name });
+          elements.push({ ref: refs.length, backendNodeId: node.backendDOMNodeId, role: effectiveRole, name, value, checked });
         }
       }
     }
