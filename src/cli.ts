@@ -3,7 +3,7 @@ import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
-import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect } from './page-scripts.js';
+import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect, IS_CONTENTEDITABLE, CONTENTEDITABLE_SELECT_ALL } from './page-scripts.js';
 import type { Transport } from './transport.js';
 
 const program = new Command();
@@ -298,9 +298,41 @@ program.command('type <ref> <text>')
     await withPilot(async ({ transport, sessionId, state }) => {
       const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
       try {
-        await transport.send('Runtime.callFunctionOn', {
-          objectId, functionDeclaration: SET_VALUE, arguments: [{ value: text }, { value: !!opts.clear }],
+        // Check if target is a contenteditable element (Draft.js, ProseMirror, etc.)
+        const { result: ceResult } = await transport.send('Runtime.callFunctionOn', {
+          objectId, functionDeclaration: IS_CONTENTEDITABLE, returnByValue: true,
         }, sessionId);
+
+        if (ceResult.value) {
+          // Contenteditable path: use Input.insertText (same approach as Playwright)
+          if (opts.clear) {
+            await transport.send('Runtime.callFunctionOn', {
+              objectId, functionDeclaration: CONTENTEDITABLE_SELECT_ALL,
+            }, sessionId);
+            await transport.send('Input.dispatchKeyEvent', {
+              type: 'rawKeyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46,
+            }, sessionId);
+            await transport.send('Input.dispatchKeyEvent', {
+              type: 'keyUp', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46,
+            }, sessionId);
+          } else {
+            // Focus and move cursor to end
+            await transport.send('Runtime.callFunctionOn', {
+              objectId, functionDeclaration: `function() {
+                this.focus();
+                const sel = window.getSelection();
+                sel.selectAllChildren(this);
+                sel.collapseToEnd();
+              }`,
+            }, sessionId);
+          }
+          await transport.send('Input.insertText', { text }, sessionId);
+        } else {
+          // Standard input/textarea path
+          await transport.send('Runtime.callFunctionOn', {
+            objectId, functionDeclaration: SET_VALUE, arguments: [{ value: text }, { value: !!opts.clear }],
+          }, sessionId);
+        }
         if (opts.submit) await dispatchKey(transport, sessionId, 'Enter');
       } finally {
         await transport.send('Runtime.releaseObject', { objectId }, sessionId).catch(() => {});

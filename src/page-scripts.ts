@@ -25,6 +25,21 @@ export const FOCUS_AND_CLEAR = `function(clear) {
   if (clear) { this.value = ''; this.dispatchEvent(new Event('input',{bubbles:true})); }
 }`;
 
+/** Check if `this` element is a contenteditable (Draft.js, ProseMirror, etc.). */
+export const IS_CONTENTEDITABLE = `function() {
+  return this.isContentEditable && !(this instanceof HTMLInputElement) && !(this instanceof HTMLTextAreaElement);
+}`;
+
+/** Focus `this` contenteditable and select all content (for replacement). */
+export const CONTENTEDITABLE_SELECT_ALL = `function() {
+  this.focus();
+  const range = document.createRange();
+  range.selectNodeContents(this);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}`;
+
 /** Return {title, url} of the current page. */
 export const PAGE_INFO = `JSON.stringify({title:document.title,url:location.href})`;
 
