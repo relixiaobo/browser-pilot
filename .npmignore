@@ -8,3 +8,5 @@ tsup.config.ts
 .DS_Store
 plugin/
 .claude-plugin/
+playwright.config.ts
+test-results/
