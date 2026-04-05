@@ -20,7 +20,8 @@ Workflow:
   bp connect                          # one-time setup (click Allow in Chrome)
   bp open <url>                       # navigate — returns snapshot with [ref] numbers
   bp click <ref>                      # interact — returns updated snapshot
-  bp click 0 --xy 400,300            # click at coordinates (canvas/maps)
+  bp click --xy 400,300              # click at coordinates (canvas/maps)
+  bp locate ".selector"              # get element coordinates for click --xy
   bp type <ref> <text>                # input text — returns updated snapshot
   bp keyboard <text>                  # type via keyboard events (Google Docs etc.)
   bp press <key>                      # press key — returns updated snapshot
@@ -297,22 +298,22 @@ program.command('snapshot')
 
 // ─── click ──────────────────────────────────────────
 
-program.command('click <ref>')
-  .description('Click element by ref number and return page snapshot')
-  .option('--xy <coords>', 'click at x,y coordinates instead of ref (e.g. --xy 400,300)')
+program.command('click [ref]')
+  .description('Click element by ref number or at x,y coordinates')
+  .option('--xy <coords>', 'click at x,y viewport coordinates (e.g. --xy 400,300)')
   .option('--double', 'double-click')
   .option('--right', 'right-click (context menu)')
   .option('-l, --limit <n>', 'max elements in snapshot', '50')
   .addHelpText('after', `
-Ref is a number from the snapshot output, or use --xy for coordinate clicks.
-
 Examples:
-  bp click 3                       # click element [3]
-  bp click 0 --xy 400,300          # click at coordinates (ref ignored)
-  bp click 0 --xy 400,300 --double # double-click at coordinates
-  bp click 0 --xy 400,300 --right  # right-click at coordinates`)
+  bp click 3                  # click element [3] from snapshot
+  bp click --xy 400,300       # click at viewport coordinates
+  bp click --xy 400,300 --double   # double-click at coordinates
+  bp click --xy 400,300 --right    # right-click (context menu)
+  bp click 3 --right          # right-click element [3]`)
   .action(action(async (ref, opts) => {
     if (opts.double && opts.right) throw new Error('--double and --right are mutually exclusive');
+    if (!ref && !opts.xy) throw new Error('Provide a ref number or --xy coordinates');
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
       if (opts.xy) {
@@ -354,6 +355,34 @@ Examples:
         }
       }
       emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
+    });
+  }));
+
+// ─── locate ────────────────────────────────────────
+
+program.command('locate <selector>')
+  .description('Get element coordinates by CSS selector (for use with click --xy)')
+  .addHelpText('after', `
+Returns center coordinates and bounding box of an element.
+Use with click --xy for canvas apps, charts, or elements not in snapshot.
+
+Examples:
+  bp locate ".kix-appview-editor"    # Google Docs editor area
+  bp locate "canvas"                 # canvas element
+  bp locate "#map"                   # map container`)
+  .action(action(async (selector) => {
+    await withPilot(async ({ transport, sessionId }) => {
+      const { result } = await transport.send('Runtime.evaluate', {
+        expression: `JSON.stringify((function(){var el=document.querySelector(${JSON.stringify(selector)});if(!el)return null;el.scrollIntoView({block:'center',inline:'center'});var r=el.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2),top:Math.round(r.top),left:Math.round(r.left),width:Math.round(r.width),height:Math.round(r.height)}})())`,
+        returnByValue: true,
+      }, sessionId);
+      const coords = result.value ? JSON.parse(result.value) : null;
+      if (!coords) throw new Error(`Element not found: ${selector}`);
+      if (useJson()) {
+        console.log(JSON.stringify({ ok: true, ...coords }));
+      } else {
+        console.log(`center: ${coords.x},${coords.y}  size: ${coords.width}x${coords.height}  (top:${coords.top} left:${coords.left})`);
+      }
     });
   }));
 
@@ -500,7 +529,12 @@ Examples:
         await typeViaKeyboard(transport, sessionId, text);
       }
       if (opts.submit) await dispatchKey(transport, sessionId, 'Enter');
-      emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
+      const snapResult = await snap(transport, sessionId, state.activeTargetId, limit);
+      if (useJson()) {
+        console.log(JSON.stringify({ ok: true, typed: text, ...snapResult.data }));
+      } else {
+        console.log(snapResult.text);
+      }
     });
   }));
 

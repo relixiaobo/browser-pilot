@@ -59,19 +59,18 @@ Use the `[ref]` number in subsequent commands. Refs refresh after every action.
 | `bp open <url>` | Navigate to URL, returns snapshot |
 | `bp snapshot` | Refresh current page snapshot |
 | `bp click <ref>` | Click element by ref number |
-| `bp click 0 --xy 400,300` | Click at x,y coordinates (canvas, maps) |
-| `bp click <ref> --double` | Double-click element |
+| `bp click --xy 400,300` | Click at viewport coordinates (canvas, maps) |
+| `bp click <ref> --double` | Double-click |
 | `bp click <ref> --right` | Right-click (context menu) |
+| `bp locate ".selector"` | Get element center x,y + size (for click --xy) |
 | `bp type <ref> "text"` | Type into element |
 | `bp type <ref> "text" --clear` | Clear field first, then type |
 | `bp type <ref> "text" --submit` | Type then press Enter |
 | `bp press Enter` | Press a key (Enter, Tab, Escape, etc.) |
 | `bp press Control+a` | Key combo (Control, Shift, Alt, Meta) |
 | `bp keyboard "text"` | Type via keyboard events (no ref needed) |
-| `bp keyboard "text" --click ".sel"` | Click element first, then type |
+| `bp keyboard "text" --click ".sel"` | Click to focus, then type |
 | `bp keyboard "text" --clear` | Select all + delete, then type |
-| `bp keyboard "text" --submit` | Type then press Enter |
-| `bp keyboard "text" --delay 50` | Type with delay between keystrokes |
 
 ### JavaScript (escape hatch for anything)
 | Command | Description |
@@ -133,129 +132,66 @@ Errors include hints:
 {"ok":false, "error":"Ref [99] not found.", "hint":"Run 'bp snapshot' to refresh element refs."}
 ```
 
-## Common Patterns
+## How to Choose the Right Command
 
-### Rich Text Editors (contenteditable)
+**Clicking:**
+1. Element in snapshot → `bp click <ref>`
+2. Element NOT in snapshot (canvas, map, chart) → `bp locate ".sel"` then `bp click --xy x,y`
 
-`bp type` supports most contenteditable-based editors (Draft.js, ProseMirror, Quill, Slate, Lexical, etc.).
-They appear as `textbox` in the snapshot. Use `--clear` to replace existing content:
+**Typing:**
+1. Element in snapshot as `textbox` → `bp type <ref> "text"`
+2. Canvas editor (Google Docs, Sheets) → `bp keyboard "text" --click ".sel"`
+3. `<select>` dropdown (`combobox`) → use `bp eval` (see below)
+
+**Complex forms (Google Flights, Booking.com):**
+- Prefer URL parameters over field-by-field input when possible:
+  `bp open "https://www.amazon.com/s?k=keyword"`
+
+## Patterns
+
+### Coordinate Clicks (Canvas, Maps, Charts)
 
 ```bash
-bp type 3 "new content" --clear   # works on contenteditable editors
+bp locate "canvas"                  # → {"ok":true, "x":400, "y":300, "width":800, "height":600}
+bp click --xy 400,300               # click at those coordinates
+bp click --xy 400,300 --right       # right-click (context menu)
 ```
 
-If `bp type` doesn't trigger the editor's state update, fall back to `bp eval` with `document.execCommand` or the editor's API.
+### Canvas Editors (Google Docs, Sheets)
 
-### Shadow DOM
-
-bp traverses open Shadow DOM automatically. Elements inside shadow roots (even 3+ levels deep) appear in snapshots and can be clicked/typed normally. Closed shadow roots are not accessible.
+```bash
+bp keyboard "Hello!" --click ".kix-appview-editor"   # click to focus + type
+bp press Meta+b                                       # toggle bold
+bp keyboard "bold text"
+bp press Meta+b                                       # turn off bold
+```
 
 ### Select Dropdowns
 
-`<select>` elements appear as `combobox` in snapshots. **Do not use `bp type`** — use `bp eval` to change the value:
-
 ```bash
-bp eval 'document.querySelector("select").value = "option2"; document.querySelector("select").dispatchEvent(new Event("change", {bubbles:true}))'
+bp eval 'document.querySelector("select").value="opt2"; document.querySelector("select").dispatchEvent(new Event("change",{bubbles:true}))'
 ```
 
 ### Waiting for Dynamic Content
 
-When content loads asynchronously (spinners, AJAX, animations), wait before interacting:
-
 ```bash
-bp eval 'new Promise(r => setTimeout(r, 2000))'   # wait 2 seconds
-bp snapshot                                         # then get fresh elements
-```
-
-Or wait for a specific element to appear:
-
-```bash
+bp eval 'new Promise(r => setTimeout(r, 2000))'     # wait 2 seconds
 bp eval 'new Promise(r => { const i = setInterval(() => { if (document.querySelector("#result")) { clearInterval(i); r(); } }, 200); })'
 ```
 
-### Canvas Editors (Google Docs, Google Sheets, Figma)
-
-Canvas-based apps don't expose DOM inputs — `bp type` won't work. Use `bp keyboard` instead,
-which sends real keyboard events to whatever is currently focused:
+### Iframe Editors (TinyMCE)
 
 ```bash
-bp keyboard "Hello Docs!" --click ".kix-appview-editor"   # Google Docs
-bp keyboard "cell value" --click ".waffle-cell"            # Google Sheets
+bp frame 1                                            # switch to editor iframe
+bp eval "document.body.innerHTML = 'content'"         # edit
+bp frame 0                                            # back to main
 ```
 
-Formatting with keyboard shortcuts:
-```bash
-bp press Meta+b                          # toggle bold
-bp keyboard "bold title"                 # type bold text
-bp press Meta+b                          # turn off bold
-bp press Enter                           # new line
-bp keyboard "normal paragraph"           # type normal text
-```
+## Notes
 
-Common Google Docs shortcuts:
-- **Bold/Italic/Underline**: `Meta+b`, `Meta+i`, `Meta+u`
-- **Heading 1/2/3**: `Meta+Alt+1`, `Meta+Alt+2`, `Meta+Alt+3`
-- **Bullet list**: `Meta+Shift+8`
-- **Numbered list**: `Meta+Shift+7`
-- **Select all**: `Meta+a`
-
-### Iframe-based Editors (TinyMCE, CKEditor)
-
-Some editors use an iframe. Switch to the iframe first:
-
-```bash
-bp frame              # list frames — find the editor iframe index
-bp frame 1            # switch to it
-bp eval "document.body.innerHTML = 'new content'"   # edit via eval
-bp frame 0            # switch back to main page
-```
-
-## When to Use `type` vs `keyboard`
-
-| Scenario | Command |
-|----------|---------|
-| Standard `<input>` / `<textarea>` | `bp type <ref> "text"` |
-| Contenteditable editors (Draft.js, Quill...) | `bp type <ref> "text"` |
-| Google Docs / Sheets / canvas apps | `bp keyboard "text" --click ".selector"` |
-| Any app where `bp type` doesn't work | `bp keyboard "text"` (focus first) |
-
-## Coordinate Clicks (Canvas, Maps, Charts)
-
-When elements aren't in the snapshot (canvas, SVG charts, image maps), use coordinate-based clicks:
-
-```bash
-# Get element coordinates via eval
-bp eval 'JSON.stringify(document.querySelector(".map").getBoundingClientRect())'
-# Click at those coordinates
-bp click 0 --xy 400,300
-# Double-click or right-click
-bp click 0 --xy 400,300 --double
-bp click 0 --xy 400,300 --right
-```
-
-## Complex Forms (Google Flights, Booking.com, etc.)
-
-For apps with chip inputs, custom dropdowns, or framework-managed state, **prefer URL parameters
-over field-by-field input** when possible:
-
-```bash
-# Google Flights: construct search URL directly
-bp open "https://www.google.com/travel/flights/search?tfs=..."
-
-# Amazon: use search URL
-bp open "https://www.amazon.com/s?k=keyword"
-
-# When URL params aren't available, use eval to manipulate internal state:
-bp eval 'document.querySelector("input").value = ""; document.querySelector("input").dispatchEvent(new Event("input",{bubbles:true}))'
-```
-
-## Tips
-
-- Always read the snapshot output to find the correct `[ref]` numbers before clicking/typing
-- Use `bp eval` as an escape hatch for scrolling, extracting data, or any DOM operation
-- Dialogs (alert/confirm/prompt) are auto-handled — no action needed
+- Shadow DOM is traversed automatically — no special handling needed
+- Dialogs (alert/confirm) are auto-handled by the daemon
 - Popup windows are auto-detected — use `bp tabs` to see them
-- The browser uses the user's real profile — all logins and cookies are available
-- Use `--limit N` with `bp open` or `bp snapshot` to limit the number of elements returned
-- Elements without visible labels still appear in snapshots (as unnamed textbox, etc.)
-- For complex form apps (Google Flights, Booking), prefer URL params over filling fields
+- `--limit N` caps snapshot elements (default 50)
+- Contenteditable editors appear as `textbox` in snapshots — `bp type` works
+- If `bp type` doesn't work, try `bp keyboard` as fallback
