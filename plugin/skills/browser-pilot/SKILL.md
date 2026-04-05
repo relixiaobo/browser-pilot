@@ -219,6 +219,36 @@ bp frame 0            # switch back to main page
 | Google Docs / Sheets / canvas apps | `bp keyboard "text" --click ".selector"` |
 | Any app where `bp type` doesn't work | `bp keyboard "text"` (focus first) |
 
+## Coordinate Clicks (Canvas, Maps, Charts)
+
+When elements aren't in the snapshot (canvas, SVG charts, image maps), use coordinate-based clicks:
+
+```bash
+# Get element coordinates via eval
+bp eval 'JSON.stringify(document.querySelector(".map").getBoundingClientRect())'
+# Click at those coordinates
+bp click 0 --xy 400,300
+# Double-click or right-click
+bp click 0 --xy 400,300 --double
+bp click 0 --xy 400,300 --right
+```
+
+## Complex Forms (Google Flights, Booking.com, etc.)
+
+For apps with chip inputs, custom dropdowns, or framework-managed state, **prefer URL parameters
+over field-by-field input** when possible:
+
+```bash
+# Google Flights: construct search URL directly
+bp open "https://www.google.com/travel/flights/search?tfs=..."
+
+# Amazon: use search URL
+bp open "https://www.amazon.com/s?k=keyword"
+
+# When URL params aren't available, use eval to manipulate internal state:
+bp eval 'document.querySelector("input").value = ""; document.querySelector("input").dispatchEvent(new Event("input",{bubbles:true}))'
+```
+
 ## Tips
 
 - Always read the snapshot output to find the correct `[ref]` numbers before clicking/typing
@@ -228,3 +258,4 @@ bp frame 0            # switch back to main page
 - The browser uses the user's real profile — all logins and cookies are available
 - Use `--limit N` with `bp open` or `bp snapshot` to limit the number of elements returned
 - Elements without visible labels still appear in snapshots (as unnamed textbox, etc.)
+- For complex form apps (Google Flights, Booking), prefer URL params over filling fields
