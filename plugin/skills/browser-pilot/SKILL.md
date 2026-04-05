@@ -32,7 +32,7 @@ bp disconnect                 # end session
 
 ## Understanding Snapshots
 
-Every action (`open`, `click`, `type`, `press`) returns a snapshot listing interactive elements:
+Every action (`open`, `click`, `type`, `keyboard`, `press`) returns a snapshot listing interactive elements:
 
 ```
 [1] link "Home"
@@ -68,8 +68,10 @@ Use the `[ref]` number in subsequent commands. Refs refresh after every action.
 | `bp press Enter` | Press a key (Enter, Tab, Escape, etc.) |
 | `bp press Control+a` | Key combo (Control, Shift, Alt, Meta) |
 | `bp keyboard "text"` | Type via keyboard events (no ref needed) |
-| `bp keyboard "text" --click ".selector"` | Click element first, then type |
+| `bp keyboard "text" --click ".sel"` | Click element first, then type |
 | `bp keyboard "text" --clear` | Select all + delete, then type |
+| `bp keyboard "text" --submit` | Type then press Enter |
+| `bp keyboard "text" --delay 50` | Type with delay between keystrokes |
 
 ### JavaScript (escape hatch for anything)
 | Command | Description |

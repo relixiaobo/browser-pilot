@@ -1,6 +1,9 @@
 import { Command } from 'commander';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const PKG_VERSION: string = require('../package.json').version;
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
 import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect, IS_CONTENTEDITABLE, CONTENTEDITABLE_CLEAR } from './page-scripts.js';
@@ -10,7 +13,7 @@ const program = new Command();
 program
   .name('bp')
   .description('Control your browser from the command line')
-  .version('0.1.0')
+  .version(PKG_VERSION)
   .option('--human', 'force human-readable output (default when TTY)')
   .addHelpText('after', `
 Workflow:
@@ -145,6 +148,29 @@ const KEY_DEFS: Record<string, { key: string; code: string; keyCode: number }> =
   end: { key: 'End', code: 'End', keyCode: 35 },
   pageup: { key: 'PageUp', code: 'PageUp', keyCode: 33 },
   pagedown: { key: 'PageDown', code: 'PageDown', keyCode: 34 },
+  // Digits
+  '0': { key: '0', code: 'Digit0', keyCode: 48 },
+  '1': { key: '1', code: 'Digit1', keyCode: 49 },
+  '2': { key: '2', code: 'Digit2', keyCode: 50 },
+  '3': { key: '3', code: 'Digit3', keyCode: 51 },
+  '4': { key: '4', code: 'Digit4', keyCode: 52 },
+  '5': { key: '5', code: 'Digit5', keyCode: 53 },
+  '6': { key: '6', code: 'Digit6', keyCode: 54 },
+  '7': { key: '7', code: 'Digit7', keyCode: 55 },
+  '8': { key: '8', code: 'Digit8', keyCode: 56 },
+  '9': { key: '9', code: 'Digit9', keyCode: 57 },
+  // Punctuation
+  '-': { key: '-', code: 'Minus', keyCode: 189 },
+  '=': { key: '=', code: 'Equal', keyCode: 187 },
+  '[': { key: '[', code: 'BracketLeft', keyCode: 219 },
+  ']': { key: ']', code: 'BracketRight', keyCode: 221 },
+  '\\': { key: '\\', code: 'Backslash', keyCode: 220 },
+  ';': { key: ';', code: 'Semicolon', keyCode: 186 },
+  "'": { key: "'", code: 'Quote', keyCode: 222 },
+  ',': { key: ',', code: 'Comma', keyCode: 188 },
+  '.': { key: '.', code: 'Period', keyCode: 190 },
+  '/': { key: '/', code: 'Slash', keyCode: 191 },
+  '`': { key: '`', code: 'Backquote', keyCode: 192 },
 };
 
 const MOD_DEFS: Record<string, { key: string; code: string; keyCode: number; mask: number }> = {
@@ -286,6 +312,7 @@ Examples:
   bp click 0 --xy 400,300 --double # double-click at coordinates
   bp click 0 --xy 400,300 --right  # right-click at coordinates`)
   .action(action(async (ref, opts) => {
+    if (opts.double && opts.right) throw new Error('--double and --right are mutually exclusive');
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
       if (opts.xy) {
@@ -383,6 +410,18 @@ program.command('type <ref> <text>')
 
 // ─── keyboard ──────────────────────────────────────
 
+function charToCode(char: string): { key: string; code: string; keyCode: number } {
+  // Check KEY_DEFS first (handles digits, punctuation, special keys)
+  const kd = KEY_DEFS[char];
+  if (kd) return kd;
+  // Letters
+  if (/^[a-zA-Z]$/.test(char)) return { key: char, code: `Key${char.toUpperCase()}`, keyCode: char.toUpperCase().charCodeAt(0) };
+  // Space
+  if (char === ' ') return { key: ' ', code: 'Space', keyCode: 32 };
+  // Fallback for other printable ASCII
+  return { key: char, code: '', keyCode: char.charCodeAt(0) };
+}
+
 async function typeViaKeyboard(t: Transport, sid: string, text: string): Promise<void> {
   for (const char of text) {
     if (char === '\n') {
@@ -390,11 +429,9 @@ async function typeViaKeyboard(t: Transport, sid: string, text: string): Promise
     } else if (char === '\t') {
       await dispatchKey(t, sid, 'Tab');
     } else if (char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126) {
-      // Printable ASCII: dispatch full key events
-      const code = char === ' ' ? 'Space' : `Key${char.toUpperCase()}`;
-      const keyCode = char.toUpperCase().charCodeAt(0);
-      await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key: char, code, windowsVirtualKeyCode: keyCode, text: char }, sid);
-      await t.send('Input.dispatchKeyEvent', { type: 'keyUp', key: char, code, windowsVirtualKeyCode: keyCode }, sid);
+      const { key, code, keyCode } = charToCode(char);
+      await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text: char }, sid);
+      await t.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode }, sid);
     } else {
       // Non-ASCII (CJK, emoji, etc.): use insertText per character
       await t.send('Input.insertText', { text: char }, sid);
@@ -438,19 +475,22 @@ Examples:
       }
 
       if (opts.clear) {
-        await dispatchKey(transport, sessionId, 'Meta+a');
+        const selectAllMod = process.platform === 'darwin' ? 'Meta' : 'Control';
+        await dispatchKey(transport, sessionId, `${selectAllMod}+a`);
         await dispatchKey(transport, sessionId, 'Delete');
       }
       if (opts.delay) {
         const delay = parseInt(opts.delay, 10);
+        if (isNaN(delay) || delay < 0) throw new Error('--delay must be a non-negative number');
         for (const char of text) {
           if (char === '\n') {
             await dispatchKey(transport, sessionId, 'Enter');
+          } else if (char === '\t') {
+            await dispatchKey(transport, sessionId, 'Tab');
           } else if (char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126) {
-            const code = char === ' ' ? 'Space' : `Key${char.toUpperCase()}`;
-            const keyCode = char.toUpperCase().charCodeAt(0);
-            await transport.send('Input.dispatchKeyEvent', { type: 'keyDown', key: char, code, windowsVirtualKeyCode: keyCode, text: char }, sessionId);
-            await transport.send('Input.dispatchKeyEvent', { type: 'keyUp', key: char, code, windowsVirtualKeyCode: keyCode }, sessionId);
+            const { key, code, keyCode } = charToCode(char);
+            await transport.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text: char }, sessionId);
+            await transport.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode }, sessionId);
           } else {
             await transport.send('Input.insertText', { text: char }, sessionId);
           }
