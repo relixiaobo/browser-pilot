@@ -23,13 +23,20 @@ Get the current page's interactive elements without navigating.
 
 ## Interaction
 
-### `bp click <ref> [--xy <x,y>] [--double] [--right] [--limit <n>]`
-Click an element by its `[ref]` number from the snapshot.
-- `--xy 400,300` — click at viewport coordinates instead of using ref (pass any value for ref, e.g. `bp click 0 --xy 400,300`)
+### `bp click [ref] [--xy <x,y>] [--double] [--right] [--limit <n>]`
+Click an element by its `[ref]` number from the snapshot, or at viewport coordinates.
+- `--xy 400,300` — click at viewport coordinates (ref not needed)
 - `--double` — double-click
 - `--right` — right-click (opens context menu)
 
-Use `bp eval` to get an element's coordinates: `bp eval 'JSON.stringify(document.querySelector(".target").getBoundingClientRect())'`
+Use `bp locate` to get coordinates: `bp locate ".target"` → `{"x":400,"y":300,...}`
+
+### `bp locate <selector>`
+Get an element's center coordinates and bounding box by CSS selector.
+Returns `{"ok":true, "x":400, "y":300, "top":100, "left":200, "width":800, "height":600}`.
+Use with `bp click --xy` for canvas, maps, charts, or elements not in the snapshot.
+- `bp locate "canvas"` — canvas element
+- `bp locate ".kix-appview-editor"` — Google Docs editor area
 
 ### `bp type <ref> <text> [--clear] [--submit] [--limit <n>]`
 Type text into an input element.

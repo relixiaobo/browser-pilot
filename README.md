@@ -97,7 +97,8 @@ The daemon maintains a single CDP WebSocket connection. A pulsing blue glow arou
 | `bp open <url>` | snapshot | Navigate to URL |
 | `bp snapshot` | snapshot | Get interactive elements |
 | `bp click <ref>` | snapshot | Click element by ref number (`--double`, `--right`) |
-| `bp click 0 --xy x,y` | snapshot | Click at viewport coordinates (canvas, maps) |
+| `bp click --xy x,y` | snapshot | Click at viewport coordinates (canvas, maps) |
+| `bp locate <selector>` | coords | Get element center x,y + size (for `click --xy`) |
 | `bp type <ref> <text>` | snapshot | Type into element (`--clear`, `--submit`) |
 | `bp keyboard <text>` | snapshot | Type via keyboard events (`--click`, `--clear`) |
 | `bp press <key>` | snapshot | Press key (Enter, Escape, Control+a, Meta+c) |
@@ -219,7 +220,7 @@ For canvas-based editors (Google Docs, Google Sheets, Figma), use `bp keyboard` 
 bp keyboard "Hello Docs!" --click ".kix-appview-editor"   # Google Docs
 bp press Meta+b                                            # toggle bold
 bp keyboard "bold text"
-bp click 0 --xy 400,300                                    # click canvas area
+bp click --xy 400,300                                    # click canvas area
 ```
 
 Shadow DOM elements are traversed automatically — no special commands needed. Elements inside open shadow roots (even deeply nested) appear in snapshots and can be clicked/typed normally.
