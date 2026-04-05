@@ -17,6 +17,7 @@ Workflow:
   bp connect                          # one-time setup (click Allow in Chrome)
   bp open <url>                       # navigate — returns snapshot with [ref] numbers
   bp click <ref>                      # interact — returns updated snapshot
+  bp click 0 --xy 400,300            # click at coordinates (canvas/maps)
   bp type <ref> <text>                # input text — returns updated snapshot
   bp keyboard <text>                  # type via keyboard events (Google Docs etc.)
   bp press <key>                      # press key — returns updated snapshot
@@ -272,20 +273,58 @@ program.command('snapshot')
 
 program.command('click <ref>')
   .description('Click element by ref number and return page snapshot')
+  .option('--xy <coords>', 'click at x,y coordinates instead of ref (e.g. --xy 400,300)')
+  .option('--double', 'double-click')
+  .option('--right', 'right-click (context menu)')
   .option('-l, --limit <n>', 'max elements in snapshot', '50')
-  .addHelpText('after', '\nRef is a number from the snapshot output.\n\nExamples:\n  bp click 3\n  bp click 3 --limit 10')
+  .addHelpText('after', `
+Ref is a number from the snapshot output, or use --xy for coordinate clicks.
+
+Examples:
+  bp click 3                       # click element [3]
+  bp click 0 --xy 400,300          # click at coordinates (ref ignored)
+  bp click 0 --xy 400,300 --double # double-click at coordinates
+  bp click 0 --xy 400,300 --right  # right-click at coordinates`)
   .action(action(async (ref, opts) => {
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
-      const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
-      try {
-        const { result } = await transport.send('Runtime.callFunctionOn', {
-          objectId, functionDeclaration: GET_CLICK_COORDS, returnByValue: true,
-        }, sessionId);
-        const { x, y } = JSON.parse(result.value);
-        await dispatchClick(transport, sessionId, x, y);
-      } finally {
-        await transport.send('Runtime.releaseObject', { objectId }, sessionId).catch(() => {});
+      if (opts.xy) {
+        // Coordinate-based click
+        const [xStr, yStr] = opts.xy.split(',');
+        const x = parseFloat(xStr), y = parseFloat(yStr);
+        if (isNaN(x) || isNaN(y)) throw new Error('--xy must be x,y (e.g. --xy 400,300)');
+        if (opts.right) {
+          await transport.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
+          await transport.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', clickCount: 1 }, sessionId);
+          await transport.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'right', clickCount: 1 }, sessionId);
+        } else {
+          const clickCount = opts.double ? 2 : 1;
+          await transport.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
+          await transport.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount }, sessionId);
+          await transport.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount }, sessionId);
+        }
+      } else {
+        // Ref-based click
+        const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
+        try {
+          const { result } = await transport.send('Runtime.callFunctionOn', {
+            objectId, functionDeclaration: GET_CLICK_COORDS, returnByValue: true,
+          }, sessionId);
+          const { x, y } = JSON.parse(result.value);
+          if (opts.double) {
+            await transport.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
+            await transport.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 }, sessionId);
+            await transport.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 }, sessionId);
+          } else if (opts.right) {
+            await transport.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
+            await transport.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', clickCount: 1 }, sessionId);
+            await transport.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'right', clickCount: 1 }, sessionId);
+          } else {
+            await dispatchClick(transport, sessionId, x, y);
+          }
+        } finally {
+          await transport.send('Runtime.releaseObject', { objectId }, sessionId).catch(() => {});
+        }
       }
       emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
     });

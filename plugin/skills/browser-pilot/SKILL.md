@@ -59,6 +59,9 @@ Use the `[ref]` number in subsequent commands. Refs refresh after every action.
 | `bp open <url>` | Navigate to URL, returns snapshot |
 | `bp snapshot` | Refresh current page snapshot |
 | `bp click <ref>` | Click element by ref number |
+| `bp click 0 --xy 400,300` | Click at x,y coordinates (canvas, maps) |
+| `bp click <ref> --double` | Double-click element |
+| `bp click <ref> --right` | Right-click (context menu) |
 | `bp type <ref> "text"` | Type into element |
 | `bp type <ref> "text" --clear` | Clear field first, then type |
 | `bp type <ref> "text" --submit` | Type then press Enter |

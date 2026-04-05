@@ -23,8 +23,13 @@ Get the current page's interactive elements without navigating.
 
 ## Interaction
 
-### `bp click <ref> [--limit <n>]`
+### `bp click <ref> [--xy <x,y>] [--double] [--right] [--limit <n>]`
 Click an element by its `[ref]` number from the snapshot.
+- `--xy 400,300` — click at viewport coordinates instead of using ref (pass any value for ref, e.g. `bp click 0 --xy 400,300`)
+- `--double` — double-click
+- `--right` — right-click (opens context menu)
+
+Use `bp eval` to get an element's coordinates: `bp eval 'JSON.stringify(document.querySelector(".target").getBoundingClientRect())'`
 
 ### `bp type <ref> <text> [--clear] [--submit] [--limit <n>]`
 Type text into an input element.
