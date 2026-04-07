@@ -92,18 +92,34 @@ def bp(args: list[str], timeout: int = 30) -> str:
         return json.dumps({"ok": False, "error": str(e)})
 
 
-def call_llm(model: str, messages: list[dict]) -> tuple[str, int, int]:
-    """Call LLM, return (text, input_tokens, output_tokens)."""
+def call_llm(
+    model: str,
+    messages: list[dict],
+    *,
+    system: str | None = None,
+    temperature: float | None = None,
+) -> tuple[str, int, int]:
+    """Call LLM, return (text, input_tokens, output_tokens).
+
+    Args:
+        system: override the default SYSTEM_PROMPT (used by judge for evaluation)
+        temperature: override sampling temperature (judge uses 0 for determinism;
+                     agent uses model default to test real-world distribution)
+    """
+    sys_prompt = system if system is not None else SYSTEM_PROMPT
     if "claude" in model or "opus" in model or "sonnet" in model or "haiku" in model:
         import anthropic
 
         client = anthropic.Anthropic()
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-        )
+        kwargs: dict = {
+            "model": model,
+            "max_tokens": 4096,
+            "system": sys_prompt,
+            "messages": messages,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        response = client.messages.create(**kwargs)
         return (
             response.content[0].text,
             response.usage.input_tokens,
@@ -113,11 +129,15 @@ def call_llm(model: str, messages: list[dict]) -> tuple[str, int, int]:
         import openai
 
         client = openai.OpenAI()
-        response = client.chat.completions.create(
-            model=model,
-            max_completion_tokens=4096,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-        )
+        kwargs = {
+            "model": model,
+            "max_completion_tokens": 4096,
+            "messages": [{"role": "system", "content": sys_prompt}] + messages,
+        }
+        # Note: gpt-5.x reasoning models reject temperature; only set when supported
+        if temperature is not None and not model.startswith("gpt-5"):
+            kwargs["temperature"] = temperature
+        response = client.chat.completions.create(**kwargs)
         return (
             response.choices[0].message.content,
             response.usage.prompt_tokens,
@@ -455,7 +475,14 @@ Respond with ONLY a JSON object on a single line:
 {{"verdict": "correct"}} or {{"verdict": "incorrect", "reason": "<short reason>"}}"""
 
     try:
-        judge_response, _, _ = call_llm(model, [{"role": "user", "content": judge_prompt}])
+        # Judge gets temperature=0 (deterministic) and a minimal system prompt
+        # so the verdict doesn't drift across runs.
+        judge_response, _, _ = call_llm(
+            model,
+            [{"role": "user", "content": judge_prompt}],
+            system="You are an evaluator. Respond only with the JSON object requested.",
+            temperature=0,
+        )
         llm_pass, judge_reason = _parse_judge_verdict(judge_response)
         results.append({
             "check": "LLM judge",
