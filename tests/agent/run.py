@@ -436,31 +436,31 @@ def verify_webvoyager_task(
     })
 
     # 2. LLM-as-judge (more accurate, costs API call)
-    judge_prompt = f"""You are evaluating whether a web agent correctly answered a question.
+    # Use structured JSON output to avoid the "CORRECT" ⊂ "INCORRECT" substring trap
+    # that silently inflated 38% of judge results in earlier runs.
+    judge_prompt = f"""You are grading whether a web agent correctly answered a question.
 
 Task: {task['goal']}
 Reference answer: {ref}
 Agent's answer: {agent_answer}
 
-Does the agent's answer correctly address the task? Consider:
-- The answer may be worded differently but still correct
-- Partial answers that cover the key information count as correct
-- The reference may have multiple valid answers
+Rules:
+- The agent's wording may differ but the substantive content must match the reference.
+- Partial answers covering the key information count as correct.
+- The reference may admit multiple valid answers.
+- An answer that *describes how to do it* without actually having done it is INCORRECT.
+- An empty or evasive answer is INCORRECT.
 
-Respond with exactly one word: CORRECT or INCORRECT"""
+Respond with ONLY a JSON object on a single line:
+{{"verdict": "correct"}} or {{"verdict": "incorrect", "reason": "<short reason>"}}"""
 
     try:
         judge_response, _, _ = call_llm(model, [{"role": "user", "content": judge_prompt}])
-        # Bug fix: "CORRECT" is a substring of "INCORRECT". Check INCORRECT first.
-        upper = judge_response.upper()
-        if "INCORRECT" in upper:
-            llm_pass = False
-        else:
-            llm_pass = "CORRECT" in upper
+        llm_pass, judge_reason = _parse_judge_verdict(judge_response)
         results.append({
             "check": "LLM judge",
             "passed": llm_pass,
-            "detail": f"judge: {judge_response.strip()[:50]}",
+            "detail": f"judge: {'CORRECT' if llm_pass else 'INCORRECT'} — {judge_reason[:80]}",
         })
     except Exception as e:
         results.append({
@@ -470,6 +470,46 @@ Respond with exactly one word: CORRECT or INCORRECT"""
         })
 
     return results
+
+
+def _parse_judge_verdict(response: str) -> tuple[bool, str]:
+    """Parse {"verdict": "correct|incorrect", "reason": "..."} from judge response.
+
+    Falls back to keyword check (with INCORRECT-first ordering) if JSON
+    parsing fails — defensive against models that ignore the format spec.
+    """
+    # Try JSON first
+    text = response.strip()
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    # Find first { and matching }
+    start = text.find("{")
+    if start >= 0:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[start : i + 1])
+                        verdict = str(obj.get("verdict", "")).lower().strip()
+                        reason = str(obj.get("reason", "")).strip()
+                        if verdict in ("correct", "incorrect"):
+                            return verdict == "correct", reason or verdict
+                    except json.JSONDecodeError:
+                        pass
+                    break
+    # Fallback: keyword check (INCORRECT first to avoid substring trap)
+    upper = response.upper()
+    if "INCORRECT" in upper:
+        return False, "fallback parse"
+    if "CORRECT" in upper:
+        return True, "fallback parse"
+    return False, f"unparseable: {response[:60]}"
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +554,8 @@ def run_agent_task(
     steps = 0
     status = "incomplete"
     agent_answer = ""
+    commands_executed = 0  # tracks real bp commands the agent ran (not the start_url open)
+    observed_page = False  # did the agent actually look at any page state?
 
     for step in range(1, max_steps + 1):
         steps = step
@@ -573,6 +615,11 @@ def run_agent_task(
                 print(f"    $ bp {display}")
 
             r = bp(args)
+            commands_executed += 1
+            # Track whether agent ever observed page state. bp open alone is navigation,
+            # not observation — agents that only navigate then answer are "lazy".
+            if args and args[0] in ("read", "snapshot", "eval", "screenshot", "tabs", "cookies", "locate"):
+                observed_page = True
             truncated = _truncate_snapshot(r)
             results.append(f"$ {cmd_line[:200]}\n{truncated}")
             last_snapshot = truncated
@@ -597,9 +644,29 @@ def run_agent_task(
 
         time.sleep(0.2)
 
+    # Lazy agent detection: agent claimed completion without observing the page.
+    # "Real work" requires at least one read/snapshot/eval/etc. — bp open alone is
+    # just navigation, not observation. An agent that only navigates and then writes
+    # an answer is hallucinating from training data, not reading the live page.
+    # (The runner auto-opens start_url and feeds the resulting snapshot to the LLM,
+    # so for "ESPN standings" the agent CAN see the homepage links but not the
+    # actual standings table — answering anyway without a follow-up read is lazy.)
+    lazy = bool(agent_answer) and not observed_page
+    if lazy:
+        status = "lazy_failure"
+        if verbose:
+            print("  [LAZY] agent answered without observing the page")
+
     # Verify
     time.sleep(0.5)
-    if is_webvoyager:
+    if lazy:
+        # Skip judge — we already know the answer is bogus
+        verify_results = [{
+            "check": "Agent did real work",
+            "passed": False,
+            "detail": "agent produced answer without executing any bp commands",
+        }]
+    elif is_webvoyager:
         verify_results = verify_webvoyager_task(task, agent_answer, model)
     else:
         verify_results = verify_custom_task(task)
@@ -630,6 +697,7 @@ def run_agent_task(
         "verified": all_passed,
         "checks": verify_results,
         "steps": steps,
+        "commands_executed": commands_executed,
         "input_tokens": total_input,
         "output_tokens": total_output,
     }
