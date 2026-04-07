@@ -458,17 +458,26 @@ def verify_webvoyager_task(
     # 2. LLM-as-judge (more accurate, costs API call)
     # Use structured JSON output to avoid the "CORRECT" ⊂ "INCORRECT" substring trap
     # that silently inflated 38% of judge results in earlier runs.
-    judge_prompt = f"""You are grading whether a web agent correctly answered a question.
+    judge_prompt = f"""You are grading whether a web agent correctly answered a question about a live website.
 
 Task: {task['goal']}
-Reference answer: {ref}
+Reference answer (may be outdated — the benchmark was authored in 2023/2024): {ref}
 Agent's answer: {agent_answer}
 
-Rules:
-- The agent's wording may differ but the substantive content must match the reference.
+Grading rules:
+- The agent visited the live site NOW. If the task asks for "latest", "current",
+  "recent", or "most recent" data, the agent's answer reflects today's reality.
+  The reference may be stale. Accept factually-plausible current answers even when
+  the specific product version/name/date differs from the reference.
+  Example: reference says "MacBook Air M2 $1099"; agent says "MacBook Air M5 $1099" —
+  this is CORRECT (Apple moved to M5, prices held). Similarly iPhone 15 → iPhone 17.
+- For non-time-sensitive tasks (pronunciations, math, historical facts, fixed
+  documentation like "Enterprise has X GB more than Team"), the agent's answer must
+  match the reference's substantive content.
+- The agent's wording may differ but the substance must match.
 - Partial answers covering the key information count as correct.
-- The reference may admit multiple valid answers.
-- An answer that *describes how to do it* without actually having done it is INCORRECT.
+- An answer that describes how to do it without actually having done it is INCORRECT.
+- An answer that fabricates details the agent couldn't have verified is INCORRECT.
 - An empty or evasive answer is INCORRECT.
 
 Respond with ONLY a JSON object on a single line:
