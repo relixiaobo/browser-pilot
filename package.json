@@ -13,7 +13,10 @@
     "start": "node dist/cli.js",
     "test": "tsup && npx playwright test --project core --project compat --project network",
     "test:integration": "tsup && npx playwright test --project integration",
-    "test:all": "tsup && npx playwright test"
+    "test:all": "tsup && npx playwright test",
+    "test:agent": "python3 tests/agent/run.py",
+    "test:agent:dry": "python3 tests/agent/run.py --dry-run",
+    "test:agent:download": "python3 tests/agent/download_data.py"
   },
   "dependencies": {
     "commander": "^13.1.0",

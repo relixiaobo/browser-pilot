@@ -1,0 +1,13 @@
+{
+  "id": "heroku-dynamic-loading",
+  "name": "Wait for dynamically loaded content",
+  "goal": "Navigate to the dynamic loading page (Example 1: hidden element), click the Start button, wait for the loading to finish, and read the text that appears.",
+  "start_url": "https://the-internet.herokuapp.com/dynamic_loading/1",
+  "verify": [
+    {
+      "description": "Hidden text is now visible",
+      "command": ["bp", "eval", "document.querySelector('#finish h4')?.textContent"],
+      "expect_contains": "Hello World!"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "heroku-login",
+  "name": "Login to test site",
+  "goal": "Navigate to the login page, enter username 'tomsmith' and password 'SuperSecretPassword!', then click the Login button.",
+  "start_url": "https://the-internet.herokuapp.com/login",
+  "verify": [
+    {
+      "description": "Success message is displayed",
+      "command": ["bp", "eval", "document.querySelector('.flash.success')?.textContent?.trim()"],
+      "expect_contains": "You logged into a secure area!"
+    },
+    {
+      "description": "URL changed to /secure",
+      "command": ["bp", "eval", "location.pathname"],
+      "expect_contains": "/secure"
+    }
+  ]
+}

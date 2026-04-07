@@ -2,3 +2,8 @@ node_modules/
 dist/
 *.tgz
 .DS_Store
+tests/agent/data/
+tests/agent/__pycache__/
+test-results/
+screenshot-*.png
+.env

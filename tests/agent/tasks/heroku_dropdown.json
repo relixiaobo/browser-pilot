@@ -1,0 +1,13 @@
+{
+  "id": "heroku-dropdown",
+  "name": "Select dropdown option",
+  "goal": "Navigate to the dropdown page and select 'Option 2' from the dropdown menu.",
+  "start_url": "https://the-internet.herokuapp.com/dropdown",
+  "verify": [
+    {
+      "description": "Option 2 is selected",
+      "command": ["bp", "eval", "document.querySelector('#dropdown').value"],
+      "expect_contains": "2"
+    }
+  ]
+}

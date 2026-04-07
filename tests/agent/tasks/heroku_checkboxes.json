@@ -1,0 +1,13 @@
+{
+  "id": "heroku-checkboxes",
+  "name": "Check both checkboxes",
+  "goal": "Navigate to the checkboxes page and make sure both checkboxes are checked.",
+  "start_url": "https://the-internet.herokuapp.com/checkboxes",
+  "verify": [
+    {
+      "description": "Both checkboxes are checked",
+      "command": ["bp", "eval", "document.querySelectorAll('#checkboxes input:checked').length.toString()"],
+      "expect_contains": "2"
+    }
+  ]
+}
