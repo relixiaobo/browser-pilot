@@ -160,21 +160,48 @@ export async function disconnect(): Promise<void> {
   clearState();
 }
 
-/** Wait for document.readyState === 'complete'. Throws on timeout. */
+/** Wait for the page to be usable.
+ *  Returns when readyState === 'complete', OR when readyState === 'interactive'
+ *  has been stable for a short grace period (handles sites with slow trackers/ads
+ *  or anti-bot challenges where 'complete' never fires but the DOM is interactive).
+ *  Only throws if we never even reach 'interactive'. */
 export async function waitForLoad(transport: Transport, sessionId: string, timeout = 30_000): Promise<void> {
   const start = Date.now();
+  const interactiveGrace = 1500; // ms after first 'interactive' before giving up on 'complete'
+  let interactiveSince: number | null = null;
+
   while (Date.now() - start < timeout) {
     try {
       const { result } = await transport.send('Runtime.evaluate', {
         expression: 'document.readyState',
       }, sessionId);
-      if (result.value === 'complete') {
-        // Re-inject border (navigation destroys the old page's DOM)
+      const state = result.value;
+
+      if (state === 'complete') {
         await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
         return;
+      }
+
+      if (state === 'interactive') {
+        if (interactiveSince === null) interactiveSince = Date.now();
+        // DOM parsed and usable; if 'complete' doesn't come quickly, accept and move on
+        if (Date.now() - interactiveSince >= interactiveGrace) {
+          await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
+          return;
+        }
       }
     } catch { /* page navigating */ }
     await new Promise(r => setTimeout(r, 200));
   }
+
+  // Last-chance check: if DOM is at least interactive, accept rather than throw
+  try {
+    const { result } = await transport.send('Runtime.evaluate', { expression: 'document.readyState' }, sessionId);
+    if (result.value === 'interactive' || result.value === 'complete') {
+      await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
+      return;
+    }
+  } catch { /* */ }
+
   throw new Error('Page load timeout');
 }

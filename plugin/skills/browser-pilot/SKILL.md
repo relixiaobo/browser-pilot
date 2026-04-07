@@ -30,6 +30,51 @@ bp type 5 "hello" --submit    # type into [5] + Enter — returns snapshot
 bp disconnect                 # end session
 ```
 
+## Decision Tree (READ THIS FIRST)
+
+For every step, pick the right command in this order:
+
+1. **Need to GO somewhere?** → `bp open <url>`
+   - **Always prefer URL parameters over UI navigation** when possible.
+     - GitHub: `bp open "https://github.com/search?q=foo&type=repositories"`
+     - Allrecipes: `bp open "https://www.allrecipes.com/search?q=lasagna"`
+     - Amazon: `bp open "https://www.amazon.com/s?k=keyword"`
+     - ArXiv: `bp open "https://arxiv.org/list/cs.CL/recent"`
+   - This skips form-filling, is faster, and more reliable.
+
+2. **Need to READ page content** (search results, articles, lists, prices)? → `bp read`
+   - The snapshot only shows interactive elements (buttons, links, inputs).
+   - Search results, article bodies, recipe details, news, product cards are NOT in the snapshot.
+   - `bp read` returns the cleaned text content of the main area.
+   - `bp read ".selector"` for a specific region.
+
+3. **Need to CLICK or TYPE on a specific control?** → `bp snapshot` then `bp click <ref>` / `bp type <ref> "text"`
+   - The previous action's response already includes a fresh snapshot. **Don't call `bp snapshot` after a click/type — you already have one.**
+
+4. **Need STRUCTURED data** (specific attribute, JSON, computed value)? → `bp eval`
+   - Last resort. Use only when read/snapshot can't get what you need.
+
+5. **Have an answer?** → Output `ANSWER: <answer on one line>` and STOP.
+   - Don't repeat ANSWER. Don't write multi-line answers — keep it on one line so the runner can capture it.
+
+## Common Patterns
+
+```bash
+# Search a site (preferred — direct URL)
+bp open "https://github.com/search?q=climate+visualization&type=repositories&s=stars"
+bp read --limit 5000     # see the top results
+# Pick best match → bp open "https://github.com/owner/repo"
+# bp read for details
+
+# Look up a single page
+bp open "https://dictionary.cambridge.org/dictionary/english/serendipity"
+bp read
+
+# Scrape a list
+bp open "https://news.ycombinator.com/"
+bp read --limit 8000
+```
+
 ## Understanding Snapshots
 
 Every action (`open`, `click`, `type`, `keyboard`, `press`) returns a snapshot listing interactive elements:
@@ -71,6 +116,36 @@ Use the `[ref]` number in subsequent commands. Refs refresh after every action.
 | `bp keyboard "text"` | Type via keyboard events (no ref needed) |
 | `bp keyboard "text" --click ".sel"` | Click to focus, then type |
 | `bp keyboard "text" --clear` | Select all + delete, then type |
+
+### Reading Content
+| Command | Description |
+|---------|-------------|
+| `bp read` | Get cleaned text of the page's main content area |
+| `bp read ".search-results"` | Read text from a specific selector |
+| `bp read --limit 10000` | Allow longer output (default 5000 chars) |
+
+Use `bp read` whenever you need to *see* what's on the page (search results,
+articles, product listings, news, prices, ratings). It strips nav/footer/scripts and returns
+cleaned text. **This is what you want 90% of the time** — not `bp eval`.
+
+**ANTI-PATTERN — DO NOT DO THIS:**
+```bash
+# WRONG: using eval to extract text content
+bp eval "Array.from(document.querySelectorAll('.result')).map(e => e.innerText)"
+bp eval "document.querySelector('article').textContent"
+bp eval "document.body.innerText.substring(0, 3000)"
+```
+
+**RIGHT — use bp read:**
+```bash
+bp read                            # whole page main content
+bp read ".result"                  # just the results region
+bp read "article"                  # just the article
+```
+
+`bp read` is faster, cleaner (auto-strips nav/scripts/ads), and uses fewer tokens.
+Reach for `bp eval` only when you need a *specific attribute* (href, value, dataset)
+or *computed value* — not for plain text.
 
 ### JavaScript (escape hatch for anything)
 | Command | Description |

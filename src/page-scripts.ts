@@ -91,3 +91,33 @@ export function elementRect(selector: string): string {
     return {x:r.x, y:r.y, width:r.width, height:r.height};
   })())`;
 }
+
+/** Extract cleaned readable text from a page or element.
+ *  - Strips scripts/styles/nav/footer/aside/ads
+ *  - Collapses whitespace
+ *  - Returns title + url + text
+ *  Designed for LLM agents that need to "see" content the accessibility tree misses
+ *  (search results, article bodies, list cards).
+ */
+export function readContent(selector: string | null, limit: number): string {
+  return `JSON.stringify((() => {
+    const root = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : `(document.querySelector('main') || document.querySelector('article') || document.querySelector('[role="main"]') || document.body)`};
+    if (!root) return {ok:false, error:'No content root found'};
+    // Clone so we don't mutate the live DOM
+    const clone = root.cloneNode(true);
+    const drop = clone.querySelectorAll('script,style,noscript,nav,footer,aside,svg,iframe,[role="navigation"],[role="banner"],[role="contentinfo"],[aria-hidden="true"]');
+    drop.forEach(el => el.remove());
+    // Collapse whitespace
+    let text = (clone.innerText || clone.textContent || '').replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim();
+    const truncated = text.length > ${limit};
+    if (truncated) text = text.slice(0, ${limit});
+    return {
+      ok: true,
+      title: document.title,
+      url: location.href,
+      text,
+      length: text.length,
+      truncated
+    };
+  })())`;
+}

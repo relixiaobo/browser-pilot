@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
 import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
-import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect, IS_CONTENTEDITABLE, CONTENTEDITABLE_CLEAR } from './page-scripts.js';
+import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect, IS_CONTENTEDITABLE, CONTENTEDITABLE_CLEAR, readContent } from './page-scripts.js';
 import type { Transport } from './transport.js';
 
 const program = new Command();
@@ -25,6 +25,7 @@ Workflow:
   bp type <ref> <text>                # input text — returns updated snapshot
   bp keyboard <text>                  # type via keyboard events (Google Docs etc.)
   bp press <key>                      # press key — returns updated snapshot
+  bp read [selector]                  # extract page text content (search results, articles)
   bp eval <js>                        # run JavaScript (escape hatch for anything)
 
 Refs:
@@ -573,6 +574,53 @@ program.command('eval [expression]')
         console.log(JSON.stringify({ ok: true, value: result.value }));
       } else if (result.value !== undefined) {
         console.log(typeof result.value === 'object' ? JSON.stringify(result.value, null, 2) : String(result.value));
+      }
+    });
+  }));
+
+// ─── read ───────────────────────────────────────────
+
+program.command('read [selector]')
+  .description('Extract cleaned readable text from the page (or a CSS selector)')
+  .option('--limit <n>', 'max characters of text to return', '3000')
+  .addHelpText('after', `
+Returns title + url + cleaned text content. Use this when you need to "see"
+the actual content of a page (search results, articles, lists) — things the
+snapshot/accessibility tree does not capture.
+
+Strips: scripts, styles, nav, footer, aside, svg, iframe, ARIA-hidden elements.
+
+Examples:
+  bp read                              # main content of current page
+  bp read "main"                       # specific selector
+  bp read ".search-results"            # search results region only
+  bp read --limit 10000                # allow longer output
+
+When to use which command:
+  bp snapshot   → list interactive elements (buttons, links, inputs)
+  bp read       → page text content (search results, articles)
+  bp eval       → custom extraction (structured data, attributes)`)
+  .action(action(async (selector, opts) => {
+    const limit = parseInt(opts.limit, 10);
+    if (isNaN(limit) || limit < 1) throw new Error('--limit must be a positive integer');
+    await withPilot(async ({ transport, sessionId, state }) => {
+      const evalParams: Record<string, any> = {
+        expression: readContent(selector || null, limit),
+        returnByValue: true,
+      };
+      if (state.frameContextId) evalParams.contextId = state.frameContextId;
+      const { result, exceptionDetails } = await transport.send('Runtime.evaluate', evalParams, sessionId);
+      if (exceptionDetails) {
+        throw new Error(exceptionDetails.exception?.description || exceptionDetails.text || 'Read error');
+      }
+      const data = JSON.parse(result.value);
+      if (!data.ok) {
+        fail(data.error || 'Failed to read content', selector ? `Selector "${selector}" did not match.` : undefined);
+      }
+      if (useJson()) {
+        console.log(JSON.stringify({ ok: true, title: data.title, url: data.url, text: data.text, length: data.length, truncated: data.truncated }));
+      } else {
+        console.log(`${data.title}\n${data.url}\n${'─'.repeat(60)}\n${data.text}${data.truncated ? '\n... [truncated]' : ''}`);
       }
     });
   }));

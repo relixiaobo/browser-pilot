@@ -31,7 +31,9 @@ interface StoredRefs {
 export interface SnapshotData {
   title: string;
   url: string;
-  elements: Array<RefEntry & { ref: number; value?: string; checked?: boolean }>;
+  // NOTE: elements are exposed to LLM agents — keep this lean.
+  // backendNodeId is intentionally omitted (saved separately in REFS_FILE for resolution).
+  elements: Array<{ ref: number; role: string; name: string; value?: string; checked?: boolean }>;
 }
 
 export interface SnapshotResult {
@@ -102,7 +104,10 @@ export async function takeSnapshot(transport: Transport, sessionId: string, targ
         if (!props.disabled && hasIdentity && refs.length < limit) {
           const checked = props.checked === 'true' || props.checked === true ? true : undefined;
           refs.push({ backendNodeId: node.backendDOMNodeId, role: effectiveRole, name });
-          elements.push({ ref: refs.length, backendNodeId: node.backendDOMNodeId, role: effectiveRole, name, value, checked });
+          const el: SnapshotData['elements'][number] = { ref: refs.length, role: effectiveRole, name };
+          if (value !== undefined && value !== '') el.value = value;
+          if (checked) el.checked = true;
+          elements.push(el);
         }
       }
     }
