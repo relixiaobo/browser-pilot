@@ -24,10 +24,16 @@ export interface ClickOptions {
 
 export interface ActionServiceOptions {
   refStore?: RefStore;
-  observationService?: ObservationService;
+  observationService?: ActionObservationService;
   inputDispatcher?: InputDispatcher;
   readbackDelayMs?: number;
   focusDelayMs?: number;
+}
+
+export interface ActionObservationService {
+  readonly refs?: RefStore;
+  observeAfterAction(limit?: number): Promise<SnapshotResult>;
+  locate(selector: string): Promise<{ x: number; y: number }>;
 }
 
 export interface TypeOptions {
@@ -120,7 +126,7 @@ function inputEvidence(before: EditableState, after: EditableState, text: string
 
 export class ActionService {
   private readonly refStore: RefStore;
-  private readonly observations: ObservationService;
+  private readonly observations: ActionObservationService;
   private readonly input: InputDispatcher;
   private readonly readbackDelayMs: number;
   private readonly focusDelayMs: number;

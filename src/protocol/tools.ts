@@ -75,6 +75,7 @@ const inputEvidenceSchema = objectSchema({
 
 const artifactSchema = objectSchema({
   id: opaqueIdSchema,
+  workspaceId: opaqueIdSchema,
   kind: stringSchema({ enum: ['screenshot', 'screenshot_preview', 'pdf', 'download', 'upload_receipt'] }),
   mimeType: stringSchema({ minLength: 1, maxLength: 256 }),
   byteSize: integerSchema({ minimum: 0 }),
@@ -85,7 +86,7 @@ const artifactSchema = objectSchema({
   expiresAt: integerSchema({ minimum: 0 }),
   retained: booleanSchema(),
   previewOf: opaqueIdSchema,
-}, ['id', 'kind', 'mimeType', 'byteSize', 'sensitivity', 'createdAt', 'expiresAt', 'retained']);
+}, ['id', 'workspaceId', 'kind', 'mimeType', 'byteSize', 'sensitivity', 'createdAt', 'expiresAt', 'retained']);
 
 function resultSchema(
   context: ToolContext,
@@ -736,11 +737,16 @@ export function validateToolResult(name: string, value: unknown): JsonValue {
   return value as JsonValue;
 }
 
-export function getToolManifest(capabilities?: readonly Capability[]): ToolManifest {
+export function getToolManifest(
+  capabilities?: readonly Capability[],
+  availableTools?: readonly string[],
+): ToolManifest {
   const granted = capabilities ? new Set<string>(capabilities) : null;
-  const tools = granted
-    ? TOOL_DEFINITIONS.filter(definition => definition.requiredCapabilities.every(capability => granted.has(capability)))
-    : [...TOOL_DEFINITIONS];
+  const available = availableTools ? new Set(availableTools) : null;
+  const tools = TOOL_DEFINITIONS.filter(definition => (
+    (!granted || definition.requiredCapabilities.every(capability => granted.has(capability))) &&
+    (!available || available.has(definition.name))
+  ));
   return { schemaVersion: 1, tools };
 }
 

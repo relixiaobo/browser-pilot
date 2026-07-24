@@ -1,5 +1,7 @@
 export * from './capture-service.js';
+export * from './artifact-store.js';
 export * from './observation-service.js';
+export * from './observation-store.js';
 export * from './input-dispatcher.js';
 export * from './action-service.js';
 export * from './upload-service.js';
@@ -14,4 +16,5 @@ export * from './broker-runtime.js';
 export * from './controlled-target-registry.js';
 export * from './target-inventory-service.js';
 export * from './browser-target-catalog.js';
+export * from './browser-tool-service.js';
 export { FileRefStore, MemoryRefStore, type RefStore } from '../snapshot.js';

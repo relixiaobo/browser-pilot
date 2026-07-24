@@ -155,6 +155,25 @@ export interface LeaseReleaseResult {
   released: true;
 }
 
+export interface ToolCallParams {
+  name: string;
+  arguments: JsonValue;
+  workspaceId?: BrowserWorkspaceId;
+  leaseId?: ControlLeaseId;
+  targetId?: ControlledTargetId;
+}
+
+export interface ArtifactAccessParams {
+  workspaceId: BrowserWorkspaceId;
+  leaseId: ControlLeaseId;
+  artifactId: ArtifactId;
+}
+
+export interface ArtifactExportParams extends ArtifactAccessParams {
+  path: string;
+  overwrite?: boolean;
+}
+
 export interface JsonRpcRequest {
   jsonrpc: '2.0';
   id: string | number;

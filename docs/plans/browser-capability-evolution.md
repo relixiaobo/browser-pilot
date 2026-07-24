@@ -79,9 +79,10 @@ Preserve Browser Pilot advantages:
 - [ ] **B2.1** Move refs out of `~/.browser-pilot/refs.json` into ephemeral,
   Workspace-scoped Observation records.
   - Covers: FR-3, BR-13.
-  - Progress: snapshot resolution now depends on an injectable `RefStore`;
-    direct CLI use retains `FileRefStore`, while isolated service tests use
-    `MemoryRefStore`. Workspace and Observation scoping remains to be added.
+  - Progress: machine tool calls now use bounded in-memory Observation records
+    scoped by Workspace, Lease, target, session, loader, and browser generation.
+    Direct compatibility CLI calls retain `FileRefStore` until A2.3 provides
+    their compatibility Workspace.
 - [ ] **B2.2** Resolve refs using browser generation, target, CDP session,
   frame, loader, backend node, and document generation.
   - Covers: BR-13 through BR-15.
@@ -140,9 +141,11 @@ Preserve Browser Pilot advantages:
 - [ ] **B5.2** Mark passwords, cookies, auth, network bodies, uploads,
   downloads, screenshots, and selected page text with sensitivity metadata.
   - Covers: CON-5.
-- [ ] **B5.3** Return model-sized screenshot previews and original Artifacts
+- [x] **B5.3** Return model-sized screenshot previews and original Artifacts
   through Workstream A's Artifact service.
   - Covers: BR-20, AC-6.
+  - Complete: large machine captures return a Chrome-scaled preview by default
+    and an optional original with an explicit `previewOf` relationship.
 - [ ] **B5.4** Update the universal skill with decision guidance grounded in
   actual tool errors and state, not framework-specific prompts.
   - Covers: FR-1, FR-8.

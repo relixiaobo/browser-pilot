@@ -12,6 +12,7 @@ export interface BrowserMedia {
 export interface ScreenshotOptions {
   fullPage?: boolean;
   selector?: string;
+  scale?: number;
 }
 
 export interface PdfOptions {
@@ -62,6 +63,35 @@ function decodeMedia(data: unknown, operation: string): Uint8Array {
   return Buffer.from(data, 'base64');
 }
 
+function pngDimensions(bytes: Uint8Array): Pick<Rect, 'width' | 'height'> | undefined {
+  if (bytes.byteLength < 24) return undefined;
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (
+    buffer[0] !== 0x89 || buffer[1] !== 0x50 || buffer[2] !== 0x4e || buffer[3] !== 0x47 ||
+    buffer.toString('ascii', 12, 16) !== 'IHDR'
+  ) return undefined;
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  return width > 0 && height > 0 ? { width, height } : undefined;
+}
+
+function parseViewport(value: unknown): Rect {
+  if (typeof value !== 'object' || value === null) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid viewport metrics');
+  }
+  const metrics = value as Record<string, unknown>;
+  const viewport = (metrics.cssVisualViewport ?? metrics.cssLayoutViewport) as Record<string, unknown> | undefined;
+  if (!viewport) throw new BrowserPilotError('internal_error', 'Chrome returned invalid viewport metrics');
+  const x = viewport.pageX ?? 0;
+  const y = viewport.pageY ?? 0;
+  const width = viewport.clientWidth;
+  const height = viewport.clientHeight;
+  if (![x, y, width, height].every(Number.isFinite) || Number(width) <= 0 || Number(height) <= 0) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid viewport metrics');
+  }
+  return { x: Number(x), y: Number(y), width: Number(width), height: Number(height) };
+}
+
 export class CaptureService {
   constructor(
     private readonly transport: Transport,
@@ -70,7 +100,11 @@ export class CaptureService {
 
   async screenshot(options: ScreenshotOptions = {}): Promise<BrowserMedia> {
     const params: Record<string, unknown> = { format: 'png' };
-    let dimensions: Pick<Rect, 'width' | 'height'> | undefined;
+    const scale = options.scale ?? 1;
+    if (!Number.isFinite(scale) || scale <= 0 || scale > 1) {
+      throw invalidArgument('Screenshot scale must be greater than 0 and no more than 1', 'scale');
+    }
+    let captureRect: Rect | undefined;
 
     if (options.fullPage) {
       const { result } = await this.transport.send('Runtime.evaluate', {
@@ -79,8 +113,8 @@ export class CaptureService {
       }, this.sessionId);
       const fullRect = parseRect(result.value, 'full page', true);
       params.captureBeyondViewport = true;
-      params.clip = { ...fullRect, scale: 1 };
-      dimensions = { width: fullRect.width, height: fullRect.height };
+      captureRect = fullRect;
+      params.clip = { ...fullRect, scale };
     }
 
     if (options.selector) {
@@ -92,13 +126,23 @@ export class CaptureService {
         throw invalidArgument(`Element not found: ${options.selector}`, 'selector');
       }
       const rect = parseRect(result.value, 'selected element');
-      params.clip = { ...rect, scale: 1 };
-      dimensions = { width: rect.width, height: rect.height };
+      captureRect = rect;
+      params.clip = { ...rect, scale };
+    }
+
+    if (scale < 1 && !captureRect) {
+      captureRect = parseViewport(await this.transport.send('Page.getLayoutMetrics', {}, this.sessionId));
+      params.clip = { ...captureRect, scale };
     }
 
     const { data } = await this.transport.send('Page.captureScreenshot', params, this.sessionId);
+    const bytes = decodeMedia(data, 'screenshot');
+    const dimensions = pngDimensions(bytes) ?? (captureRect ? {
+      width: Math.max(1, Math.round(captureRect.width * scale)),
+      height: Math.max(1, Math.round(captureRect.height * scale)),
+    } : undefined);
     return {
-      bytes: decodeMedia(data, 'screenshot'),
+      bytes,
       mimeType: 'image/png',
       ...dimensions,
     };

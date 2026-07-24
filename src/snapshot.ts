@@ -81,6 +81,8 @@ export interface SnapshotData {
 export interface SnapshotResult {
   text: string;
   data: SnapshotData;
+  truncated?: boolean;
+  truncationReasons?: Array<'element_limit'>;
 }
 
 // ── Ref persistence (scoped to targetId) ────────────
@@ -119,6 +121,7 @@ export async function takeSnapshot(
   // Walk depth-first, collect interactive elements
   const refs: RefEntry[] = [];
   const elements: SnapshotData['elements'] = [];
+  let eligibleCount = 0;
 
   function walk(node: any): void {
     if (!node) return;
@@ -140,6 +143,9 @@ export async function takeSnapshot(
 
         // Allow empty name for input-like roles and editables; require name/value for buttons/links
         const hasIdentity = name || value || ALLOW_EMPTY_NAME.has(effectiveRole) || isEditable;
+        if (!props.disabled && hasIdentity) {
+          eligibleCount += 1;
+        }
         if (!props.disabled && hasIdentity && refs.length < limit) {
           const checked = props.checked === 'true' || props.checked === true ? true : undefined;
           refs.push({ backendNodeId: node.backendDOMNodeId, role: effectiveRole, name });
@@ -171,7 +177,13 @@ export async function takeSnapshot(
     }
   }
 
-  return { text: lines.join('\n'), data: { title, url, elements } };
+  const truncated = eligibleCount > limit;
+  return {
+    text: lines.join('\n'),
+    data: { title, url, elements },
+    truncated,
+    truncationReasons: truncated ? ['element_limit'] : [],
+  };
 }
 
 // ── Element resolution ──────────────────────────────

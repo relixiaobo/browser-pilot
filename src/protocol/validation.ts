@@ -2,6 +2,8 @@ import {
   CAPABILITIES,
   SUPPORTED_PROTOCOL_VERSIONS,
   type Capability,
+  type ArtifactAccessParams,
+  type ArtifactExportParams,
   type CapabilityNegotiation,
   type InitializeParams,
   type LeaseCreateParams,
@@ -16,6 +18,7 @@ import {
   type LaunchMode,
   type ProtocolRange,
   type ProtocolVersion,
+  type ToolCallParams,
   type WorkspaceCreateParams,
   type WorkspaceGetParams,
   type WorkspaceReleaseParams,
@@ -27,6 +30,8 @@ const INSTANCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 const MAX_ID_LENGTH = 256;
 const WORKSPACE_ID_PATTERN = /^workspace:[A-Za-z0-9._:-]+$/;
 const LEASE_ID_PATTERN = /^lease:[A-Za-z0-9._:-]+$/;
+const TARGET_ID_PATTERN = /^target:[A-Za-z0-9._:-]+$/;
+const ARTIFACT_ID_PATTERN = /^artifact:[A-Za-z0-9._:-]+$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -199,6 +204,55 @@ export function validateToolsListParams(value: unknown): Record<string, never> {
 
 export function validateShutdownParams(value: unknown): Record<string, never> {
   return validateOptionalEmptyParams(value);
+}
+
+export function validateToolCallParams(value: unknown): ToolCallParams {
+  if (!isRecord(value)) throw invalidArgument('tools/call params must be an object', 'params');
+  assertOnlyKeys(value, ['name', 'arguments', 'workspaceId', 'leaseId', 'targetId']);
+  if (!Object.hasOwn(value, 'arguments') || !isJsonValue(value.arguments)) {
+    throw invalidArgument('arguments must be valid JSON', 'arguments');
+  }
+  if (!isRecord(value.arguments)) {
+    throw invalidArgument('arguments must be a JSON object', 'arguments');
+  }
+  return {
+    name: requireString(value, 'name', { maxLength: 256 }),
+    arguments: value.arguments,
+    ...(value.workspaceId !== undefined ? {
+      workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as ToolCallParams['workspaceId'],
+    } : {}),
+    ...(value.leaseId !== undefined ? {
+      leaseId: validateOpaqueId(value, 'leaseId', LEASE_ID_PATTERN) as ToolCallParams['leaseId'],
+    } : {}),
+    ...(value.targetId !== undefined ? {
+      targetId: validateOpaqueId(value, 'targetId', TARGET_ID_PATTERN) as ToolCallParams['targetId'],
+    } : {}),
+  };
+}
+
+export function validateArtifactAccessParams(value: unknown): ArtifactAccessParams {
+  if (!isRecord(value)) throw invalidArgument('Artifact params must be an object', 'params');
+  assertOnlyKeys(value, ['workspaceId', 'leaseId', 'artifactId']);
+  return {
+    workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as ArtifactAccessParams['workspaceId'],
+    leaseId: validateOpaqueId(value, 'leaseId', LEASE_ID_PATTERN) as ArtifactAccessParams['leaseId'],
+    artifactId: validateOpaqueId(value, 'artifactId', ARTIFACT_ID_PATTERN) as ArtifactAccessParams['artifactId'],
+  };
+}
+
+export function validateArtifactExportParams(value: unknown): ArtifactExportParams {
+  if (!isRecord(value)) throw invalidArgument('artifacts/export params must be an object', 'params');
+  assertOnlyKeys(value, ['workspaceId', 'leaseId', 'artifactId', 'path', 'overwrite']);
+  if (value.overwrite !== undefined && typeof value.overwrite !== 'boolean') {
+    throw invalidArgument('overwrite must be a boolean', 'overwrite');
+  }
+  return {
+    workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as ArtifactExportParams['workspaceId'],
+    leaseId: validateOpaqueId(value, 'leaseId', LEASE_ID_PATTERN) as ArtifactExportParams['leaseId'],
+    artifactId: validateOpaqueId(value, 'artifactId', ARTIFACT_ID_PATTERN) as ArtifactExportParams['artifactId'],
+    path: requireString(value, 'path', { maxLength: 16_384 }),
+    ...(value.overwrite !== undefined ? { overwrite: value.overwrite } : {}),
+  };
 }
 
 export function validateWorkspaceCreateParams(value: unknown): WorkspaceCreateParams {

@@ -207,6 +207,16 @@ export class TargetInventoryService {
     this.registry.releaseLease(leaseId);
   }
 
+  activeTarget(context: TargetInventoryContext): ControlledTargetRecord | undefined {
+    return this.registry.activeTarget(context, context.leaseId);
+  }
+
+  releaseWorkspace(context: WorkspaceCallerContext): ControlledTargetInvalidation[] {
+    const invalidated = this.registry.releaseWorkspace(context);
+    this.emitInvalidations(invalidated);
+    return invalidated;
+  }
+
   private async readLiveTargets(): Promise<Map<string, RootTargetInfo>> {
     const result = await this.transport.send('Target.getTargets');
     if (!Array.isArray(result?.targetInfos)) {

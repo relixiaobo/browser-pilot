@@ -6,6 +6,8 @@ import {
 import {
   CAPABILITIES,
   DEFAULT_CAPABILITIES,
+  type ArtifactDescriptor,
+  type ArtifactId,
   type BrowserCandidate,
   type BrowserInstance,
   type BrowserWorkspace,
@@ -23,17 +25,27 @@ import {
   type ManagedTabSet,
   type ManagedTabSetId,
   type ProtocolLimits,
+  type ControlledTargetId,
 } from '../protocol/model.js';
-import { getToolManifest } from '../protocol/tools.js';
+import {
+  getToolDefinition,
+  getToolManifest,
+  validateToolArguments,
+  validateToolResult,
+  type ToolDefinition,
+} from '../protocol/tools.js';
 import {
   negotiateCapabilities,
   negotiateProtocol,
+  validateArtifactAccessParams,
+  validateArtifactExportParams,
   validateInitializeParams,
   validateLeaseCreateParams,
   validateLeaseHeartbeatParams,
   validateLeaseReleaseParams,
   validateShutdownParams,
   validateToolsListParams,
+  validateToolCallParams,
   validateWorkspaceCreateParams,
   validateWorkspaceGetParams,
   validateWorkspaceReleaseParams,
@@ -72,6 +84,53 @@ export interface BrokerRuntimeOptions {
   idFactory?: (kind: 'principal' | 'connection' | 'workspace' | 'tabset' | 'lease') => string;
   onLeaseReleased?: (lease: ControlLease) => void;
   onWorkspaceReleased?: (workspace: BrowserWorkspace, managedTabSet: ManagedTabSet) => void;
+  toolExecutor?: BrowserToolExecutor;
+  artifactStore?: BrokerArtifactStore;
+}
+
+export interface BrokerArtifactStore {
+  get(workspaceId: BrowserWorkspaceId, artifactId: ArtifactId): Promise<{
+    descriptor: ArtifactDescriptor;
+    path: string;
+  }>;
+  export(
+    workspaceId: BrowserWorkspaceId,
+    artifactId: ArtifactId,
+    destination: string,
+    overwrite?: boolean,
+  ): Promise<{ artifact: ArtifactDescriptor; path: string }>;
+  retain(workspaceId: BrowserWorkspaceId, artifactId: ArtifactId): Promise<{
+    descriptor: ArtifactDescriptor;
+    path: string;
+  }>;
+  release(workspaceId: BrowserWorkspaceId, artifactId: ArtifactId): Promise<void>;
+  releaseWorkspace(workspaceId: BrowserWorkspaceId): Promise<void>;
+}
+
+export interface BrokerToolCallContext {
+  principal: ClientPrincipal;
+  connection: ClientConnection;
+  capabilities: Capability[];
+  workspace?: BrowserWorkspace;
+  managedTabSet?: ManagedTabSet;
+  lease?: ControlLease;
+  targetId?: ControlledTargetId;
+  browser: BrokerBrowserBinding;
+}
+
+export interface BrowserToolExecutor {
+  readonly supportedTools: readonly string[];
+  call(
+    context: BrokerToolCallContext,
+    definition: ToolDefinition,
+    args: JsonValue,
+  ): Promise<JsonValue>;
+  releaseLease?(lease: ControlLease): void;
+  releaseWorkspace?(
+    principal: ClientPrincipal,
+    workspace: BrowserWorkspace,
+    managedTabSet: ManagedTabSet,
+  ): void;
 }
 
 interface RuntimeConnection {
@@ -192,7 +251,20 @@ export class MemoryBrokerRuntime {
     switch (method) {
       case 'tools/list':
         validateToolsListParams(params);
-        return asJson(getToolManifest(connection.grantedCapabilities));
+        return asJson(getToolManifest(
+          connection.grantedCapabilities,
+          this.options.toolExecutor?.supportedTools,
+        ));
+      case 'tools/call':
+        return this.callTool(connection, params);
+      case 'artifacts/get':
+        return this.getArtifact(connection, params);
+      case 'artifacts/export':
+        return this.exportArtifact(connection, params);
+      case 'artifacts/retain':
+        return this.retainArtifact(connection, params);
+      case 'artifacts/release':
+        return this.releaseArtifact(connection, params);
       case 'workspaces/create':
         return this.createWorkspace(connection, params);
       case 'workspaces/get':
@@ -319,6 +391,7 @@ export class MemoryBrokerRuntime {
   }
 
   private createWorkspace(connection: RuntimeConnection, value: unknown): JsonValue {
+    this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateWorkspaceCreateParams(value);
     const principalId = connection.value.principalId;
     const activeCount = [...this.workspaces.values()].filter(record => (
@@ -373,6 +446,7 @@ export class MemoryBrokerRuntime {
   }
 
   private getWorkspace(connection: RuntimeConnection, value: unknown): JsonValue {
+    this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateWorkspaceGetParams(value);
     const record = this.requireWorkspace(connection, params.workspaceId, true);
     return asJson({
@@ -382,6 +456,7 @@ export class MemoryBrokerRuntime {
   }
 
   private releaseWorkspace(connection: RuntimeConnection, value: unknown): JsonValue {
+    this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateWorkspaceReleaseParams(value);
     const record = this.requireWorkspace(connection, params.workspaceId, true);
     if (record.value.state !== 'released') this.releaseWorkspaceRecord(record);
@@ -389,6 +464,7 @@ export class MemoryBrokerRuntime {
   }
 
   private createLease(connection: RuntimeConnection, value: unknown): JsonValue {
+    this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateLeaseCreateParams(value);
     this.requireWorkspace(connection, params.workspaceId, false);
     const activeCount = [...this.leases.values()].filter(lease => (
@@ -424,6 +500,7 @@ export class MemoryBrokerRuntime {
   }
 
   private heartbeatLease(connection: RuntimeConnection, value: unknown): JsonValue {
+    this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateLeaseHeartbeatParams(value);
     const lease = this.requireLease(connection, params.leaseId, true);
     const now = this.now();
@@ -440,6 +517,7 @@ export class MemoryBrokerRuntime {
   }
 
   private releaseLease(connection: RuntimeConnection, value: unknown): JsonValue {
+    this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateLeaseReleaseParams(value);
     const lease = this.requireLease(connection, params.leaseId, false);
     if (lease.state === 'active') this.releaseLeaseRecord(lease, 'released');
@@ -510,6 +588,7 @@ export class MemoryBrokerRuntime {
   private releaseLeaseRecord(lease: ControlLease, state: 'released' | 'expired'): void {
     if (lease.state !== 'active') return;
     lease.state = state;
+    this.options.toolExecutor?.releaseLease?.(cloneLease(lease));
     this.options.onLeaseReleased?.(cloneLease(lease));
   }
 
@@ -523,10 +602,19 @@ export class MemoryBrokerRuntime {
     record.managedTabSet.state = 'closed';
     record.value.updatedAt = this.now();
     record.value.state = 'released';
+    const principal = this.principals.get(record.value.principalId);
+    if (principal) {
+      this.options.toolExecutor?.releaseWorkspace?.(
+        { ...principal, capabilities: [...principal.capabilities] },
+        cloneWorkspace(record.value),
+        cloneManagedTabSet(record.managedTabSet),
+      );
+    }
     this.options.onWorkspaceReleased?.(
       cloneWorkspace(record.value),
       cloneManagedTabSet(record.managedTabSet),
     );
+    void this.options.artifactStore?.releaseWorkspace(record.value.id).catch(() => {});
   }
 
   private pruneReleasedWorkspaces(): void {
@@ -581,6 +669,136 @@ export class MemoryBrokerRuntime {
       );
     }
     return ttlMs;
+  }
+
+  private async callTool(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
+    const params = validateToolCallParams(value);
+    const definition = getToolDefinition(params.name);
+    const executor = this.options.toolExecutor;
+    if (!executor || !executor.supportedTools.includes(definition.name)) {
+      throw invalidArgument(`Tool is not available in this Broker: ${definition.name}`, 'name');
+    }
+    this.assertCapabilities(connection, definition.requiredCapabilities);
+    const args = validateToolArguments(definition.name, params.arguments);
+    const principal = this.principals.get(connection.value.principalId)!;
+    let workspaceRecord: RuntimeWorkspace | undefined;
+    let lease: ControlLease | undefined;
+
+    if (definition.context !== 'connection') {
+      if (!params.workspaceId || !params.leaseId) {
+        throw invalidArgument(`${definition.name} requires workspaceId and leaseId`, 'params');
+      }
+      workspaceRecord = this.requireWorkspace(connection, params.workspaceId, false);
+      lease = this.requireLease(connection, params.leaseId, true);
+      if (lease.workspaceId !== workspaceRecord.value.id) {
+        throw new BrowserPilotError('lease_expired', 'Lease does not belong to the requested Workspace', {
+          context: { workspaceId: params.workspaceId, leaseId: params.leaseId },
+        });
+      }
+      this.assertLeaseCapabilities(lease, definition.requiredCapabilities);
+      workspaceRecord.value.updatedAt = this.now();
+    }
+    if (definition.context === 'target' && !params.targetId) {
+      throw invalidArgument(`${definition.name} requires targetId`, 'targetId');
+    }
+
+    const binding = workspaceRecord
+      ? this.browserBindings.find(candidate => candidate.instance.id === workspaceRecord!.value.browserInstanceId)
+      : this.browserBindings.find(candidate => candidate.candidate.state === 'ready');
+    if (!binding) {
+      throw new BrowserPilotError('browser_disconnected', 'Workspace browser is disconnected', {
+        retryable: true,
+        context: workspaceRecord ? { workspaceId: workspaceRecord.value.id } : undefined,
+      });
+    }
+
+    const result = await executor.call({
+      principal: { ...principal, capabilities: [...principal.capabilities] },
+      connection: { ...connection.value, protocol: { ...connection.value.protocol } },
+      capabilities: [...connection.grantedCapabilities],
+      ...(workspaceRecord ? {
+        workspace: cloneWorkspace(workspaceRecord.value),
+        managedTabSet: cloneManagedTabSet(workspaceRecord.managedTabSet),
+      } : {}),
+      ...(lease ? { lease: cloneLease(lease) } : {}),
+      ...(params.targetId ? { targetId: params.targetId } : {}),
+      browser: {
+        candidate: { ...binding.candidate },
+        instance: { ...binding.instance },
+      },
+    }, definition, args);
+    return validateToolResult(definition.name, result);
+  }
+
+  private async getArtifact(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
+    const params = validateArtifactAccessParams(value);
+    this.requireArtifactContext(connection, params.workspaceId, params.leaseId);
+    const record = await this.requireArtifactStore().get(params.workspaceId, params.artifactId);
+    return asJson({ artifact: record.descriptor, path: record.path });
+  }
+
+  private async exportArtifact(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
+    const params = validateArtifactExportParams(value);
+    this.requireArtifactContext(connection, params.workspaceId, params.leaseId);
+    return asJson(await this.requireArtifactStore().export(
+      params.workspaceId,
+      params.artifactId,
+      params.path,
+      params.overwrite,
+    ));
+  }
+
+  private async retainArtifact(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
+    const params = validateArtifactAccessParams(value);
+    this.requireArtifactContext(connection, params.workspaceId, params.leaseId);
+    const record = await this.requireArtifactStore().retain(params.workspaceId, params.artifactId);
+    return asJson({ artifact: record.descriptor, path: record.path });
+  }
+
+  private async releaseArtifact(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
+    const params = validateArtifactAccessParams(value);
+    this.requireArtifactContext(connection, params.workspaceId, params.leaseId);
+    await this.requireArtifactStore().release(params.workspaceId, params.artifactId);
+    return asJson({ artifactId: params.artifactId, released: true });
+  }
+
+  private requireArtifactContext(
+    connection: RuntimeConnection,
+    workspaceId: BrowserWorkspaceId,
+    leaseId: ControlLeaseId,
+  ): void {
+    this.assertCapabilities(connection, ['artifact.read']);
+    this.requireWorkspace(connection, workspaceId, false);
+    const lease = this.requireLease(connection, leaseId, true);
+    if (lease.workspaceId !== workspaceId) {
+      throw new BrowserPilotError('lease_expired', 'Lease does not belong to the requested Workspace', {
+        context: { workspaceId, leaseId },
+      });
+    }
+    this.assertLeaseCapabilities(lease, ['artifact.read']);
+  }
+
+  private requireArtifactStore(): BrokerArtifactStore {
+    if (this.options.artifactStore) return this.options.artifactStore;
+    throw new BrowserPilotError('artifact_not_found', 'Artifact storage is unavailable');
+  }
+
+  private assertCapabilities(connection: RuntimeConnection, required: readonly Capability[]): void {
+    const granted = new Set(connection.grantedCapabilities);
+    const missing = required.filter(capability => !granted.has(capability));
+    if (missing.length === 0) return;
+    throw new BrowserPilotError('capability_denied', 'Required capability was not negotiated', {
+      context: { missingCapabilities: missing },
+    });
+  }
+
+  private assertLeaseCapabilities(lease: ControlLease, required: readonly Capability[]): void {
+    const granted = new Set(lease.capabilities);
+    const missing = required.filter(capability => !granted.has(capability));
+    if (missing.length === 0) return;
+    throw new BrowserPilotError('capability_denied', 'Lease does not carry the required capability', {
+      context: { leaseId: lease.id, missingCapabilities: missing },
+    });
   }
 
   private assertBridgeSessionId(value: string): void {

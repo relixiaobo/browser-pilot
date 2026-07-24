@@ -144,6 +144,7 @@ test('tool result schemas require controlled-target context', () => {
     url: 'https://example.com',
     artifact: {
       id: 'artifact:123',
+      workspaceId: 'workspace:123',
       kind: 'screenshot',
       mimeType: 'image/png',
       byteSize: 100,

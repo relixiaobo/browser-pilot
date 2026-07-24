@@ -2,6 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CaptureService } from '../dist/services.js';
 
+function png(width, height) {
+  const bytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47]).copy(bytes);
+  Buffer.from('IHDR').copy(bytes, 12);
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes;
+}
+
 class FakeTransport {
   calls = [];
   responses = [];
@@ -90,4 +99,37 @@ test('capture service returns PDF bytes and forwards landscape mode', async () =
     params: { landscape: true },
     sessionId: 'session-5',
   });
+});
+
+test('capture service asks Chrome for a scaled viewport and reports PNG dimensions', async () => {
+  const transport = new FakeTransport();
+  transport.enqueue({
+    cssVisualViewport: { pageX: 5, pageY: 10, clientWidth: 3200, clientHeight: 2000 },
+  });
+  transport.enqueue({ data: png(1600, 1000).toString('base64') });
+
+  const media = await new CaptureService(transport, 'session-6').screenshot({ scale: 0.5 });
+
+  assert.equal(media.width, 1600);
+  assert.equal(media.height, 1000);
+  assert.deepEqual(transport.calls, [
+    { method: 'Page.getLayoutMetrics', params: {}, sessionId: 'session-6' },
+    {
+      method: 'Page.captureScreenshot',
+      params: {
+        format: 'png',
+        clip: { x: 5, y: 10, width: 3200, height: 2000, scale: 0.5 },
+      },
+      sessionId: 'session-6',
+    },
+  ]);
+});
+
+test('capture service validates internal preview scale before CDP dispatch', async () => {
+  const transport = new FakeTransport();
+  await assert.rejects(
+    () => new CaptureService(transport, 'session-7').screenshot({ scale: 0 }),
+    error => error.code === 'invalid_argument' && error.context?.field === 'scale',
+  );
+  assert.equal(transport.calls.length, 0);
 });

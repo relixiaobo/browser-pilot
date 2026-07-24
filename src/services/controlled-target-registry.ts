@@ -334,6 +334,35 @@ export class MemoryControlledTargetRegistry {
     this.activeByLease.delete(leaseId);
   }
 
+  activeTarget(
+    context: WorkspaceCallerContext,
+    leaseId: ControlLeaseId,
+  ): ControlledTargetRecord | undefined {
+    const targetId = this.activeByLease.get(leaseId);
+    if (!targetId) return undefined;
+    const record = this.records.get(targetId);
+    if (!record || record.state !== 'active') {
+      this.activeByLease.delete(leaseId);
+      return undefined;
+    }
+    this.assertCallerOwns(context, record);
+    return cloneRecord(record);
+  }
+
+  releaseWorkspace(context: WorkspaceCallerContext): ControlledTargetInvalidation[] {
+    const invalidated: ControlledTargetInvalidation[] = [];
+    for (const record of [...this.records.values()]) {
+      if (
+        record.state === 'active' &&
+        record.principalId === context.principalId &&
+        record.workspaceId === context.workspaceId
+      ) {
+        invalidated.push(this.invalidate(record, 'target_detached'));
+      }
+    }
+    return invalidated;
+  }
+
   setActive(context: WorkspaceCallerContext, leaseId: ControlLeaseId, targetId: ControlledTargetId): void {
     const record = this.records.get(targetId);
     const controller = record

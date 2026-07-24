@@ -7,6 +7,8 @@ import { CDPClient } from './cdp.js';
 import { asBrowserPilotError, invalidArgument } from './protocol/errors.js';
 import type { BrowserInstanceId, JsonValue } from './protocol/model.js';
 import { DEFAULT_PROTOCOL_LIMITS, MemoryBrokerRuntime } from './services/broker-runtime.js';
+import { BrowserToolService } from './services/browser-tool-service.js';
+import { ArtifactStore } from './services/artifact-store.js';
 
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
@@ -139,28 +141,39 @@ async function main() {
   const startedAt = Date.now();
   const browserId = `browser:${randomUUID()}`;
   const browserInstanceId = `browser-instance:${randomUUID()}` as BrowserInstanceId;
+  const browserBinding = {
+    candidate: {
+      id: browserId,
+      product: browserProduct,
+      profile: browserProfile,
+      state: 'ready' as const,
+    },
+    instance: {
+      id: browserInstanceId,
+      product: browserProduct,
+      profilePath: browserProfile,
+      processIdentity: wsUrl,
+      connectionGeneration: 1,
+      state: 'connected' as const,
+    },
+  };
+  const artifactStore = new ArtifactStore({
+    maxArtifactBytes: DEFAULT_PROTOCOL_LIMITS.maxArtifactBytes,
+  });
+  await artifactStore.initialize();
+  const browserTools = new BrowserToolService(cdp, browserBinding, { artifactStore });
   const broker = new MemoryBrokerRuntime({
     serviceVersion: PKG_VERSION,
     executableVersion: PKG_VERSION,
     brokerProcessIdentity: `${process.pid}:${startedAt}`,
-    browsers: [{
-      candidate: {
-        id: browserId,
-        product: browserProduct,
-        profile: browserProfile,
-        state: 'ready',
-      },
-      instance: {
-        id: browserInstanceId,
-        product: browserProduct,
-        profilePath: browserProfile,
-        processIdentity: wsUrl,
-        connectionGeneration: 1,
-        state: 'connected',
-      },
-    }],
+    browsers: [browserBinding],
+    toolExecutor: browserTools,
+    artifactStore,
   });
-  const leaseSweepTimer = setInterval(() => broker.sweepExpiredLeases(), 1_000);
+  const leaseSweepTimer = setInterval(() => {
+    broker.sweepExpiredLeases();
+    void artifactStore.sweep().catch(() => {});
+  }, 1_000);
   leaseSweepTimer.unref();
 
   // ── Dialog auto-handling ──────────────────────────
@@ -323,11 +336,12 @@ async function main() {
       }
       if (req.method === 'POST' && url.pathname === '/shutdown') {
         res.writeHead(200); res.end(JSON.stringify({ ok: true }));
-        setTimeout(() => {
+        setTimeout(async () => {
           clearInterval(leaseSweepTimer);
           broker.close();
           server.close();
           cdp.close();
+          await artifactStore.clear().catch(() => {});
           cleanup();
           process.exit(0);
         }, 50); return;
@@ -440,15 +454,20 @@ async function main() {
     try { chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
     writeFileSync(PID_FILE, String(process.pid), { mode: 0o600 });
   });
-  const terminate = () => {
+  let terminating = false;
+  const terminate = async () => {
+    if (terminating) return;
+    terminating = true;
     clearInterval(leaseSweepTimer);
     broker.close();
+    server.close();
     cdp.close();
+    await artifactStore.clear().catch(() => {});
     cleanup();
     process.exit(0);
   };
-  process.on('SIGTERM', terminate);
-  process.on('SIGINT', terminate);
+  process.on('SIGTERM', () => { void terminate(); });
+  process.on('SIGINT', () => { void terminate(); });
 }
 
 main().catch((err) => { process.stderr.write(`Daemon error: ${err.message}\n`); process.exit(1); });

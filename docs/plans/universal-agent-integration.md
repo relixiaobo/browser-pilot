@@ -70,15 +70,15 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 
 ### A2. Build Broker domain isolation
 
-- [ ] **A2.1** Implement ClientPrincipal, ClientConnection,
+- [x] **A2.1** Implement ClientPrincipal, ClientConnection,
   BrowserWorkspace, ManagedTabSet, ControlLease, BrowserInstance,
   and ControlledTarget registries.
   - Covers: FR-3, FR-4, FR-5.
-  - Progress: the daemon now owns bounded in-memory Principal, Connection,
+  - Complete: the daemon owns bounded in-memory Principal, Connection,
     Workspace, default ManagedTabSet, and Lease registries. Principal identity
     survives a bridge reconnect within one daemon lifetime; Connection-owned
     Leases do not.
-- [ ] **A2.2** Create managed targets only through the control registry and
+- [x] **A2.2** Create managed targets only through the control registry and
   validate the complete popup opener chain before adoption.
   - Covers: BR-1, BR-2, AC-4.
   - Progress: legacy CLI popup adoption now requires a complete opener chain
@@ -86,6 +86,9 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     Broker-only target creation remain.
   - Progress: the Broker inventory foundation now adopts managed popups only
     through a complete live opener chain and refuses to cross a user-tab record.
+  - Complete: machine-created targets enter through `BrowserToolService` and
+    `MemoryControlledTargetRegistry`; no public machine call accepts a raw CDP
+    target ID.
 - [ ] **A2.3** Replace global target/frame/session state with Workspace and
   Lease state; provide a compatibility Workspace for one-shot CLI calls.
   - Covers: FR-1, FR-3, AC-1, AC-3.
@@ -112,20 +115,20 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     targets, Browser Pilot internal targets, DevTools, unsupported internal
     pages, and non-page targets are excluded.
   - Complete: `CdpBrowserTargetCatalog` implements the CDP catalog boundary.
-- [ ] **A2.8** Merge ManagedTabSets and all eligible user tabs in
+- [x] **A2.8** Merge ManagedTabSets and all eligible user tabs in
   ControlledTarget resolution, listing, switching, and popup inheritance.
   - Covers: BR-1, BR-2, BR-23 through BR-27.
   - Acceptance: `tabs.list` returns managed and user tabs with
     origin metadata; conflicting control reports `target_busy`; bulk cleanup
     closes only managed tabs; closing a user tab is explicit.
-  - Progress: `MemoryControlledTargetRegistry`, `TargetInventoryService`, and
+  - Complete: `MemoryControlledTargetRegistry`, `TargetInventoryService`, and
     `CdpBrowserTargetCatalog` now provide opaque per-Workspace target IDs,
     immediate managed/user inventory merging, dynamic new-tab discovery,
     physical-target Lease exclusion across Principals, ineligible-target
-    invalidation, and safe managed-only bulk close. Observation-store wiring
-    and Broker/bridge handlers remain. The compatibility CLI now lists,
-    switches to, and explicitly closes eligible user tabs; `close --all` closes
-    only its managed targets and user-tab control survives with no Pilot tab.
+    invalidation, managed-popup inheritance, and safe managed-only bulk close.
+    `tools/call` now lists, switches to, and explicitly closes both origins;
+    Workspace release closes only managed targets. The compatibility CLI
+    retains the same all-tab behavior.
 
 ### A3. Add bounded runtime lifecycle and command semantics
 
@@ -164,8 +167,9 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   - Covers: AC-2, FR-7.
   - Includes direct all-tab inventory and optional Host-configured operation
     removal. There are no browser-access approval methods.
-  - Progress: canonical `tools/list` plus Workspace/Lease lifecycle methods are
-    implemented. `tools/call`, cancellation, and inventory wiring remain.
+  - Progress: canonical `tools/list`, validated `tools/call`, Workspace/Lease
+    lifecycle, all-tab inventory, and production implementation filtering are
+    implemented. Command cancellation remains.
 - [ ] **A4.3** Implement event notifications plus cursor polling and
   `cursor_expired` recovery.
   - Covers: events contract, NFR-3.
@@ -178,15 +182,20 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 
 ### A5. Deliver secure Artifacts
 
-- [ ] **A5.1** Add protected Artifact storage, metadata, quotas, TTL, preview
+- [x] **A5.1** Add protected Artifact storage, metadata, quotas, TTL, preview
   relationships, retain/release, and cleanup.
   - Covers: BR-17 through BR-20, FR-6.
 - [ ] **A5.2** Return screenshot, PDF, and download results as Artifacts while
   keeping explicit CLI export behavior compatible.
   - Covers: AC-1, AC-6.
-- [ ] **A5.3** Add adapter-facing file authorization and revoke access on
+  - Progress: screenshot and PDF tools return scoped Artifacts; large captures
+    produce model-sized previews with optional originals. Download integration
+    remains.
+- [x] **A5.3** Add adapter-facing file authorization and revoke access on
   release or expiry.
   - Covers: CON-5, NFR-5.
+  - Complete: get/export/retain/release require an owning active Workspace and
+    Lease; release, expiry, Workspace cleanup, and Broker shutdown delete bytes.
 
 ### A6. Browser discovery and multi-version operation
 

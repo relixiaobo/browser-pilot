@@ -1,7 +1,7 @@
 # Stdio Bridge Integration Contract
 
-Status: transport and lifecycle foundation implemented; browser `tools/call`,
-events, and Artifacts remain release blockers.
+Status: browser `tools/call`, scoped Observations, target inventory, and
+Artifacts implemented; command recovery and events remain release blockers.
 
 This document describes the Agent-neutral process boundary. Tenon, OpenClaw,
 and other Agent hosts use the same executable and protocol. No consumer imports
@@ -69,19 +69,24 @@ The implemented lifecycle surface is:
 ```text
 initialize
 tools/list
+tools/call
 workspaces/create
 workspaces/get
 workspaces/release
 leases/create
 leases/heartbeat
 leases/release
+artifacts/get
+artifacts/export
+artifacts/retain
+artifacts/release
 shutdown
 ```
 
 `workspaces/create` accepts an optional `browserId`. Without one, the Broker
 uses its ready browser binding. It returns a Workspace and its default logical
 ManagedTabSet. Creating a Workspace does not itself create a browser window;
-the first managed navigation will do that after `tools/call` is wired.
+the first managed navigation creates the dedicated browser window.
 
 `leases/create` accepts a `workspaceId` and optional `ttlMs`. The default Lease
 is 30 seconds, with a supported range of 1 second through 5 minutes. Heartbeat
@@ -93,6 +98,42 @@ Workspace identity belongs to `client.id + client.instanceId` for the lifetime
 of the daemon. It is transient and is never restored from disk after Broker
 restart. A Workspace released twice returns the same successful release result
 while its bounded tombstone remains available.
+
+## Tool Calls
+
+`tools/list` returns only operations implemented by the running Broker and
+allowed by negotiated capabilities. Call those tools with one uniform envelope:
+
+```json
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"browser.observe","arguments":{"limit":50},"workspaceId":"workspace:...","leaseId":"lease:...","targetId":"target:..."}}
+```
+
+Connection tools omit Workspace fields. Workspace tools require
+`workspaceId + leaseId`; target tools additionally require the opaque
+`targetId` returned by `browser.tabs.list` or `browser.open`. Raw CDP target and
+session IDs are never public inputs. The Broker validates the negotiated
+capability, Lease ownership, tool schema, and target control before dispatch.
+
+Inventory includes every eligible ordinary user tab plus the Workspace's
+managed tabs. A physical tab can be controlled by only one Lease at a time.
+Releasing a Workspace closes managed tabs but leaves user tabs open.
+
+## Artifacts
+
+`browser.capture` and `browser.pdf` return Artifact descriptors, never base64 or
+an internal path. Use `artifacts/get` with the owning active Workspace and Lease
+to obtain a protected local path, or `artifacts/export` with an absolute path to
+copy the file to client-owned storage. Export does not overwrite by default.
+
+Artifacts expire after 15 minutes by default. `artifacts/retain` extends that
+to the retained TTL; `artifacts/release` removes the bytes immediately.
+Workspace release and Broker shutdown also remove owned temporary bytes.
+Directories use mode `0700` and files use `0600` where POSIX permissions apply.
+
+Large screenshots default to a model-sized preview. Pass
+`includeOriginal: true` to receive both the original descriptor and a preview
+descriptor whose `previewOf` points to the original. The adapter reads the
+selected file and converts it to its Agent runtime's native image/file content.
 
 ## Cleanup
 
@@ -109,8 +150,9 @@ or command state.
 
 ## Current Release Gate
 
-`tools/list` is generated from the canonical schemas already used for argument
-and result validation. The listed browser tools are not release-ready until the
-next phase connects `tools/call` to Workspace-scoped target/session/ref services.
+`tools/list` is generated from the canonical schemas used for argument and
+result validation, and production filtering prevents unwired tools from being
+advertised. The current bridge supports discovery, connect, open, tab inventory,
+observe/read, core actions, cookies, eval, screenshot, PDF, and Artifact access.
 An embedding adapter should not ship against this work-in-progress bridge until
-that gate, event recovery, and Artifact delivery are complete.
+command outcome recovery, cancellation, and event replay are complete.
