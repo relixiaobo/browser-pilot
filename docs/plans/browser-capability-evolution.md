@@ -89,6 +89,8 @@ Preserve Browser Pilot advantages:
 - [ ] **B2.3** Hard-invalidate on navigation, loader replacement, frame/session
   detach, target detach, and reconnect, emitting typed reasons.
   - Covers: BR-14, AC-5.
+  - Progress: machine Observations now invalidate on every listed lifecycle,
+    including browser generation restoration; compatibility CLI refs remain.
 - [ ] **B2.4** Revalidate live nodes after same-document mutation and return
   `stale_ref` instead of acting on a changed semantic target.
   - Covers: BR-15, AC-8.
@@ -119,17 +121,20 @@ Preserve Browser Pilot advantages:
 
 ### B4. Produce typed browser events and recovery state
 
-- [ ] **B4.1** Normalize CDP events into the BrowserEvent taxonomy for
+- [x] **B4.1** Normalize CDP events into the BrowserEvent taxonomy for
   navigation, document, target, popup, dialog, download, connection, and
   observation invalidation.
   - Covers: event contract, NFR-3.
-  - Progress: navigation, document change, target attach/detach and control,
+  - Complete: navigation, document change, target attach/detach and control,
     managed popup, dialog, Observation invalidation, Command status, and Lease
-    expiry and sanitized Workspace network producers are connected. Download and
-    connection recovery producers remain.
+    expiry, sanitized Workspace network, scoped download, and browser connection
+    recovery producers are connected.
 - [ ] **B4.2** Add watchdogs for browser disconnect, stalled navigation,
   detached frames, unhandled dialogs, and repeated no-progress actions.
   - Covers: FR-5, FR-8.
+  - Progress: WebSocket loss is detected immediately and starts selected-profile
+    rediscovery with bounded backoff. Stalled navigation, unhandled-dialog, and
+    repeated-no-progress watchdogs remain.
 - [x] **B4.3** Replace dialog auto-accept with explicit pending state and
   accept/dismiss commands.
   - Covers: DEC-5.
@@ -148,9 +153,9 @@ Preserve Browser Pilot advantages:
 - [ ] **B5.2** Mark passwords, cookies, auth, network bodies, uploads,
   downloads, screenshots, and selected page text with sensitivity metadata.
   - Covers: CON-5.
-  - Progress: auth input, cookie/network output, screenshots, and imported upload
-    inputs carry explicit sensitivity. Download and selected-text propagation
-    remain.
+  - Progress: auth input, cookie/network output, screenshots, imported upload
+    inputs, and download events/Artifacts carry explicit sensitivity. Selected
+    text propagation remains.
 - [x] **B5.3** Return model-sized screenshot previews and original Artifacts
   through Workstream A's Artifact service.
   - Covers: BR-20, AC-6.

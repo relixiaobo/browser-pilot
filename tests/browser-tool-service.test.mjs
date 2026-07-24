@@ -865,3 +865,62 @@ test('large screenshots return a model-sized preview and include the original on
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(artifactStore.size(), 0);
 });
+
+test('browser reconnection retires CDP sessions, refs, and opaque target IDs before reuse', async () => {
+  const transport = new BrowserFixtureTransport();
+  const connectionBinding = structuredClone(binding);
+  const browserTools = new BrowserToolService(transport, connectionBinding);
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:reconnect',
+    browsers: [connectionBinding],
+    toolExecutor: browserTools,
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:reconnect',
+    'com.example.agent',
+    'instance:reconnect',
+  );
+  const before = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
+  const oldTargetId = before.targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, oldTargetId);
+
+  runtime.updateBrowserConnection(connectionBinding.instance.id, {
+    state: 'disconnected',
+    connectionGeneration: 1,
+  });
+  runtime.updateBrowserConnection(connectionBinding.instance.id, {
+    state: 'connected',
+    connectionGeneration: 2,
+    processIdentity: 'process:test:restored',
+  });
+  const replayed = await runtime.call(client.bridge, 'events/poll', {
+    workspaceId: client.workspace.id,
+    cursor: client.eventCursor,
+  });
+  assert.deepEqual(replayed.events
+    .map(event => event.type)
+    .filter(type => type !== 'command.status'), [
+    'target.attached',
+    'target_control.acquired',
+    'connection.lost',
+    'observation.invalidated',
+    'connection.restored',
+    'observation.invalidated',
+    'target.detached',
+  ]);
+
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.click', {
+      target: {
+        observationId: observed.observationId,
+        ref: 1,
+      },
+    }, oldTargetId),
+    error => error.code === 'target_not_owned',
+  );
+  const after = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
+  assert.equal(after.targets.length, 1);
+  assert.notEqual(after.targets[0].targetId, oldTargetId);
+});

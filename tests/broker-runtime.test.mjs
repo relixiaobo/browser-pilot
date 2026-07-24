@@ -352,6 +352,81 @@ test('Broker records unknown outcomes after a dispatched browser disconnect', as
   assert.equal(queried.error.data.code, 'unknown_outcome');
 });
 
+test('Broker publishes one lost/restored pair, rejects disconnected tools, and advances generation', async () => {
+  const changes = [];
+  const runtime = createRuntime({
+    toolExecutor: {
+      supportedTools: ['browser.connect'],
+      browserConnectionChanged(previous, current) {
+        changes.push([previous.state, current.state, current.connectionGeneration]);
+      },
+      async call(context) {
+        return {
+          workspaceId: context.workspace.id,
+          leaseId: context.lease.id,
+          browserInstanceId: context.browser.instance.id,
+          connectionGeneration: context.browser.instance.connectionGeneration,
+          state: context.browser.instance.state,
+        };
+      },
+    },
+  });
+  await initialize(runtime, 'bridge:lifecycle', {
+    requestedCapabilities: ['browser.control', 'workspace.manage', 'event.read'],
+  });
+  const created = await runtime.call('bridge:lifecycle', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:lifecycle', 'leases/create', {
+    workspaceId: created.workspace.id,
+  });
+
+  runtime.updateBrowserConnection('browser-instance:test', {
+    state: 'disconnected',
+    connectionGeneration: 1,
+  });
+  runtime.updateBrowserConnection('browser-instance:test', {
+    state: 'reconnecting',
+    connectionGeneration: 1,
+  });
+  await assert.rejects(
+    () => runtime.call('bridge:lifecycle', 'tools/call', {
+      name: 'browser.connect',
+      arguments: { browserId: 'browser:test' },
+      workspaceId: created.workspace.id,
+      leaseId: lease.id,
+    }),
+    error => error.code === 'browser_disconnected' && error.retryable === true,
+  );
+  await assert.rejects(
+    async () => runtime.updateBrowserConnection('browser-instance:test', {
+      state: 'connected',
+      connectionGeneration: 1,
+    }),
+    error => error.code === 'internal_error',
+  );
+
+  const restored = runtime.updateBrowserConnection('browser-instance:test', {
+    state: 'connected',
+    connectionGeneration: 2,
+    processIdentity: 'process:test:restored',
+  });
+  assert.equal(restored.connectionGeneration, 2);
+  assert.equal(restored.processIdentity, 'process:test:restored');
+  const events = await runtime.call('bridge:lifecycle', 'events/poll', {
+    workspaceId: created.workspace.id,
+    cursor: created.eventCursor,
+  });
+  assert.deepEqual(events.events.map(event => event.type), [
+    'connection.lost',
+    'connection.restored',
+  ]);
+  assert.deepEqual(events.events.map(event => event.payload.connectionGeneration), [1, 2]);
+  assert.deepEqual(changes, [
+    ['connected', 'disconnected', 1],
+    ['disconnected', 'reconnecting', 1],
+    ['reconnecting', 'connected', 2],
+  ]);
+});
+
 test('Broker replays Workspace events, pushes notifications, and enforces Principal isolation', async () => {
   const runtime = createRuntime();
   await initialize(runtime, 'bridge:events', {

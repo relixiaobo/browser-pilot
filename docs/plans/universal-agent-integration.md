@@ -101,15 +101,16 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   - Progress: reads and mutations now share the same per-target actor, while
     different targets can proceed concurrently. Lease release provides safe
     reacquisition; an explicit transfer operation remains.
-- [ ] **A2.5** Scope auth, network rules, request journals, downloads, and
+- [x] **A2.5** Scope auth, network rules, request journals, downloads, and
   cleanup to their owner.
   - Covers: BR-3, BR-4, AC-3.
-  - Progress: Broker auth, interception rules, and bounded request journals are
+  - Complete: Broker auth, interception rules, and bounded request journals are
     Workspace scoped; request identity includes CDP session identity, sensitive
     events are metadata-only, and legacy daemon handlers ignore Broker sessions.
     Lease replacement preserves Workspace configuration while Workspace release
-    clears it. The isolated download staging lifecycle is specified; download
-    ingestion remains.
+    clears it. Downloads use target-session CDP configuration, separate protected
+    staging directories, bounded concurrency/bytes, Workspace-owned Artifacts,
+    and Lease/session/Workspace cleanup without browser-wide fallback.
 - [x] **A2.6** Implement the default-unrestricted BrowserControlPolicy and
   optional launch-time Host operation removal.
   - Covers: FLOW-5, BR-21, BR-22, AC-4.
@@ -153,8 +154,10 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     observe again. Do not recover stale browser state from disk.
   - Progress: Lease heartbeat/expiry/release, EOF cleanup, idle Connection and
     Workspace reclamation, and idempotent Workspace release are implemented.
-    Target, auth, network, frame, Observation, and Artifact cleanup is connected;
-    partial download staging and browser reconnect cleanup remain.
+    Target, auth, network, frame, Observation, Artifact, and partial download
+    cleanup is connected. Browser connection loss now rejects tools, invalidates
+    sessions/refs, rediscovers the selected profile, and advances generation on
+    restoration. Broker-process crash cleanup of browser-owned targets remains.
 - [x] **A3.3** Implement command accepted/dispatched/completed,
   `unknown_outcome`, deadline, cancellation, and duplicate-call behavior.
   - Covers: BR-8 through BR-12, AC-5.
@@ -209,12 +212,13 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [x] **A5.1** Add protected Artifact storage, metadata, quotas, TTL, preview
   relationships, retain/release, and cleanup.
   - Covers: BR-17 through BR-20, FR-6.
-- [ ] **A5.2** Return screenshot, PDF, and download results as Artifacts while
+- [x] **A5.2** Return screenshot, PDF, and download results as Artifacts while
   keeping explicit CLI export behavior compatible.
   - Covers: AC-1, AC-6.
-  - Progress: screenshot and PDF tools return scoped Artifacts; large captures
-    produce model-sized previews with optional originals. Download integration
-    remains.
+  - Complete: screenshot and PDF tools return scoped Artifacts; large captures
+    produce model-sized previews with optional originals. Session-scoped download
+    events ingest completed files as protected `download` Artifacts without
+    publishing staging paths or CDP GUIDs.
 - [x] **A5.3** Add adapter-facing file authorization and revoke access on
   release or expiry.
   - Covers: CON-5, NFR-5.

@@ -66,6 +66,11 @@ export class CompatibilityDialogService {
       .map(({ sessionId: _sessionId, ...dialog }) => dialog);
   }
 
+  clear(): void {
+    this.pending.clear();
+    this.pendingBySession.clear();
+  }
+
   async respond(
     dialogId: string,
     action: 'accept' | 'dismiss',

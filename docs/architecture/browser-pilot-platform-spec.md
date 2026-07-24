@@ -288,9 +288,12 @@ active, then releases the Lease. A process crash is recovered by Lease expiry.
 
 The Broker emits connection loss, stops dispatching target commands, and marks
 commands whose effects are uncertain as `unknown_outcome`. After reconnect it
-creates a new browser connection generation, reconciles controlled-target metadata,
-invalidates old Observations, and emits structured recovery state. It never
-replays a mutating command automatically.
+creates a new browser connection generation, invalidates old CDP sessions,
+ControlledTarget mappings, frames, and Observations, and emits structured recovery
+state. The daemon rediscovers only the originally selected browser profile; it
+does not silently switch to another running browser. Consumers rebuild inventory
+with `browser.tabs.list`. Browser Pilot never replays a mutating command
+automatically.
 
 ### FLOW-4 Concurrent clients
 
@@ -452,7 +455,8 @@ accepted -> expired
 - **BR-11:** Cancellation before dispatch prevents execution. Cancellation
   after dispatch is best-effort and must not claim rollback.
 - **BR-12:** Browser disconnect and reconnect change the BrowserInstance
-  connection generation and invalidate sessions and observations.
+  connection generation and invalidate sessions and observations. The generation
+  advances on successful restoration, not merely on a retry attempt.
 
 Normal bridge calls preserve dispatch order. `commands/get`, `commands/cancel`,
 and dialog list/respond calls may bypass a pending `tools/call`; JSON-RPC clients
@@ -552,6 +556,11 @@ local path. Browser-wide `Browser.setDownloadBehavior` on the user's default
 context is forbidden because it would redirect downloads from unrelated user
 tabs. If target-session isolation is unavailable in a Chrome version, Browser
 Pilot reports download capture as unavailable and does not fall back globally.
+The implementation applies per-download, per-Workspace staging, and global
+staging bounds. An oversized or over-capacity download is cancelled by its
+private GUID without changing download behavior for the browser's default
+context. Stale staging directories from a prior Broker process are removed before
+the first new download session is configured.
 
 ## Browser Discovery and Setup
 

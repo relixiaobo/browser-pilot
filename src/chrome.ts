@@ -10,6 +10,30 @@ export interface ChromeInfo {
   dataDir: string;
 }
 
+function readChromeInfo(browser: string, dataDir: string): ChromeInfo | null {
+  const portFile = join(dataDir, 'DevToolsActivePort');
+  if (!existsSync(portFile)) return null;
+
+  try {
+    const lines = readFileSync(portFile, 'utf-8').trim().split('\n');
+    if (lines.length < 2) return null;
+
+    const port = parseInt(lines[0], 10);
+    const wsPath = lines[1];
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535 || !wsPath.startsWith('/')) return null;
+
+    return {
+      port,
+      wsPath,
+      wsUrl: `ws://127.0.0.1:${port}${wsPath}`,
+      browser,
+      dataDir,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function getDataDirs(): Array<{ name: string; path: string }> {
   const home = homedir();
   const os = platform();
@@ -47,28 +71,12 @@ function getDataDirs(): Array<{ name: string; path: string }> {
 export function discoverChrome(browserFilter?: string): ChromeInfo | null {
   for (const { name, path: dataDir } of getDataDirs()) {
     if (browserFilter && !name.toLowerCase().includes(browserFilter.toLowerCase())) continue;
-
-    const portFile = join(dataDir, 'DevToolsActivePort');
-    if (!existsSync(portFile)) continue;
-
-    try {
-      const lines = readFileSync(portFile, 'utf-8').trim().split('\n');
-      if (lines.length < 2) continue;
-
-      const port = parseInt(lines[0], 10);
-      const wsPath = lines[1];
-      if (isNaN(port) || !wsPath) continue;
-
-      return {
-        port,
-        wsPath,
-        wsUrl: `ws://127.0.0.1:${port}${wsPath}`,
-        browser: name,
-        dataDir,
-      };
-    } catch {
-      continue;
-    }
+    const info = readChromeInfo(name, dataDir);
+    if (info) return info;
   }
   return null;
+}
+
+export function discoverChromeAtDataDir(dataDir: string, browser: string): ChromeInfo | null {
+  return readChromeInfo(browser, dataDir);
 }

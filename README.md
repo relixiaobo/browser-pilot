@@ -114,9 +114,10 @@ tabs remain open when a session ends.
 
 The `browser-pilot bridge --stdio` transport, Broker lifecycle, browser tool
 dispatch, event replay, protected Artifacts, and protocol 1.1 transport limit
-negotiation are implemented. Embedded products should still use the documented
-release gate while browser reconnect, resource isolation, discovery, and
-conformance work remains in progress.
+negotiation are implemented. Browser disconnect/reconnect handling, scoped
+download Artifacts, and Workspace resource isolation are also implemented.
+Embedded products should still use the documented release gate while multi-browser
+discovery and browser-capability conformance work remain in progress.
 
 ## Commands
 

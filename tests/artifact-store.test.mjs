@@ -60,6 +60,21 @@ test('Artifact Store imports an authorized local file as a protected upload inpu
   await assert.rejects(() => stat(record.path), error => error.code === 'ENOENT');
 });
 
+test('Artifact Store ingests a completed download and removes only the staging source', async t => {
+  const { root, directory, store } = await fixture(t);
+  const staging = join(root, 'private-download-guid');
+  await writeFile(staging, 'download contents');
+
+  const record = await store.ingestDownload(workspaceA, staging, 'quarterly-report.csv');
+  assert.equal(record.descriptor.kind, 'download');
+  assert.equal(record.descriptor.sensitivity, 'user_file');
+  assert.equal(record.descriptor.fileName, 'quarterly-report.csv');
+  assert.equal(record.descriptor.mimeType, 'text/csv');
+  assert.equal(record.path.startsWith(`${directory}/`), true);
+  assert.deepEqual(await readFile(record.path), Buffer.from('download contents'));
+  await assert.rejects(() => stat(staging), error => error.code === 'ENOENT');
+});
+
 test('Artifact import and export reject symbolic-link paths into Broker storage', async t => {
   const { root, directory, store } = await fixture(t);
   const record = await store.create(screenshot(workspaceA));

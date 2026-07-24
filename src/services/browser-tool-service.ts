@@ -3,6 +3,7 @@ import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import type {
   ArtifactDescriptor,
   ArtifactId,
+  BrowserInstance,
   BrowserOperation,
   BrowserWorkspaceId,
   ControlledTargetId,
@@ -22,6 +23,7 @@ import type { Transport } from '../transport.js';
 import { waitForLoad } from '../session.js';
 import { ActionService, type InputVerificationEvidence } from './action-service.js';
 import { ArtifactStore } from './artifact-store.js';
+import { DownloadController } from './download-controller.js';
 import { CdpBrowserTargetCatalog } from './browser-target-catalog.js';
 import { createBrowserControlPolicy } from './browser-control-policy.js';
 import {
@@ -166,6 +168,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly pendingDialogBySession = new Map<string, string>();
   private readonly dialogResponseBySession = new Map<string, PendingDialogResponse>();
   private readonly artifactStore?: ArtifactStore;
+  private readonly downloads?: DownloadController;
   private readonly network: WorkspaceNetworkController;
   private eventPublisher?: (event: PublishBrowserEventInput) => void;
 
@@ -179,6 +182,11 @@ export class BrowserToolService implements BrowserToolExecutor {
   ) {
     this.observations = options.observations ?? new MemoryObservationStore();
     this.artifactStore = options.artifactStore;
+    this.downloads = this.artifactStore
+      ? new DownloadController(transport, this.artifactStore, {
+        publishEvent: event => this.publishEvent(event),
+      })
+      : undefined;
     this.network = new WorkspaceNetworkController(transport, {
       publishEvent: event => this.publishEvent(event),
     });
@@ -249,6 +257,48 @@ export class BrowserToolService implements BrowserToolExecutor {
 
   setEventPublisher(publisher: (event: PublishBrowserEventInput) => void): void {
     this.eventPublisher = publisher;
+  }
+
+  browserConnectionChanged(previous: BrowserInstance, current: BrowserInstance): void {
+    this.binding.instance = { ...current };
+    this.binding.candidate.state = current.state === 'connected' ? 'ready' : 'disconnected';
+    if (current.state !== 'connected') {
+      for (const session of [...this.sessions.values()]) {
+        this.downloads?.detachSession(session.sessionId, 'connection_lost');
+        this.observations.invalidateSession(session.sessionId);
+        this.publishEvent({
+          workspaceId: session.workspaceId,
+          leaseId: session.leaseId,
+          targetId: session.targetId,
+          type: 'observation.invalidated',
+          sensitivity: 'browser_data',
+          payload: { reason: 'session_replaced' },
+        });
+        this.forgetSession(session.sessionId);
+      }
+      this.deleteDialogs(() => true);
+      return;
+    }
+    if (previous.state === 'connected' || current.connectionGeneration === previous.connectionGeneration) return;
+
+    this.managedWindowIds.clear();
+    for (const invalidation of this.registry.invalidateBrowserConnection(current.id)) {
+      this.observations.invalidateTarget(invalidation.targetId, 'browser_reconnected');
+      this.publishEvent({
+        workspaceId: invalidation.workspaceId,
+        targetId: invalidation.targetId,
+        type: 'observation.invalidated',
+        sensitivity: 'browser_data',
+        payload: { reason: 'browser_reconnected' },
+      });
+      this.publishEvent({
+        workspaceId: invalidation.workspaceId,
+        targetId: invalidation.targetId,
+        type: 'target.detached',
+        sensitivity: 'browser_data',
+        payload: { reason: 'browser_reconnected' },
+      });
+    }
   }
 
   ownsSession(sessionId: string): boolean {
@@ -329,6 +379,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   }
 
   releaseLease(lease: ControlLease): void {
+    this.downloads?.releaseLease(lease.id);
     this.inventory.releaseLease(lease.id);
     this.observations.releaseLease(lease.id);
     for (const [key, session] of this.sessions) {
@@ -345,6 +396,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): void {
     const caller = { principalId: principal.id, workspaceId: workspace.id };
     const records = this.registry.activeRecords(caller);
+    this.downloads?.releaseWorkspace(workspace.id);
     this.inventory.releaseWorkspace(caller);
     this.observations.releaseWorkspace(workspace.id);
     this.managedWindowIds.delete(managedTabSet.id);
@@ -378,6 +430,12 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (args.browserId !== this.binding.candidate.id) {
       throw new BrowserPilotError('browser_not_found', 'Browser candidate does not match this Workspace', {
         context: { workspaceId: workspace.id, browserId: String(args.browserId) },
+      });
+    }
+    if (this.binding.instance.state !== 'connected') {
+      throw new BrowserPilotError('browser_disconnected', 'Workspace browser is disconnected', {
+        retryable: true,
+        context: { workspaceId: workspace.id },
       });
     }
     this.markDispatched(context);
@@ -1037,6 +1095,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     try {
       await this.network.attachSession(session);
       await this.transport.send('Page.enable', {}, attached.sessionId).catch(() => {});
+      await this.downloads?.attachSession(session);
       await this.transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, attached.sessionId).catch(() => {});
       return session;
     } catch (error) {
@@ -1497,6 +1556,7 @@ export class BrowserToolService implements BrowserToolExecutor {
 
   private retireSession(key: string, session: TargetSession): void {
     if (this.sessions.get(key) === session) this.sessions.delete(key);
+    this.downloads?.detachSession(session.sessionId, 'session_replaced');
     void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId })
       .finally(() => this.forgetSession(session.sessionId))
       .catch(() => {});
@@ -1507,6 +1567,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       if (session.sessionId === sessionId) this.sessions.delete(key);
     }
     this.network.detachSession(sessionId);
+    this.downloads?.detachSession(sessionId, 'target_detached');
     this.framesBySession.delete(sessionId);
     this.ownedSessionIds.delete(sessionId);
     this.deleteDialogs(dialog => dialog.sessionId === sessionId);

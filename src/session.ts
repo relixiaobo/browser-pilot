@@ -1,10 +1,8 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
 import { DaemonClient, isDaemonRunning } from './client.js';
 import { discoverChrome, type ChromeInfo } from './chrome.js';
 import { loadState, saveState, clearState, type PilotState } from './state.js';
-import { SOCKET_PATH } from './paths.js';
 import { INJECT_BORDER } from './page-scripts.js';
 import type { Transport } from './transport.js';
 import { BrowserPilotError } from './protocol/errors.js';
@@ -41,14 +39,22 @@ async function getDaemon(chrome: ChromeInfo): Promise<DaemonClient> {
     const client = new DaemonClient();
     const info = await client.healthInfo();
     if (info.ok) {
-      // Verify daemon controls the expected Chrome instance
-      if (info.wsUrl === chrome.wsUrl) return client;
-      // Wrong Chrome — restart daemon; wait for old socket to disappear
-      await client.shutdown();
-      const deadline = Date.now() + 5_000;
-      while (Date.now() < deadline && existsSync(SOCKET_PATH)) {
-        await new Promise(r => setTimeout(r, 100));
+      if (
+        info.wsUrl === chrome.wsUrl ||
+        (
+          info.browser?.profile === chrome.dataDir &&
+          info.browser.product.toLowerCase() === chrome.browser.toLowerCase()
+        )
+      ) {
+        return client;
       }
+      throw new BrowserPilotError('browser_not_found', 'The shared daemon is connected to a different browser profile', {
+        remediation: {
+          code: 'select_running_browser_pilot',
+          message: 'Use the browser profile already owned by the shared daemon, or stop it explicitly before selecting another profile.',
+          actionRequired: true,
+        },
+      });
     }
   }
   return startDaemon(chrome);
@@ -96,6 +102,28 @@ async function ensureSession(client: DaemonClient, state: PilotState): Promise<s
 
 /** Connect fresh: discover Chrome, start daemon, create pilot window. */
 export async function connectDaemon(browserFilter?: string): Promise<DaemonClient> {
+  if (isDaemonRunning()) {
+    const existing = new DaemonClient();
+    const info = await existing.healthInfo();
+    if (
+      info.ok &&
+      (
+        !browserFilter ||
+        info.browser?.product.toLowerCase().includes(browserFilter.toLowerCase())
+      )
+    ) {
+      return existing;
+    }
+    if (info.ok && browserFilter) {
+      throw new BrowserPilotError('browser_not_found', 'The shared daemon is connected to a different browser product', {
+        remediation: {
+          code: 'select_running_browser_pilot',
+          message: 'Use the browser already owned by the shared daemon, or stop it explicitly before selecting another browser.',
+          actionRequired: true,
+        },
+      });
+    }
+  }
   const chrome = discoverChrome(browserFilter);
   if (!chrome) {
     throw new BrowserPilotError('browser_not_found',

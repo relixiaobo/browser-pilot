@@ -10,6 +10,7 @@ import {
   type ArtifactDescriptor,
   type ArtifactId,
   type BrowserCandidate,
+  type BrowserInstanceId,
   type BrowserInstance,
   type BrowserWorkspace,
   type BrowserWorkspaceId,
@@ -158,6 +159,7 @@ export interface BrowserToolExecutor {
     args: JsonValue,
   ): ControlledTargetId | undefined;
   setEventPublisher?(publisher: (event: PublishBrowserEventInput) => void): void;
+  browserConnectionChanged?(previous: BrowserInstance, current: BrowserInstance): void;
   releaseLease?(lease: ControlLease): void;
   releaseWorkspace?(
     principal: ClientPrincipal,
@@ -430,6 +432,76 @@ export class MemoryBrokerRuntime {
     const workspace = this.workspaces.get(input.workspaceId);
     if (!workspace || workspace.value.state !== 'active') return undefined;
     return this.events.publish(input);
+  }
+
+  updateBrowserConnection(
+    browserInstanceId: BrowserInstanceId,
+    update: Pick<BrowserInstance, 'state' | 'connectionGeneration'> & { processIdentity?: string },
+  ): BrowserInstance {
+    const binding = this.browserBindings.find(candidate => candidate.instance.id === browserInstanceId);
+    if (!binding) throw new BrowserPilotError('browser_not_found', 'Browser instance is not registered');
+    if (!Number.isSafeInteger(update.connectionGeneration) || update.connectionGeneration < 1) {
+      throw new BrowserPilotError('internal_error', 'Invalid browser connection generation');
+    }
+    const previous = { ...binding.instance };
+    if (update.connectionGeneration < previous.connectionGeneration) {
+      throw new BrowserPilotError('internal_error', 'Browser connection generation cannot move backwards');
+    }
+    if (
+      update.connectionGeneration > previous.connectionGeneration &&
+      !(update.state === 'connected' && previous.state !== 'connected')
+    ) {
+      throw new BrowserPilotError('internal_error', 'Browser generation advances only on connection restoration');
+    }
+    if (
+      update.state === 'connected' &&
+      previous.state !== 'connected' &&
+      update.connectionGeneration <= previous.connectionGeneration
+    ) {
+      throw new BrowserPilotError('internal_error', 'Restored browser connection must advance generation');
+    }
+
+    binding.instance.state = update.state;
+    binding.instance.connectionGeneration = update.connectionGeneration;
+    if (update.processIdentity !== undefined) binding.instance.processIdentity = update.processIdentity;
+    if (update.state === 'connected') {
+      binding.candidate.state = 'ready';
+      delete binding.candidate.remediation;
+    } else {
+      binding.candidate.state = 'disconnected';
+      binding.candidate.remediation = {
+        code: 'reconnect_browser',
+        message: 'Browser Pilot is waiting for the authorized browser debugging endpoint.',
+        actionRequired: false,
+      };
+    }
+
+    const current = { ...binding.instance };
+    const eventType = previous.state === 'connected' && current.state !== 'connected'
+      ? 'connection.lost'
+      : previous.state !== 'connected' && current.state === 'connected'
+        ? 'connection.restored'
+        : undefined;
+    if (eventType) {
+      for (const workspace of this.workspaces.values()) {
+        if (
+          workspace.value.state !== 'active' ||
+          workspace.value.browserInstanceId !== browserInstanceId
+        ) continue;
+        this.publishBrowserEvent({
+          workspaceId: workspace.value.id,
+          type: eventType,
+          sensitivity: 'browser_data',
+          payload: {
+            browserInstanceId,
+            connectionGeneration: current.connectionGeneration,
+            state: current.state,
+          },
+        });
+      }
+    }
+    this.options.toolExecutor?.browserConnectionChanged?.(previous, current);
+    return current;
   }
 
   sweepExpiredLeases(): number {
@@ -864,8 +936,10 @@ export class MemoryBrokerRuntime {
 
     const binding = workspaceRecord
       ? this.browserBindings.find(candidate => candidate.instance.id === workspaceRecord!.value.browserInstanceId)
-      : this.browserBindings.find(candidate => candidate.candidate.state === 'ready');
-    if (!binding) {
+      : definition.name === 'browser.discover'
+        ? this.browserBindings[0]
+        : this.browserBindings.find(candidate => candidate.candidate.state === 'ready');
+    if (!binding || (definition.name !== 'browser.discover' && binding.instance.state !== 'connected')) {
       throw new BrowserPilotError('browser_disconnected', 'Workspace browser is disconnected', {
         retryable: true,
         context: workspaceRecord ? { workspaceId: workspaceRecord.value.id } : undefined,

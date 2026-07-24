@@ -6,16 +6,21 @@ import { STATE_DIR, SOCKET_PATH, PID_FILE } from './paths.js';
 import { CDPClient } from './cdp.js';
 import { asBrowserPilotError, invalidArgument } from './protocol/errors.js';
 import type { BrowserInstanceId, JsonValue } from './protocol/model.js';
-import { DEFAULT_PROTOCOL_LIMITS, MemoryBrokerRuntime } from './services/broker-runtime.js';
+import {
+  DEFAULT_PROTOCOL_LIMITS,
+  MemoryBrokerRuntime,
+  type BrokerBrowserBinding,
+} from './services/broker-runtime.js';
 import { BrowserToolService } from './services/browser-tool-service.js';
 import { ArtifactStore } from './services/artifact-store.js';
 import { CompatibilityDialogService } from './services/compatibility-dialog-service.js';
+import { discoverChromeAtDataDir } from './chrome.js';
 
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
 
-const wsUrl = process.argv[2];
-if (!wsUrl) { process.stderr.write('Usage: daemon <wsUrl>\n'); process.exit(1); }
+const initialWsUrl = process.argv[2];
+if (!initialWsUrl) { process.stderr.write('Usage: daemon <wsUrl>\n'); process.exit(1); }
 const browserProduct = process.argv[3] || 'Chromium';
 const browserProfile = process.argv[4] || '';
 if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
@@ -139,25 +144,27 @@ async function syncFetchAll(cdp: CDPClient, currentSessionId?: string) {
 
 async function main() {
   const cdp = new CDPClient();
-  await cdp.connect(wsUrl);
+  await cdp.connect(initialWsUrl);
   let activeSessionId: string | undefined;
+  let currentWsUrl = initialWsUrl;
+  let terminating = false;
   const startedAt = Date.now();
   const browserId = `browser:${randomUUID()}`;
   const browserInstanceId = `browser-instance:${randomUUID()}` as BrowserInstanceId;
-  const browserBinding = {
+  const browserBinding: BrokerBrowserBinding = {
     candidate: {
       id: browserId,
       product: browserProduct,
       profile: browserProfile,
-      state: 'ready' as const,
+      state: 'ready',
     },
     instance: {
       id: browserInstanceId,
       product: browserProduct,
       profilePath: browserProfile,
-      processIdentity: wsUrl,
+      processIdentity: initialWsUrl,
       connectionGeneration: 1,
-      state: 'connected' as const,
+      state: 'connected',
     },
   };
   const artifactStore = new ArtifactStore({
@@ -176,6 +183,79 @@ async function main() {
     browsers: [browserBinding],
     toolExecutor: browserTools,
     artifactStore,
+  });
+  let reconnectTask: Promise<void> | undefined;
+  const resetDisconnectedState = (): void => {
+    activeSessionId = undefined;
+    networkEnabledSessions.clear();
+    fetchEnabledSessions.clear();
+    trackedRequests.length = 0;
+    requestsByNetworkId.clear();
+    nextReqId = 1;
+    discoveredTargets.length = 0;
+    compatibilityDialogs.clear();
+  };
+  const wait = (ms: number): Promise<void> => new Promise(resolve => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
+  const reconnectBrowser = async (): Promise<void> => {
+    if (browserBinding.instance.state === 'disconnected') {
+      try {
+        broker.updateBrowserConnection(browserInstanceId, {
+          state: 'reconnecting',
+          connectionGeneration: browserBinding.instance.connectionGeneration,
+        });
+      } catch (error) {
+        process.stderr.write(`Browser reconnect state error: ${error instanceof Error ? error.message : String(error)}\n`);
+      }
+    }
+    let retryDelayMs = 250;
+    while (!terminating) {
+      const chrome = discoverChromeAtDataDir(browserProfile, browserProduct);
+      if (!chrome) {
+        await wait(retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
+        continue;
+      }
+      try {
+        await cdp.connect(chrome.wsUrl);
+        await cdp.send('Target.setDiscoverTargets', { discover: true });
+        currentWsUrl = chrome.wsUrl;
+        broker.updateBrowserConnection(browserInstanceId, {
+          state: 'connected',
+          connectionGeneration: browserBinding.instance.connectionGeneration + 1,
+          processIdentity: chrome.wsUrl,
+        });
+        return;
+      } catch {
+        if (cdp.connectionState === 'connected') cdp.close();
+        await wait(retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
+      }
+    }
+  };
+  cdp.onConnectionState(event => {
+    if (event.state !== 'disconnected' || terminating) return;
+    resetDisconnectedState();
+    if (browserBinding.instance.state === 'connected') {
+      try {
+        broker.updateBrowserConnection(browserInstanceId, {
+          state: 'disconnected',
+          connectionGeneration: browserBinding.instance.connectionGeneration,
+        });
+      } catch (error) {
+        process.stderr.write(`Browser disconnect state error: ${error instanceof Error ? error.message : String(error)}\n`);
+      }
+    }
+    if (!reconnectTask) {
+      reconnectTask = reconnectBrowser()
+        .catch(error => {
+          process.stderr.write(`Browser reconnect error: ${error instanceof Error ? error.message : String(error)}\n`);
+        })
+        .finally(() => { reconnectTask = undefined; });
+      void reconnectTask;
+    }
   });
   const leaseSweepTimer = setInterval(() => {
     broker.sweepExpiredLeases();
@@ -284,9 +364,14 @@ async function main() {
       if (req.method === 'GET' && url.pathname === '/health') {
         res.writeHead(200); res.end(JSON.stringify({
           ok: true,
-          wsUrl,
+          wsUrl: currentWsUrl,
           brokerProtocol: 1,
-          browser: { product: browserProduct, profile: browserProfile },
+          browser: {
+            product: browserProduct,
+            profile: browserProfile,
+            state: browserBinding.instance.state,
+            connectionGeneration: browserBinding.instance.connectionGeneration,
+          },
         })); return;
       }
       if (req.method === 'POST' && url.pathname === '/broker/rpc') {
@@ -507,7 +592,6 @@ async function main() {
     try { chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
     writeFileSync(PID_FILE, String(process.pid), { mode: 0o600 });
   });
-  let terminating = false;
   const terminate = async () => {
     if (terminating) return;
     terminating = true;

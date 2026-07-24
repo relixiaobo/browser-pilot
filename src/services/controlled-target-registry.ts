@@ -378,6 +378,16 @@ export class MemoryControlledTargetRegistry {
     return invalidated;
   }
 
+  invalidateBrowserConnection(browserInstanceId: BrowserInstanceId): ControlledTargetInvalidation[] {
+    const invalidated: ControlledTargetInvalidation[] = [];
+    for (const record of this.records.values()) {
+      if (record.state === 'active' && record.browserInstanceId === browserInstanceId) {
+        invalidated.push(this.invalidate(record, 'browser_reconnected'));
+      }
+    }
+    return invalidated;
+  }
+
   setActive(context: WorkspaceCallerContext, leaseId: ControlLeaseId, targetId: ControlledTargetId): void {
     const record = this.records.get(targetId);
     const controller = record

@@ -61,7 +61,12 @@ export class DaemonClient implements Transport {
     ok: boolean;
     wsUrl?: string;
     brokerProtocol?: number;
-    browser?: { product: string; profile: string };
+    browser?: {
+      product: string;
+      profile: string;
+      state?: 'connected' | 'disconnected' | 'reconnecting';
+      connectionGeneration?: number;
+    };
   }> {
     try { return await this.request('/health'); } catch { return { ok: false }; }
   }

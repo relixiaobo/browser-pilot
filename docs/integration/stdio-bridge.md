@@ -1,7 +1,8 @@
 # Stdio Bridge Integration Contract
 
 Status: browser `tools/call`, scoped Observations, target inventory, Artifacts,
-command recovery, and event delivery implemented.
+command recovery, event delivery, browser reconnect, and scoped downloads
+implemented.
 
 This document describes the Agent-neutral process boundary. Tenon, OpenClaw,
 and other Agent hosts use the same executable and protocol. No consumer imports
@@ -189,11 +190,20 @@ Never infer delivery from notification arrival alone, and never advance the
 stored cursor past an event the host has not processed.
 
 Current producers cover command status, Lease expiry, navigation, document
-change, target attach/detach, target control, managed popups, dialogs, network
-request/response metadata, and observation invalidation. Download and browser
-reconnect producers remain part of the browser-capability workstream. Network
-events never contain credentials, headers, request/response bodies, or raw CDP
-IDs; retrieve sensitive detail explicitly through the scoped network tools.
+change, target attach/detach, target control, managed popups, dialogs, downloads,
+browser connection loss/restoration, network request/response metadata, and
+observation invalidation. Network events never contain credentials, headers,
+request/response bodies, or raw CDP IDs; retrieve sensitive detail explicitly
+through the scoped network tools.
+
+`connection.lost` keeps the last connection generation and causes later browser
+tools to fail with retryable `browser_disconnected`. The daemon repeatedly reads
+the originally selected profile's debugging endpoint and does not switch profiles.
+`connection.restored` carries a strictly newer generation. Existing Workspaces
+and active Leases remain valid, but old target IDs, frame IDs, CDP sessions,
+Observations, and refs do not. Poll through the restoration event, call
+`browser.tabs.list`, and rebuild target state. Never retry a mutating command whose
+recorded status is `unknown_outcome`.
 
 JavaScript dialogs remain pending. Use `browser.dialogs.list`, then call
 `browser.dialogs.respond` with the returned `dialogId`, target, and explicit
@@ -230,6 +240,24 @@ The Broker copies the source into protected storage and returns an
 downloads are rejected as upload inputs. Workspace cleanup deletes the imported
 copy but never deletes the client-owned source file.
 
+Downloads have no path-returning tool. Once a controlled target session is
+attached, the Broker configures target-session download capture and emits
+`download` events with one of these states:
+
+- `capture_unavailable`: that Chrome version rejected target-session isolation;
+- `started`: includes an opaque `downloadId`, bounded URL, and suggested filename;
+- `completed`: includes the Workspace-owned `download` Artifact descriptor;
+- `failed` or `cancelled`: includes a stable, bounded reason and byte metadata.
+
+The private CDP GUID and staging path never appear in protocol output. On
+`completed`, use the descriptor's `id` with `artifacts/get` or `artifacts/export`
+exactly as for screenshots and PDFs. Staging directories are separate per CDP
+session, use mode `0700`, enforce concurrency and byte quotas, and are removed on
+session, Lease, or Workspace release. The session setting is restored to
+`default` before an attached session is retired. Browser Pilot never calls browser-wide
+`Browser.setDownloadBehavior`; unsupported target-session capture remains
+unavailable instead of redirecting unrelated user downloads.
+
 ## Cleanup
 
 Normal EOF and `shutdown` release Connection-owned Leases immediately. A killed
@@ -250,7 +278,8 @@ result validation, and production filtering prevents unwired tools from being
 advertised. The current bridge supports discovery, connect, open, all-tab
 inventory, observe/read, core actions, scoped frames, explicit dialogs, cookies,
 auth, network observation/rules, eval, screenshot, PDF, protected upload import,
-Artifact access, command recovery, and event replay.
+scoped download Artifacts, Artifact access, command recovery, browser reconnect,
+and event replay.
 An embedding adapter should not ship against this work-in-progress bridge until
-browser reconnect handling and the remaining advertised browser families are
-complete.
+multi-browser discovery, remaining browser capability families, and conformance
+coverage meet the release gate.

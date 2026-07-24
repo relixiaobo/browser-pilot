@@ -39,6 +39,16 @@ export interface CreateArtifactInput {
   previewOf?: ArtifactId;
 }
 
+interface IngestArtifactFileInput {
+  workspaceId: BrowserWorkspaceId;
+  sourcePath: string;
+  kind: Extract<ArtifactDescriptor['kind'], 'download' | 'upload_input'>;
+  sensitivity: Sensitivity;
+  fileName?: string;
+  mimeType?: string;
+  removeSource: boolean;
+}
+
 export interface ArtifactStoreOptions {
   directory?: string;
   ttlMs?: number;
@@ -135,83 +145,30 @@ export class ArtifactStore {
     sourcePath: string,
     mimeType?: string,
   ): Promise<ArtifactRecord> {
-    if (!isAbsolute(sourcePath)) throw invalidArgument('Artifact import path must be absolute', 'path');
-    const source = resolve(sourcePath);
-    if (this.isInsideStore(source)) {
-      throw invalidArgument('Artifact import path must be outside Broker storage', 'path');
-    }
-    return this.withLock(async () => {
-      await this.sweepUnlocked();
-      await this.ensureDirectory();
-      const canonicalStore = await realpath(this.directory);
-      let canonicalSource: string;
-      try {
-        canonicalSource = await realpath(source);
-      } catch (cause) {
-        throw new BrowserPilotError('invalid_argument', 'Artifact import file is not accessible', {
-          context: { field: 'path' },
-          rpcCode: -32602,
-          cause,
-        });
-      }
-      if (this.isWithin(canonicalStore, canonicalSource)) {
-        throw invalidArgument('Artifact import path must be outside Broker storage', 'path');
-      }
-      let sourceInfo;
-      try {
-        sourceInfo = await stat(canonicalSource);
-      } catch (cause) {
-        throw new BrowserPilotError('invalid_argument', 'Artifact import file is not accessible', {
-          context: { field: 'path' },
-          rpcCode: -32602,
-          cause,
-        });
-      }
-      if (!sourceInfo.isFile()) throw invalidArgument('Artifact import path must identify a regular file', 'path');
-      this.assertQuota(workspaceId, sourceInfo.size);
-      const fileName = basename(source);
-      if (!fileName || fileName.length > 4096) {
-        throw invalidArgument('Artifact import filename is invalid or too long', 'path');
-      }
-      const resolvedMimeType = mimeType ?? inferredMimeType(source);
-      if (!resolvedMimeType || resolvedMimeType.length > 256 || /[\r\n]/.test(resolvedMimeType)) {
-        throw invalidArgument('Artifact MIME type is invalid or too long', 'mimeType');
-      }
+    return this.ingestFile({
+      workspaceId,
+      sourcePath,
+      kind: 'upload_input',
+      sensitivity: 'user_file',
+      mimeType,
+      removeSource: false,
+    });
+  }
 
-      const id = this.nextArtifactId();
-      const storageDirectory = join(this.directory, randomUUID());
-      const destination = join(storageDirectory, fileName);
-      await mkdir(storageDirectory, { mode: 0o700 });
-      try {
-        await copyFile(canonicalSource, destination, fsConstants.COPYFILE_EXCL);
-        await chmod(destination, 0o600).catch(() => {});
-        const copied = await stat(destination);
-        if (!copied.isFile() || copied.size !== sourceInfo.size) {
-          throw new BrowserPilotError('invalid_argument', 'Artifact import file changed while it was being copied', {
-            context: { field: 'path' },
-            rpcCode: -32602,
-          });
-        }
-        const createdAt = this.now();
-        const descriptor: ArtifactDescriptor = {
-          id,
-          workspaceId,
-          kind: 'upload_input',
-          mimeType: resolvedMimeType,
-          byteSize: copied.size,
-          fileName,
-          sensitivity: 'user_file',
-          createdAt,
-          expiresAt: createdAt + this.ttlMs,
-          retained: false,
-        };
-        const record = { descriptor, path: destination };
-        this.records.set(id, record);
-        return clone(record);
-      } catch (error) {
-        await rm(storageDirectory, { recursive: true, force: true }).catch(() => {});
-        throw error;
-      }
+  async ingestDownload(
+    workspaceId: BrowserWorkspaceId,
+    sourcePath: string,
+    fileName: string,
+    mimeType?: string,
+  ): Promise<ArtifactRecord> {
+    return this.ingestFile({
+      workspaceId,
+      sourcePath,
+      kind: 'download',
+      sensitivity: 'user_file',
+      fileName,
+      mimeType,
+      removeSource: true,
     });
   }
 
@@ -320,6 +277,107 @@ export class ArtifactStore {
 
   size(): number {
     return this.records.size;
+  }
+
+  get maxItemBytes(): number {
+    return this.maxArtifactBytes;
+  }
+
+  get maxWorkspaceCapacityBytes(): number {
+    return this.maxWorkspaceBytes;
+  }
+
+  get maxTotalCapacityBytes(): number {
+    return this.maxTotalBytes;
+  }
+
+  private async ingestFile(input: IngestArtifactFileInput): Promise<ArtifactRecord> {
+    if (!isAbsolute(input.sourcePath)) throw invalidArgument('Artifact import path must be absolute', 'path');
+    const source = resolve(input.sourcePath);
+    if (this.isInsideStore(source)) {
+      throw invalidArgument('Artifact import path must be outside Broker storage', 'path');
+    }
+    return this.withLock(async () => {
+      await this.sweepUnlocked();
+      await this.ensureDirectory();
+      const canonicalStore = await realpath(this.directory);
+      let canonicalSource: string;
+      try {
+        canonicalSource = await realpath(source);
+      } catch (cause) {
+        throw new BrowserPilotError('invalid_argument', 'Artifact import file is not accessible', {
+          context: { field: 'path' },
+          rpcCode: -32602,
+          cause,
+        });
+      }
+      if (this.isWithin(canonicalStore, canonicalSource)) {
+        throw invalidArgument('Artifact import path must be outside Broker storage', 'path');
+      }
+      let sourceInfo;
+      try {
+        sourceInfo = await stat(canonicalSource);
+      } catch (cause) {
+        throw new BrowserPilotError('invalid_argument', 'Artifact import file is not accessible', {
+          context: { field: 'path' },
+          rpcCode: -32602,
+          cause,
+        });
+      }
+      if (!sourceInfo.isFile()) throw invalidArgument('Artifact import path must identify a regular file', 'path');
+      this.assertQuota(input.workspaceId, sourceInfo.size);
+      const fileName = input.fileName ?? basename(source);
+      if (
+        !fileName ||
+        fileName === '.' ||
+        fileName === '..' ||
+        basename(fileName) !== fileName ||
+        fileName.length > 4096 ||
+        /[\u0000-\u001f\u007f]/.test(fileName)
+      ) {
+        throw invalidArgument('Artifact import filename is invalid or too long', 'path');
+      }
+      const resolvedMimeType = input.mimeType ?? inferredMimeType(fileName);
+      if (!resolvedMimeType || resolvedMimeType.length > 256 || /[\r\n]/.test(resolvedMimeType)) {
+        throw invalidArgument('Artifact MIME type is invalid or too long', 'mimeType');
+      }
+
+      const id = this.nextArtifactId();
+      const storageDirectory = join(this.directory, randomUUID());
+      const destination = join(storageDirectory, fileName);
+      await mkdir(storageDirectory, { mode: 0o700 });
+      try {
+        await copyFile(canonicalSource, destination, fsConstants.COPYFILE_EXCL);
+        await chmod(destination, 0o600).catch(() => {});
+        const copied = await stat(destination);
+        if (!copied.isFile() || copied.size !== sourceInfo.size) {
+          throw new BrowserPilotError('invalid_argument', 'Artifact import file changed while it was being copied', {
+            context: { field: 'path' },
+            rpcCode: -32602,
+          });
+        }
+        const createdAt = this.now();
+        const descriptor: ArtifactDescriptor = {
+          id,
+          workspaceId: input.workspaceId,
+          kind: input.kind,
+          mimeType: resolvedMimeType,
+          byteSize: copied.size,
+          fileName,
+          sensitivity: input.sensitivity,
+          createdAt,
+          expiresAt: createdAt + this.ttlMs,
+          retained: false,
+        };
+        const record = { descriptor, path: destination };
+        this.records.set(id, record);
+        if (input.removeSource) await unlink(canonicalSource).catch(() => {});
+        return clone(record);
+      } catch (error) {
+        await rm(storageDirectory, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
+    });
   }
 
   private async createUnlocked(input: CreateArtifactInput): Promise<ArtifactRecord> {
