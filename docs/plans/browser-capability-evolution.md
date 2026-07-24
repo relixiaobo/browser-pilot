@@ -123,12 +123,19 @@ Preserve Browser Pilot advantages:
   navigation, document, target, popup, dialog, download, connection, and
   observation invalidation.
   - Covers: event contract, NFR-3.
+  - Progress: navigation, document change, target attach/detach and control,
+    managed popup, dialog, Observation invalidation, Command status, and Lease
+    expiry producers are connected. Download, network, and connection recovery
+    producers remain.
 - [ ] **B4.2** Add watchdogs for browser disconnect, stalled navigation,
   detached frames, unhandled dialogs, and repeated no-progress actions.
   - Covers: FR-5, FR-8.
-- [ ] **B4.3** Replace dialog auto-accept with explicit pending state and
+- [x] **B4.3** Replace dialog auto-accept with explicit pending state and
   accept/dismiss commands.
   - Covers: DEC-5.
+  - Complete: daemon auto-accept is removed; pending Broker dialogs are
+    Lease/target scoped and use explicit list/respond tools without target-actor
+    deadlock. One-shot CLI calls use an isolated explicit list/respond path.
 - [ ] **B4.4** Ensure event producers are deterministic under target actor
   serialization and reconnect generations.
   - Covers: NFR-4.

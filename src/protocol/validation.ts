@@ -6,6 +6,7 @@ import {
   type ArtifactExportParams,
   type CapabilityNegotiation,
   type CommandAccessParams,
+  type EventsPollParams,
   type InitializeParams,
   type LeaseCreateParams,
   type LeaseHeartbeatParams,
@@ -34,6 +35,7 @@ const LEASE_ID_PATTERN = /^lease:[A-Za-z0-9._:-]+$/;
 const TARGET_ID_PATTERN = /^target:[A-Za-z0-9._:-]+$/;
 const ARTIFACT_ID_PATTERN = /^artifact:[A-Za-z0-9._:-]+$/;
 const COMMAND_ID_PATTERN = /^command:[A-Za-z0-9._:-]+$/;
+const EVENT_CURSOR_PATTERN = /^cursor:(0|[1-9][0-9]{0,15})$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -262,6 +264,26 @@ export function validateCommandAccessParams(value: unknown): CommandAccessParams
     ...(value.workspaceId !== undefined ? {
       workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as CommandAccessParams['workspaceId'],
     } : {}),
+  };
+}
+
+export function validateEventsPollParams(value: unknown): EventsPollParams {
+  if (!isRecord(value)) throw invalidArgument('events/poll params must be an object', 'params');
+  assertOnlyKeys(value, ['workspaceId', 'cursor', 'limit']);
+  if (
+    value.limit !== undefined &&
+    (!Number.isSafeInteger(value.limit) || Number(value.limit) < 1 || Number(value.limit) > 1000)
+  ) {
+    throw invalidArgument('limit must be an integer from 1 through 1000', 'limit');
+  }
+  return {
+    workspaceId: validateOpaqueId(
+      value,
+      'workspaceId',
+      WORKSPACE_ID_PATTERN,
+    ) as EventsPollParams['workspaceId'],
+    cursor: validateOpaqueId(value, 'cursor', EVENT_CURSOR_PATTERN) as EventsPollParams['cursor'],
+    ...(value.limit !== undefined ? { limit: Number(value.limit) } : {}),
   };
 }
 

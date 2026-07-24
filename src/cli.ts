@@ -61,7 +61,8 @@ Edge cases:
   bp frame                                            # list iframes
   bp frame 1                                          # eval in iframe context
   bp frame 0                                          # back to top frame
-  Dialogs (alert/confirm) are auto-handled by the daemon.
+  bp dialogs                                           # list pending JavaScript dialogs
+  bp dialog <id> --accept                              # explicitly accept a dialog
 
 Eval (replaces scroll, back, forward, extract, etc.):
   bp eval "history.back()"                           # go back
@@ -590,6 +591,47 @@ program.command('auth [username] [password]')
     if (!password) throw new Error('Usage: bp auth <username> <password>');
     await service.set(username, password);
     emit({ ok: true }, '\u2713 Auth credentials set (scoped to HTTP 401 challenges)');
+  }));
+
+// ─── dialogs ────────────────────────────────────────
+
+program.command('dialogs')
+  .description('List pending JavaScript dialogs')
+  .action(action(async () => {
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const dialogs = await existing.client.dialogs();
+    if (useJson()) {
+      console.log(JSON.stringify({ ok: true, dialogs }));
+    } else if (dialogs.length === 0) {
+      console.log('No pending dialogs.');
+    } else {
+      for (const dialog of dialogs) {
+        console.log(`${dialog.dialogId}  ${dialog.type}  ${dialog.message}`);
+      }
+    }
+  }));
+
+program.command('dialog <dialogId>')
+  .description('Accept or dismiss a pending JavaScript dialog')
+  .option('--accept', 'accept the dialog')
+  .option('--dismiss', 'dismiss the dialog')
+  .option('--prompt <text>', 'text to submit to a prompt dialog')
+  .action(action(async (dialogId, opts) => {
+    if (Boolean(opts.accept) === Boolean(opts.dismiss)) {
+      throw new Error('Choose exactly one of --accept or --dismiss');
+    }
+    const existing = await resumeExisting();
+    if (!existing) throw new Error('Not connected');
+    const result = await existing.client.respondToDialog(
+      dialogId,
+      opts.accept ? 'accept' : 'dismiss',
+      opts.prompt,
+    );
+    emit(
+      { ok: true, dialogId: result.dialogId, action: result.action },
+      `\u2713 ${result.action === 'accept' ? 'Accepted' : 'Dismissed'} dialog ${result.dialogId}`,
+    );
   }));
 
 // ─── tabs ───────────────────────────────────────────

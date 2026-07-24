@@ -48,6 +48,10 @@ export interface ManagedTabSetCloseResult {
 
 export interface TargetInventoryServiceOptions {
   onInvalidated?: (invalidation: ControlledTargetInvalidation) => void;
+  onTargetAttached?: (target: ControlledTargetRecord) => void;
+  onPopup?: (target: ControlledTargetRecord) => void;
+  onControlAcquired?: (target: ControlledTargetRecord, leaseId: ControlLeaseId) => void;
+  onControlReleased?: (target: ControlledTargetRecord, leaseId: ControlLeaseId) => void;
 }
 
 interface RootTargetInfo extends LiveTargetMetadata {
@@ -60,6 +64,10 @@ function readString(value: unknown): string | undefined {
 
 export class TargetInventoryService {
   private readonly onInvalidated?: (invalidation: ControlledTargetInvalidation) => void;
+  private readonly onTargetAttached?: (target: ControlledTargetRecord) => void;
+  private readonly onPopup?: (target: ControlledTargetRecord) => void;
+  private readonly onControlAcquired?: TargetInventoryServiceOptions['onControlAcquired'];
+  private readonly onControlReleased?: TargetInventoryServiceOptions['onControlReleased'];
 
   constructor(
     private readonly transport: Transport,
@@ -69,6 +77,10 @@ export class TargetInventoryService {
     options: TargetInventoryServiceOptions = {},
   ) {
     this.onInvalidated = options.onInvalidated;
+    this.onTargetAttached = options.onTargetAttached;
+    this.onPopup = options.onPopup;
+    this.onControlAcquired = options.onControlAcquired;
+    this.onControlReleased = options.onControlReleased;
   }
 
   registerManagedTarget(input: RegisterManagedTargetInput): ControlledTargetRecord {
@@ -95,6 +107,11 @@ export class TargetInventoryService {
   }
 
   async refresh(context: TargetInventoryContext): Promise<ControlledTargetInvalidation[]> {
+    const controlledBefore = new Map(
+      this.registry.activeRecords(context)
+        .filter(target => target.controllerLeaseId)
+        .map(target => [target.id, target]),
+    );
     const liveTargets = await this.readLiveTargets();
     this.adoptManagedPopups(context, liveTargets);
 
@@ -105,10 +122,17 @@ export class TargetInventoryService {
       this.browserInstanceId,
       userTargets,
     );
+    for (const target of synchronized.created) this.notify(this.onTargetAttached, target);
     const invalidated = [
       ...synchronized.invalidated,
       ...this.registry.reconcileBrowserTargets(context, this.browserInstanceId, liveTargets),
     ];
+    for (const invalidation of invalidated) {
+      const target = controlledBefore.get(invalidation.targetId);
+      if (target?.controllerLeaseId) {
+        this.notify(this.onControlReleased, target, target.controllerLeaseId);
+      }
+    }
     this.emitInvalidations(invalidated);
     return invalidated;
   }
@@ -123,7 +147,9 @@ export class TargetInventoryService {
       this.registry.setActive(context, context.leaseId, targetId);
       return resolved;
     } catch (error) {
-      if (resolved.newlyAcquired) this.registry.release(context, context.leaseId, targetId);
+      if (resolved.newlyAcquired && this.registry.release(context, context.leaseId, targetId)) {
+        this.notify(this.onControlReleased, this.registry.get(context, targetId), context.leaseId);
+      }
       throw error;
     }
   }
@@ -141,6 +167,9 @@ export class TargetInventoryService {
     }
     this.policy.assertOperation(operation);
     const acquisition = this.registry.acquire(context, context.leaseId, targetId);
+    if (acquisition.newlyAcquired) {
+      this.notify(this.onControlAcquired, acquisition.target, context.leaseId);
+    }
     return {
       targetId,
       browserInstanceId: this.browserInstanceId,
@@ -158,6 +187,7 @@ export class TargetInventoryService {
     targetId: ControlledTargetId,
   ): Promise<ControlledTargetInvalidation> {
     const resolved = await this.resolveForOperation(context, targetId, 'tabs.close');
+    const controlled = this.registry.get(context, targetId);
     try {
       const result = await this.transport.send('Target.closeTarget', { targetId: resolved.cdpTargetId });
       if (result?.success === false) {
@@ -167,10 +197,13 @@ export class TargetInventoryService {
         });
       }
       const invalidations = this.registry.markClosed(context, targetId);
+      this.notify(this.onControlReleased, controlled, context.leaseId);
       this.emitInvalidations(invalidations);
       return invalidations.find(invalidation => invalidation.targetId === targetId)!;
     } catch (error) {
-      if (resolved.newlyAcquired) this.registry.release(context, context.leaseId, targetId);
+      if (resolved.newlyAcquired && this.registry.release(context, context.leaseId, targetId)) {
+        this.notify(this.onControlReleased, controlled, context.leaseId);
+      }
       throw error;
     }
   }
@@ -200,11 +233,16 @@ export class TargetInventoryService {
     context: TargetInventoryContext,
     targetId: ControlledTargetId,
   ): void {
-    this.registry.release(context, context.leaseId, targetId);
+    const target = this.registry.get(context, targetId);
+    if (this.registry.release(context, context.leaseId, targetId)) {
+      this.notify(this.onControlReleased, target, context.leaseId);
+    }
   }
 
   releaseLease(leaseId: ControlLeaseId): void {
+    const controlled = this.registry.controlledByLease(leaseId);
     this.registry.releaseLease(leaseId);
+    for (const target of controlled) this.notify(this.onControlReleased, target, leaseId);
   }
 
   activeTarget(context: TargetInventoryContext): ControlledTargetRecord | undefined {
@@ -212,7 +250,11 @@ export class TargetInventoryService {
   }
 
   releaseWorkspace(context: WorkspaceCallerContext): ControlledTargetInvalidation[] {
+    const controlled = this.registry.activeRecords(context).filter(target => target.controllerLeaseId);
     const invalidated = this.registry.releaseWorkspace(context);
+    for (const target of controlled) {
+      this.notify(this.onControlReleased, target, target.controllerLeaseId!);
+    }
     this.emitInvalidations(invalidated);
     return invalidated;
   }
@@ -267,6 +309,8 @@ export class TargetInventoryService {
           url: target.url,
         });
         active.set(record.cdpTargetId, record);
+        this.notify(this.onTargetAttached, record);
+        this.notify(this.onPopup, record);
         adopted = true;
       }
     }
@@ -296,5 +340,13 @@ export class TargetInventoryService {
     for (const invalidation of invalidations) {
       try { this.onInvalidated(invalidation); } catch { /* observers cannot block target invalidation */ }
     }
+  }
+
+  private notify<T extends unknown[]>(
+    listener: ((...args: T) => void) | undefined,
+    ...args: T
+  ): void {
+    if (!listener) return;
+    try { listener(...args); } catch { /* observers cannot block target operations */ }
   }
 }

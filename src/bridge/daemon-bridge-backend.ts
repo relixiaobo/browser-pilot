@@ -1,6 +1,6 @@
 import { DaemonClient } from '../client.js';
 import { BrowserPilotError } from '../protocol/errors.js';
-import type { JsonValue } from '../protocol/model.js';
+import type { JsonRpcNotification, JsonValue } from '../protocol/model.js';
 import { connectDaemon } from '../session.js';
 import type { StdioBridgeBackend } from './stdio-bridge.js';
 
@@ -15,6 +15,22 @@ export class DaemonBridgeBackend implements StdioBridgeBackend {
   async disconnect(bridgeSessionId: string): Promise<void> {
     if (!this.client) return;
     await this.client.brokerDisconnect(bridgeSessionId);
+  }
+
+  async *notifications(
+    bridgeSessionId: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<JsonRpcNotification> {
+    const client = await this.getClient();
+    while (!signal.aborted) {
+      try {
+        const notification = await client.brokerNextNotification(bridgeSessionId, 25_000, signal);
+        if (notification) yield notification;
+      } catch (error) {
+        if (signal.aborted) return;
+        throw error;
+      }
+    }
   }
 
   private async getClient(): Promise<DaemonClient> {

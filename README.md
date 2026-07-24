@@ -67,7 +67,7 @@ The agent will use `bp` commands automatically. Your real login sessions are pre
 | **Auto-snapshot after action** | Yes | Yes | No | Yes |
 | **Network interception** | Yes (block/mock/headers) | Yes | Yes | No |
 | **Multi-browser** | Chromium-only | Chromium + Firefox + WebKit | Chromium-only | Chromium-only |
-| **Dialog auto-handling** | Yes | Yes | No | Yes |
+| **Dialog handling** | Explicit | Automatic | Manual | Automatic |
 | **JSON output** | Default | MCP structured | MCP structured | Python objects |
 | **File upload** | Auto-detect input | Yes | No | Yes |
 
@@ -112,10 +112,10 @@ boundary; products may apply their own approval UX or remove operations when
 launching the bridge. Bulk cleanup remains limited to managed tabs, and user
 tabs remain open when a session ends.
 
-The `browser-pilot bridge --stdio` transport and Broker lifecycle foundation
-are now implemented. Browser tool dispatch, events, and protected Artifacts are
-still tracked as release blockers in the integration plan; embedded products
-should use the documented release gate rather than depend on partial methods.
+The `browser-pilot bridge --stdio` transport, Broker lifecycle, browser tool
+dispatch, event replay, and protected Artifacts are implemented. Embedded
+products should still use the documented release gate while browser reconnect,
+resource isolation, discovery, and conformance work remains in progress.
 
 ## Commands
 
@@ -148,8 +148,11 @@ should use the documented release gate rather than depend on partial methods.
 | `bp upload <filepath>` | Upload file (auto-finds `<input type="file">`) |
 | `bp auth <user> <pass>` | Set HTTP Basic Auth credentials (`--clear`) |
 | `bp frame [index]` | List or switch iframe context (0 = top) |
+| `bp dialogs` | List pending JavaScript dialogs |
+| `bp dialog <id> --accept\|--dismiss` | Explicitly respond to a dialog (`--prompt`) |
 
-Dialogs (`alert`/`confirm`/`prompt`) are auto-handled by the daemon.
+Dialogs remain pending until explicitly accepted or dismissed. One-shot CLI
+dialogs are isolated from dialogs owned by embedded Broker clients.
 
 Run `bp tabs` to list Pilot-managed tabs, their popups, and eligible tabs the
 user opened elsewhere in the same browser. `bp tab <n>` switches control to any

@@ -10,6 +10,7 @@ import {
   negotiateProtocol,
   parseJsonRpcMessage,
   validateCommandAccessParams,
+  validateEventsPollParams,
   validateToolCallParams,
   validateToolArguments,
   validateToolResult,
@@ -164,6 +165,29 @@ test('command envelopes validate caller IDs, idempotency keys, and deadlines', (
   assert.throws(
     () => validateToolCallParams({ ...params, commandId: 'not-a-command' }),
     error => error.code === 'invalid_argument' && error.context.field === 'commandId',
+  );
+});
+
+test('event polling requires an explicit bounded Workspace cursor', () => {
+  assert.deepEqual(validateEventsPollParams({
+    workspaceId: 'workspace:123',
+    cursor: 'cursor:42',
+    limit: 250,
+  }), {
+    workspaceId: 'workspace:123',
+    cursor: 'cursor:42',
+    limit: 250,
+  });
+  assert.throws(
+    () => validateEventsPollParams({ workspaceId: 'workspace:123' }),
+    error => error.code === 'invalid_argument' && error.context.field === 'cursor',
+  );
+  assert.throws(
+    () => validateEventsPollParams({
+      workspaceId: 'workspace:123',
+      cursor: 'cursor:01',
+    }),
+    error => error.code === 'invalid_argument' && error.context.field === 'cursor',
   );
 });
 

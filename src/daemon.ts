@@ -9,6 +9,7 @@ import type { BrowserInstanceId, JsonValue } from './protocol/model.js';
 import { DEFAULT_PROTOCOL_LIMITS, MemoryBrokerRuntime } from './services/broker-runtime.js';
 import { BrowserToolService } from './services/browser-tool-service.js';
 import { ArtifactStore } from './services/artifact-store.js';
+import { CompatibilityDialogService } from './services/compatibility-dialog-service.js';
 
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
@@ -53,8 +54,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 let authCredentials: { username: string; password: string } | null = null;
 
-interface DialogInfo { url: string; message: string; type: string; defaultPrompt: string; sessionId?: string; timestamp: number; }
-const handledDialogs: DialogInfo[] = [];
 const discoveredTargets: Array<{ targetId: string; url: string; openerTargetId?: string; timestamp: number }> = [];
 
 // ── Network monitoring state ────────────────────────
@@ -162,6 +161,10 @@ async function main() {
   });
   await artifactStore.initialize();
   const browserTools = new BrowserToolService(cdp, browserBinding, { artifactStore });
+  const compatibilityDialogs = new CompatibilityDialogService(
+    cdp,
+    sessionId => browserTools.ownsSession(sessionId),
+  );
   const broker = new MemoryBrokerRuntime({
     serviceVersion: PKG_VERSION,
     executableVersion: PKG_VERSION,
@@ -175,13 +178,6 @@ async function main() {
     void artifactStore.sweep().catch(() => {});
   }, 1_000);
   leaseSweepTimer.unref();
-
-  // ── Dialog auto-handling ──────────────────────────
-  cdp.on('Page.javascriptDialogOpening', (params: any, sessionId?: string) => {
-    handledDialogs.push({ url: params.url, message: params.message, type: params.type, defaultPrompt: params.defaultPrompt || '', sessionId, timestamp: Date.now() });
-    if (handledDialogs.length > 20) handledDialogs.shift();
-    cdp.send('Page.handleJavaScriptDialog', { accept: true }, sessionId).catch(() => {});
-  });
 
   // ── Popup tracking ────────────────────────────────
   await cdp.send('Target.setDiscoverTargets', { discover: true });
@@ -314,6 +310,35 @@ async function main() {
           res.writeHead(200); res.end(JSON.stringify({ error: asBrowserPilotError(error).toJsonRpcError() })); return;
         }
       }
+      if (req.method === 'POST' && url.pathname === '/broker/events/next') {
+        const abort = new AbortController();
+        res.once('close', () => abort.abort());
+        try {
+          const body: unknown = JSON.parse(await readBody(req, 4096));
+          if (
+            !isRecord(body) ||
+            typeof body.bridgeSessionId !== 'string' ||
+            !Number.isSafeInteger(body.waitMs)
+          ) {
+            throw invalidArgument('bridgeSessionId and integer waitMs are required');
+          }
+          const notification = await broker.nextNotification(body.bridgeSessionId, {
+            waitMs: Number(body.waitMs),
+            signal: abort.signal,
+          });
+          if (!res.destroyed) {
+            res.writeHead(200);
+            res.end(JSON.stringify({ notification }));
+          }
+          return;
+        } catch (error) {
+          if (!res.destroyed) {
+            res.writeHead(200);
+            res.end(JSON.stringify({ error: asBrowserPilotError(error).toJsonRpcError() }));
+          }
+          return;
+        }
+      }
       if (req.method === 'POST' && url.pathname === '/cdp') {
         const body = await readBody(req);
         const { method, params, sessionId } = JSON.parse(body);
@@ -322,7 +347,24 @@ async function main() {
         res.writeHead(200); res.end(JSON.stringify({ result })); return;
       }
       if (req.method === 'GET' && url.pathname === '/dialogs') {
-        res.writeHead(200); res.end(JSON.stringify({ dialogs: handledDialogs })); return;
+        res.writeHead(200); res.end(JSON.stringify({ dialogs: compatibilityDialogs.list() })); return;
+      }
+      if (req.method === 'POST' && url.pathname === '/dialogs/respond') {
+        const body: unknown = JSON.parse(await readBody(req, 4096));
+        if (
+          !isRecord(body) ||
+          typeof body.dialogId !== 'string' ||
+          (body.action !== 'accept' && body.action !== 'dismiss') ||
+          (body.prompt !== undefined && typeof body.prompt !== 'string')
+        ) {
+          throw invalidArgument('dialogId and an accept or dismiss action are required');
+        }
+        const dialog = await compatibilityDialogs.respond(
+          body.dialogId,
+          body.action,
+          body.prompt,
+        );
+        res.writeHead(200); res.end(JSON.stringify({ dialog })); return;
       }
       if (req.method === 'POST' && url.pathname === '/auth') {
         const body = await readBody(req);

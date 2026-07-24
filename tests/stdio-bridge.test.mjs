@@ -74,6 +74,14 @@ async function execute(chunks, options = {}) {
   };
 }
 
+async function waitUntil(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  throw new Error('Timed out waiting for test condition');
+}
+
 test('stdio bridge processes strict NDJSON sequentially and emits no notification response', async () => {
   const input = [
     `${JSON.stringify(initializeMessage())}\n`,
@@ -190,4 +198,93 @@ test('command control bypasses a pending tool call on the same stdio bridge', as
     'tools/call:end',
   ]);
   assert.deepEqual(execution.messages.map(message => message.id), ['init', 'cancel', 'tool']);
+});
+
+test('stdio bridge emits backend events as JSON-RPC notifications after initialize', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const messages = [];
+  let buffered = '';
+  output.on('data', chunk => {
+    buffered += chunk.toString('utf8');
+    const lines = buffered.split('\n');
+    buffered = lines.pop();
+    for (const line of lines) messages.push(JSON.parse(line));
+  });
+  let publish;
+  const eventReady = new Promise(resolve => { publish = resolve; });
+  const running = runStdioBridge({
+    input,
+    output,
+    bridgeSessionId: 'bridge:notifications',
+    backend: {
+      async call(_bridgeSessionId, method) {
+        if (method === 'initialize') return { initialized: true };
+        if (method === 'shutdown') return { ok: true };
+        throw new Error(`Unexpected method: ${method}`);
+      },
+      async *notifications() {
+        await eventReady;
+        yield {
+          jsonrpc: '2.0',
+          method: 'events/event',
+          params: { event: { id: 'event:one', sequence: 1 } },
+        };
+      },
+      async disconnect() {},
+    },
+  });
+
+  input.write(`${JSON.stringify(initializeMessage('init'))}\n`);
+  await waitUntil(() => messages.length === 1);
+  publish();
+  await waitUntil(() => messages.length === 2);
+  input.end(`${JSON.stringify({ jsonrpc: '2.0', id: 'stop', method: 'shutdown', params: {} })}\n`);
+  const result = await running;
+
+  assert.deepEqual(result, { exitCode: 0, reason: 'shutdown' });
+  assert.equal(messages[0].id, 'init');
+  assert.equal(messages[1].method, 'events/event');
+  assert.equal(messages[1].params.event.sequence, 1);
+  assert.equal(messages[2].id, 'stop');
+});
+
+test('dialog control bypasses a browser tool call blocked by that dialog', async () => {
+  let releaseTool;
+  const order = [];
+  const execution = await execute([
+    `${JSON.stringify(initializeMessage('init'))}\n`,
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'tool',
+      method: 'tools/call',
+      params: { name: 'browser.click', arguments: {} },
+    })}\n`,
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'dialog',
+      method: 'tools/call',
+      params: { name: 'browser.dialogs.respond', arguments: {} },
+    })}\n`,
+  ], {
+    backend: {
+      async call(_bridgeSessionId, method, params) {
+        if (method === 'initialize') return { initialized: true };
+        order.push(params.name);
+        if (params.name === 'browser.click') {
+          await new Promise(resolve => { releaseTool = resolve; });
+          return { command: { status: 'completed' } };
+        }
+        if (params.name === 'browser.dialogs.respond') {
+          releaseTool();
+          return { command: { status: 'completed' } };
+        }
+        throw new Error(`Unexpected call: ${method}`);
+      },
+      async disconnect() {},
+    },
+  });
+
+  assert.deepEqual(order, ['browser.click', 'browser.dialogs.respond']);
+  assert.deepEqual(execution.messages.map(message => message.id), ['init', 'dialog', 'tool']);
 });

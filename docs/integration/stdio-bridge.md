@@ -1,7 +1,7 @@
 # Stdio Bridge Integration Contract
 
-Status: browser `tools/call`, scoped Observations, target inventory, and
-Artifacts implemented; command recovery and events remain release blockers.
+Status: browser `tools/call`, scoped Observations, target inventory, Artifacts,
+command recovery, and event delivery implemented.
 
 This document describes the Agent-neutral process boundary. Tenon, OpenClaw,
 and other Agent hosts use the same executable and protocol. No consumer imports
@@ -42,16 +42,17 @@ The transport is JSON-RPC 2.0 over newline-delimited UTF-8 JSON:
 - `shutdown` exits only the bridge process, not the shared per-user daemon.
 
 Hosts must not send concurrent writes that interleave bytes. They may pipeline
-complete lines and must correlate responses by JSON-RPC ID. `commands/get` and
-`commands/cancel` may overtake a pending `tools/call`, so those responses can
-arrive earlier; all other calls preserve dispatch order.
+complete lines and must correlate responses by JSON-RPC ID. `commands/get`,
+`commands/cancel`, and dialog list/respond calls may overtake a pending
+`tools/call`, so those responses can arrive earlier. Dialog control needs this
+exception because a browser dialog can pause the command that caused it.
 
 ## Initialization
 
 `initialize` must be the first successful request on a bridge Connection:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"client":{"id":"com.example.agent","name":"Example Agent","version":"2.0.0","instanceId":"install:01J..."},"protocol":{"min":{"major":1,"minor":0},"max":{"major":1,"minor":0}},"requestedCapabilities":["browser.control","workspace.manage","observation.read","action.input","artifact.read"],"launchMode":"embedded"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"client":{"id":"com.example.agent","name":"Example Agent","version":"2.0.0","instanceId":"install:01J..."},"protocol":{"min":{"major":1,"minor":0},"max":{"major":1,"minor":0}},"requestedCapabilities":["browser.control","workspace.manage","observation.read","action.input","artifact.read","event.read"],"launchMode":"embedded"}}
 ```
 
 The response returns the selected protocol, supported and granted
@@ -79,6 +80,7 @@ workspaces/release
 leases/create
 leases/heartbeat
 leases/release
+events/poll
 artifacts/get
 artifacts/export
 artifacts/retain
@@ -87,9 +89,10 @@ shutdown
 ```
 
 `workspaces/create` accepts an optional `browserId`. Without one, the Broker
-uses its ready browser binding. It returns a Workspace and its default logical
-ManagedTabSet. Creating a Workspace does not itself create a browser window;
-the first managed navigation creates the dedicated browser window.
+uses its ready browser binding. It returns a Workspace, its default logical
+ManagedTabSet, and an `eventCursor`. `workspaces/get` returns the current cursor
+as a recovery baseline. Creating a Workspace does not itself create a browser
+window; the first managed navigation creates the dedicated browser window.
 
 `leases/create` accepts a `workspaceId` and optional `ttlMs`. The default Lease
 is 30 seconds, with a supported range of 1 second through 5 minutes. Heartbeat
@@ -145,6 +148,39 @@ Inventory includes every eligible ordinary user tab plus the Workspace's
 managed tabs. A physical tab can be controlled by only one Lease at a time.
 Releasing a Workspace closes managed tabs but leaves user tabs open.
 
+## Events
+
+Every event is first committed to a bounded per-Workspace journal and then
+offered as this best-effort notification:
+
+```json
+{"jsonrpc":"2.0","method":"events/event","params":{"event":{"id":"event:...","sequence":7,"timestamp":1,"workspaceId":"workspace:...","leaseId":"lease:...","targetId":"target:...","type":"dialog","payloadVersion":1,"sensitivity":"browser_data","payload":{"dialogId":"dialog:...","state":"opened","type":"confirm","message":"Continue?","url":"https://example.com"}}}}
+```
+
+Notifications can interleave with responses and can be dropped under transport
+backpressure or a disconnected bridge. Treat them as a low-latency signal, not
+as the recovery record. Track the last fully processed cursor and poll:
+
+```json
+{"jsonrpc":"2.0","id":20,"method":"events/poll","params":{"workspaceId":"workspace:...","cursor":"cursor:6","limit":100}}
+```
+
+The result contains ordered `events`, `nextCursor`, and `hasMore`. Continue until
+`hasMore` is false. If the cursor predates the retained journal, the Broker
+returns `cursor_expired` with `earliestCursor` and `latestCursor`; rebuild tab
+and observation state, then call `workspaces/get` to establish a new baseline.
+Never infer delivery from notification arrival alone, and never advance the
+stored cursor past an event the host has not processed.
+
+Current producers cover command status, Lease expiry, navigation, document
+change, target attach/detach, target control, managed popups, dialogs, and
+observation invalidation. Download, network, and browser reconnect producers
+remain part of the browser-capability workstream.
+
+JavaScript dialogs remain pending. Use `browser.dialogs.list`, then call
+`browser.dialogs.respond` with the returned `dialogId`, target, and explicit
+`accept` or `dismiss` action. Browser Pilot never auto-accepts a dialog.
+
 ## Artifacts
 
 `browser.capture` and `browser.pdf` return Artifact descriptors, never base64 or
@@ -180,7 +216,8 @@ or command state.
 `tools/list` is generated from the canonical schemas used for argument and
 result validation, and production filtering prevents unwired tools from being
 advertised. The current bridge supports discovery, connect, open, tab inventory,
-observe/read, core actions, cookies, eval, screenshot, PDF, and Artifact access.
+observe/read, core actions, dialogs, cookies, eval, screenshot, PDF, Artifact
+access, command recovery, and event replay.
 An embedding adapter should not ship against this work-in-progress bridge until
-browser reconnect handling, event replay, and the remaining advertised browser
-families are complete.
+browser reconnect handling and the remaining advertised browser families are
+complete.

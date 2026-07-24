@@ -135,11 +135,11 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 
 ### A3. Add bounded runtime lifecycle and command semantics
 
-- [ ] **A3.1** Add in-memory Workspace, Lease, target assignment, command,
+- [x] **A3.1** Add in-memory Workspace, Lease, target assignment, command,
   idempotency, and bounded journal stores.
   - Covers: FR-5, NFR-2, NFR-5.
-  - Progress: Workspace, Lease, target assignment, Command, and idempotency
-    stores are bounded and live in daemon memory. Event journals remain.
+  - Complete: Workspace, Lease, target assignment, Command, idempotency, and
+    per-Workspace event stores are bounded and live in daemon memory.
 - [ ] **A3.2** Implement heartbeat, expiry, release, crash recovery, and
   idempotent cleanup for Workspaces and Leases.
   - Covers: AC-5, NFR-5.
@@ -155,9 +155,13 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     terminal outcomes, pre-dispatch cancellation, best-effort post-dispatch
     cancellation, deadlines, cached results, and no-replay unknown outcomes are
     enforced through the public bridge.
-- [ ] **A3.4** Replace dialog auto-acceptance with typed events and explicit
+- [x] **A3.4** Replace dialog auto-acceptance with typed events and explicit
   accept/dismiss commands.
   - Covers: DEC-5, event contract.
+  - Complete: dialogs stay pending, emit opened/closed events, and can be listed
+    and explicitly accepted or dismissed through out-of-band dialog tools.
+    One-shot CLI dialogs use the same explicit policy while remaining unable to
+    list or respond to Broker-owned sessions.
 
 ### A4. Deliver the stdio bridge
 
@@ -177,9 +181,12 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     lifecycle, all-tab inventory, and production implementation filtering are
     implemented. `commands/get/cancel` can overtake a pending call on the same
     stdio connection and return structured outcomes.
-- [ ] **A4.3** Implement event notifications plus cursor polling and
+- [x] **A4.3** Implement event notifications plus cursor polling and
   `cursor_expired` recovery.
   - Covers: events contract, NFR-3.
+  - Complete: bounded Workspace journals, explicit initial cursors, ordered
+    replay, `cursor_expired` bounds, Principal isolation, best-effort stdio
+    notifications, and daemon notification long-polling are implemented.
 - [ ] **A4.4** Add protocol backpressure, negotiated message limits, and
   malformed-client isolation.
   - Covers: NFR-1, NFR-5.

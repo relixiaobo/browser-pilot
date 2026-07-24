@@ -272,6 +272,8 @@ Existing and future eligible user tabs are available immediately. The command
 returns the existing JSON shape during migration. Failures include a stable
 machine code in addition to compatible human guidance. Normal process exit
 releases the short-lived Lease and does not close user tabs.
+JavaScript dialogs remain pending and are handled explicitly with `bp dialogs`
+and `bp dialog`; this compatibility path cannot access Broker-owned dialogs.
 
 ### FLOW-2 Product-embedded use
 
@@ -334,8 +336,9 @@ artifacts/get|export|retain|release
 shutdown
 ```
 
-Asynchronous events use JSON-RPC notifications. Polling with a cursor is the
-recovery path after reconnect or backpressure.
+Asynchronous events use best-effort `events/event` JSON-RPC notifications.
+Polling with a cursor is the authoritative recovery path after reconnect,
+notification loss, or backpressure. Notifications and responses may interleave.
 
 ### Initialization
 
@@ -441,9 +444,11 @@ accepted -> expired
 - **BR-12:** Browser disconnect and reconnect change the BrowserInstance
   connection generation and invalidate sessions and observations.
 
-Normal bridge calls preserve dispatch order. `commands/get` and
-`commands/cancel` may bypass a pending `tools/call`; JSON-RPC clients therefore
-correlate responses by ID rather than relying on response order.
+Normal bridge calls preserve dispatch order. `commands/get`, `commands/cancel`,
+and dialog list/respond calls may bypass a pending `tools/call`; JSON-RPC clients
+therefore correlate responses by ID rather than relying on response order. The
+dialog exception prevents a paused browser command from blocking the explicit
+response needed to release its JavaScript dialog.
 
 Workspaces, Leases, target mappings, refs, command status, idempotency records,
 and bounded event journals live in Broker memory by default. Broker restart
@@ -491,9 +496,16 @@ observation invalidated, and Lease expiry.
 
 Every event contains an event ID, monotonic Workspace sequence, timestamp,
 Workspace ID, relevant Lease and target IDs, type, payload version, and
-sensitivity. Consumers can resume from the last acknowledged cursor. The Broker
-may compact old events and must return `cursor_expired` rather than silently
-skip them.
+sensitivity. `workspaces/create|get` returns an explicit current `eventCursor`.
+Consumers poll from their last fully processed cursor; a poll returns ordered
+events, `nextCursor`, and `hasMore`. The Broker may compact old events and must
+return `cursor_expired` with retained cursor bounds rather than silently skip
+them. A consumer that loses its cursor rebuilds tab and Observation state, then
+uses `workspaces/get` to establish a new baseline.
+
+JavaScript dialogs enter explicit pending state and emit opened/closed events.
+They remain paused until the user or an Agent issues `browser.dialogs.respond`;
+Browser Pilot never auto-accepts them.
 
 ## Artifacts
 

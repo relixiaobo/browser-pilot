@@ -12,6 +12,7 @@ import {
   type BrowserInstance,
   type BrowserWorkspace,
   type BrowserWorkspaceId,
+  type BrowserEvent,
   type Capability,
   type ClientConnection,
   type ClientConnectionId,
@@ -21,6 +22,7 @@ import {
   type ControlLease,
   type ControlLeaseId,
   type InitializeResult,
+  type JsonRpcNotification,
   type JsonValue,
   type ManagedTabSet,
   type ManagedTabSetId,
@@ -40,6 +42,7 @@ import {
   validateArtifactAccessParams,
   validateArtifactExportParams,
   validateCommandAccessParams,
+  validateEventsPollParams,
   validateInitializeParams,
   validateLeaseCreateParams,
   validateLeaseHeartbeatParams,
@@ -52,6 +55,10 @@ import {
   validateWorkspaceReleaseParams,
 } from '../protocol/validation.js';
 import { MemoryCommandRuntime } from './command-runtime.js';
+import {
+  MemoryEventJournal,
+  type PublishBrowserEventInput,
+} from './event-journal.js';
 
 export const DEFAULT_PROTOCOL_LIMITS: Readonly<ProtocolLimits> = {
   maxMessageBytes: 1024 * 1024,
@@ -89,6 +96,7 @@ export interface BrokerRuntimeOptions {
   toolExecutor?: BrowserToolExecutor;
   artifactStore?: BrokerArtifactStore;
   commandRuntime?: MemoryCommandRuntime;
+  eventJournal?: MemoryEventJournal;
 }
 
 export interface BrokerArtifactStore {
@@ -140,6 +148,7 @@ export interface BrowserToolExecutor {
     definition: ToolDefinition,
     args: JsonValue,
   ): ControlledTargetId | undefined;
+  setEventPublisher?(publisher: (event: PublishBrowserEventInput) => void): void;
   releaseLease?(lease: ControlLease): void;
   releaseWorkspace?(
     principal: ClientPrincipal,
@@ -152,6 +161,15 @@ interface RuntimeConnection {
   value: ClientConnection;
   bridgeSessionId: string;
   grantedCapabilities: Capability[];
+  notifications: JsonRpcNotification[];
+  notificationWaiter?: NotificationWaiter;
+}
+
+interface NotificationWaiter {
+  resolve: (notification: JsonRpcNotification | undefined) => void;
+  timer?: NodeJS.Timeout;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 interface RuntimeWorkspace {
@@ -204,6 +222,9 @@ export class MemoryBrokerRuntime {
   private readonly workspaceIdleTtlMs: number;
   private readonly managedTabSetIds = new Set<ManagedTabSetId>();
   private readonly commands: MemoryCommandRuntime;
+  private readonly events: MemoryEventJournal;
+  private readonly listenerCleanup: Array<() => void> = [];
+  private readonly workspaceCleanup = new Map<BrowserWorkspaceId, Promise<void>>();
 
   constructor(private readonly options: BrokerRuntimeOptions) {
     this.browserBindings = options.browsers.map(binding => ({
@@ -225,6 +246,23 @@ export class MemoryBrokerRuntime {
     this.connectionIdleTtlMs = options.connectionIdleTtlMs ?? 10 * 60_000;
     this.workspaceIdleTtlMs = options.workspaceIdleTtlMs ?? 24 * 60 * 60_000;
     this.commands = options.commandRuntime ?? new MemoryCommandRuntime({ now: this.now });
+    this.events = options.eventJournal ?? new MemoryEventJournal({
+      maxEventsPerWorkspace: this.limits.eventJournalSize,
+      now: this.now,
+    });
+    this.listenerCleanup.push(this.commands.subscribe(outcome => {
+      if (!outcome.command.workspaceId) return;
+      this.publishBrowserEvent({
+        workspaceId: outcome.command.workspaceId,
+        ...(outcome.command.leaseId ? { leaseId: outcome.command.leaseId } : {}),
+        ...(outcome.command.targetId ? { targetId: outcome.command.targetId } : {}),
+        type: 'command.status',
+        sensitivity: 'browser_data',
+        payload: { command: outcome.command } as unknown as JsonValue,
+      });
+    }));
+    this.listenerCleanup.push(this.events.subscribe(event => this.deliverNotification(event)));
+    options.toolExecutor?.setEventPublisher?.(event => { this.publishBrowserEvent(event); });
     if (
       this.minLeaseTtlMs <= 0 ||
       this.defaultLeaseTtlMs < this.minLeaseTtlMs ||
@@ -278,6 +316,8 @@ export class MemoryBrokerRuntime {
         return this.getCommand(connection, params);
       case 'commands/cancel':
         return this.cancelCommand(connection, params);
+      case 'events/poll':
+        return this.pollEvents(connection, params);
       case 'artifacts/get':
         return this.getArtifact(connection, params);
       case 'artifacts/export':
@@ -313,6 +353,7 @@ export class MemoryBrokerRuntime {
     const connection = this.connectionsByBridge.get(bridgeSessionId);
     if (!connection) return;
     this.commands.releaseConnection(connection.value.id);
+    this.resolveNotificationWaiter(connection, undefined);
     this.connectionsByBridge.delete(bridgeSessionId);
     this.connectionsById.delete(connection.value.id);
     for (const [leaseId, lease] of this.leases) {
@@ -327,6 +368,50 @@ export class MemoryBrokerRuntime {
     for (const bridgeSessionId of [...this.connectionsByBridge.keys()]) {
       this.disconnect(bridgeSessionId);
     }
+    for (const cleanup of this.listenerCleanup.splice(0)) cleanup();
+  }
+
+  async nextNotification(
+    bridgeSessionId: string,
+    options: { waitMs?: number; signal?: AbortSignal } = {},
+  ): Promise<JsonRpcNotification | undefined> {
+    const connection = this.requireConnection(bridgeSessionId);
+    const waitMs = options.waitMs ?? 25_000;
+    if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 30_000) {
+      throw invalidArgument('Notification waitMs must be from 0 through 30000', 'waitMs');
+    }
+    const queued = connection.notifications.shift();
+    if (queued || waitMs === 0 || options.signal?.aborted) return queued;
+    if (connection.notificationWaiter) {
+      throw invalidArgument('Only one notification poll may be active per bridge Connection');
+    }
+    return new Promise(resolve => {
+      const waiter: NotificationWaiter = { resolve, signal: options.signal };
+      const finish = (): void => this.resolveNotificationWaiter(connection, undefined);
+      waiter.timer = setTimeout(finish, waitMs);
+      waiter.timer.unref();
+      if (options.signal) {
+        waiter.onAbort = finish;
+        options.signal.addEventListener('abort', finish, { once: true });
+      }
+      connection.notificationWaiter = waiter;
+    });
+  }
+
+  async *notifications(
+    bridgeSessionId: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<JsonRpcNotification> {
+    while (!signal.aborted) {
+      const notification = await this.nextNotification(bridgeSessionId, { waitMs: 30_000, signal });
+      if (notification) yield notification;
+    }
+  }
+
+  publishBrowserEvent(input: PublishBrowserEventInput): BrowserEvent | undefined {
+    const workspace = this.workspaces.get(input.workspaceId);
+    if (!workspace || workspace.value.state !== 'active') return undefined;
+    return this.events.publish(input);
   }
 
   sweepExpiredLeases(): number {
@@ -407,6 +492,7 @@ export class MemoryBrokerRuntime {
       value: connectionValue,
       bridgeSessionId,
       grantedCapabilities: [...capabilities.granted],
+      notifications: [],
     };
     this.connectionsByBridge.set(bridgeSessionId, connection);
     this.connectionsById.set(connectionId, connection);
@@ -465,7 +551,12 @@ export class MemoryBrokerRuntime {
       state: 'active',
     };
     this.workspaces.set(workspaceId, { value: workspace, managedTabSet });
-    return asJson({ workspace: cloneWorkspace(workspace), managedTabSet: cloneManagedTabSet(managedTabSet) });
+    const eventCursor = this.events.createWorkspace(workspaceId);
+    return asJson({
+      workspace: cloneWorkspace(workspace),
+      managedTabSet: cloneManagedTabSet(managedTabSet),
+      eventCursor,
+    });
   }
 
   private getWorkspace(connection: RuntimeConnection, value: unknown): JsonValue {
@@ -475,14 +566,16 @@ export class MemoryBrokerRuntime {
     return asJson({
       workspace: cloneWorkspace(record.value),
       managedTabSet: cloneManagedTabSet(record.managedTabSet),
+      eventCursor: this.events.currentCursor(record.value.id),
     });
   }
 
-  private releaseWorkspace(connection: RuntimeConnection, value: unknown): JsonValue {
+  private async releaseWorkspace(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
     this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateWorkspaceReleaseParams(value);
     const record = this.requireWorkspace(connection, params.workspaceId, true);
     if (record.value.state !== 'released') this.releaseWorkspaceRecord(record);
+    await this.workspaceCleanup.get(record.value.id);
     return asJson({ workspaceId: params.workspaceId, released: true });
   }
 
@@ -611,6 +704,15 @@ export class MemoryBrokerRuntime {
   private releaseLeaseRecord(lease: ControlLease, state: 'released' | 'expired'): void {
     if (lease.state !== 'active') return;
     lease.state = state;
+    if (state === 'expired') {
+      this.publishBrowserEvent({
+        workspaceId: lease.workspaceId,
+        leaseId: lease.id,
+        type: 'lease.expired',
+        sensitivity: 'public',
+        payload: { expiresAt: lease.expiresAt },
+      });
+    }
     this.commands.releaseLease(lease.id);
     this.options.toolExecutor?.releaseLease?.(cloneLease(lease));
     this.options.onLeaseReleased?.(cloneLease(lease));
@@ -639,7 +741,14 @@ export class MemoryBrokerRuntime {
       cloneWorkspace(record.value),
       cloneManagedTabSet(record.managedTabSet),
     );
-    void this.options.artifactStore?.releaseWorkspace(record.value.id).catch(() => {});
+    const cleanup = this.options.artifactStore?.releaseWorkspace(record.value.id).catch(() => {})
+      ?? Promise.resolve();
+    this.workspaceCleanup.set(record.value.id, cleanup);
+    void cleanup.finally(() => {
+      if (this.workspaceCleanup.get(record.value.id) === cleanup) {
+        this.workspaceCleanup.delete(record.value.id);
+      }
+    });
   }
 
   private pruneReleasedWorkspaces(): void {
@@ -649,6 +758,7 @@ export class MemoryBrokerRuntime {
       .sort((left, right) => left.value.updatedAt - right.value.updatedAt);
     for (const record of released) {
       this.workspaces.delete(record.value.id);
+      this.events.releaseWorkspace(record.value.id);
       this.managedTabSetIds.delete(record.managedTabSet.id);
       for (const [leaseId, lease] of this.leases) {
         if (lease.workspaceId === record.value.id) this.leases.delete(leaseId);
@@ -789,6 +899,51 @@ export class MemoryBrokerRuntime {
       const result = await executor.call({ ...context, signal, markDispatched }, definition, args);
       return validateToolResult(definition.name, result);
     }));
+  }
+
+  private pollEvents(connection: RuntimeConnection, value: unknown): JsonValue {
+    this.assertCapabilities(connection, ['event.read']);
+    const params = validateEventsPollParams(value);
+    this.requireWorkspace(connection, params.workspaceId, true);
+    return asJson(this.events.poll(params.workspaceId, params.cursor, params.limit));
+  }
+
+  private deliverNotification(event: BrowserEvent): void {
+    const workspace = this.workspaces.get(event.workspaceId);
+    if (!workspace) return;
+    const notification: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method: 'events/event',
+      params: { event } as unknown as JsonValue,
+    };
+    for (const connection of this.connectionsByBridge.values()) {
+      if (
+        connection.value.principalId !== workspace.value.principalId ||
+        !connection.grantedCapabilities.includes('event.read')
+      ) continue;
+      if (connection.notificationWaiter) {
+        this.resolveNotificationWaiter(connection, structuredClone(notification));
+        continue;
+      }
+      connection.notifications.push(structuredClone(notification));
+      if (connection.notifications.length > this.limits.eventJournalSize) {
+        connection.notifications.shift();
+      }
+    }
+  }
+
+  private resolveNotificationWaiter(
+    connection: RuntimeConnection,
+    notification: JsonRpcNotification | undefined,
+  ): void {
+    const waiter = connection.notificationWaiter;
+    if (!waiter) return;
+    connection.notificationWaiter = undefined;
+    if (waiter.timer) clearTimeout(waiter.timer);
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener('abort', waiter.onAbort);
+    }
+    waiter.resolve(notification);
   }
 
   private getCommand(connection: RuntimeConnection, value: unknown): JsonValue {

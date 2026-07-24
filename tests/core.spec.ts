@@ -264,6 +264,39 @@ test.describe('auth', () => {
   });
 });
 
+// ── Dialogs ─────────────────────────────────────────
+
+test.describe('dialogs', () => {
+  test('dialog remains pending until explicitly dismissed', async () => {
+    const daemon = new DaemonClient();
+    const { targetId } = await daemon.send('Target.createTarget', { url: `${BASE}/input/types` });
+    const { sessionId } = await daemon.send('Target.attachToTarget', { targetId, flatten: true });
+    await daemon.send('Page.enable', {}, sessionId);
+    const evaluation = daemon.send('Runtime.evaluate', {
+      expression: 'confirm("Submit this form?")',
+      awaitPromise: true,
+      returnByValue: true,
+    }, sessionId);
+
+    try {
+      let pending;
+      for (let attempt = 0; attempt < 20 && !pending; attempt += 1) {
+        await delay(50);
+        pending = bp('dialogs').dialogs?.find(dialog => dialog.message === 'Submit this form?');
+      }
+      expect(pending).toBeDefined();
+      expect(pending?.sessionId).toBeUndefined();
+      expect(bp(`dialog ${pending.dialogId} --dismiss`).action).toBe('dismiss');
+      await evaluation;
+      expect(bp('dialogs').dialogs).toEqual([]);
+    } finally {
+      await daemon.send('Page.handleJavaScriptDialog', { accept: false }, sessionId).catch(() => {});
+      await daemon.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      await daemon.send('Target.closeTarget', { targetId }).catch(() => {});
+    }
+  });
+});
+
 // ── Tabs ────────────────────────────────────────────
 
 test.describe('tabs', () => {
@@ -319,19 +352,6 @@ test.describe('tabs', () => {
     const result = bp('close');
     expect(result.ok).toBe(true);
     expect(bp('connect').ok).toBe(true);
-  });
-});
-
-// ── Dialogs ─────────────────────────────────────────
-
-test.describe('dialogs', () => {
-  test('alert auto-dismissed (open does not hang)', async () => {
-    // Navigate to a page that triggers alert
-    evaluate('setTimeout(() => alert("test"), 100)');
-    // If alert is auto-dismissed, this eval should complete
-    evaluate('new Promise(r => setTimeout(r, 500))');
-    const result = evaluate('document.title');
-    expect(result.ok).toBe(true);
   });
 });
 

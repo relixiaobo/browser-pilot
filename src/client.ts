@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { SOCKET_PATH, PID_FILE } from './paths.js';
 import type { Transport } from './transport.js';
 import { browserPilotErrorFromJsonRpc } from './protocol/errors.js';
-import type { JsonRpcErrorObject, JsonValue } from './protocol/model.js';
+import type { JsonRpcErrorObject, JsonRpcNotification, JsonValue } from './protocol/model.js';
 
 export function isDaemonRunning(): boolean {
   if (!existsSync(PID_FILE)) return false;
@@ -12,7 +12,7 @@ export function isDaemonRunning(): boolean {
 }
 
 export class DaemonClient implements Transport {
-  private request(path: string, body?: any): Promise<any> {
+  private request(path: string, body?: any, signal?: AbortSignal): Promise<any> {
     return new Promise((resolve, reject) => {
       const req = http.request(
         {
@@ -21,6 +21,7 @@ export class DaemonClient implements Transport {
           method: body !== undefined ? 'POST' : 'GET',
           headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
           timeout: 60_000,
+          signal,
         },
         (res) => {
           let data = '';
@@ -85,14 +86,46 @@ export class DaemonClient implements Transport {
     await this.request('/broker/disconnect', { bridgeSessionId });
   }
 
-  async dialogs(): Promise<any[]> {
-    const res = await this.request('/dialogs');
-    return res.dialogs ?? [];
+  async brokerNextNotification(
+    bridgeSessionId: string,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<JsonRpcNotification | undefined> {
+    const result = await this.request('/broker/events/next', {
+      bridgeSessionId,
+      waitMs,
+    }, signal);
+    return result.notification as JsonRpcNotification | undefined;
   }
 
   async discoveredTargets(): Promise<Array<{ targetId: string; url: string; openerTargetId?: string }>> {
     const res = await this.request('/discovered');
     return res.targets ?? [];
+  }
+
+  async dialogs(): Promise<Array<{
+    dialogId: string;
+    type: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+    message: string;
+    defaultPrompt: string;
+    url: string;
+    openedAt: number;
+  }>> {
+    const result = await this.request('/dialogs');
+    return result.dialogs ?? [];
+  }
+
+  async respondToDialog(
+    dialogId: string,
+    action: 'accept' | 'dismiss',
+    prompt?: string,
+  ): Promise<any> {
+    const result = await this.request('/dialogs/respond', {
+      dialogId,
+      action,
+      ...(prompt !== undefined ? { prompt } : {}),
+    });
+    return result.dialog;
   }
 
   async setAuth(username: string, password: string): Promise<void> {

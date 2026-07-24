@@ -8,6 +8,7 @@ import {
 } from '../protocol/errors.js';
 import type {
   JsonRpcMessage,
+  JsonRpcNotification,
   JsonRpcResponse,
   JsonValue,
 } from '../protocol/model.js';
@@ -17,6 +18,10 @@ import { DEFAULT_PROTOCOL_LIMITS } from '../services/broker-runtime.js';
 export interface StdioBridgeBackend {
   call(bridgeSessionId: string, method: string, params?: JsonValue): Promise<JsonValue>;
   disconnect(bridgeSessionId: string): Promise<void> | void;
+  notifications?(
+    bridgeSessionId: string,
+    signal: AbortSignal,
+  ): AsyncIterable<JsonRpcNotification>;
 }
 
 export interface StdioBridgeOptions {
@@ -37,14 +42,27 @@ function isIncomingCall(message: JsonRpcMessage): message is Extract<JsonRpcMess
   return 'method' in message;
 }
 
+function isOutOfBandControl(message: Extract<JsonRpcMessage, { method: string }>): boolean {
+  if (message.method === 'commands/get' || message.method === 'commands/cancel') return true;
+  if (message.method !== 'tools/call' || !message.params || typeof message.params !== 'object') return false;
+  if (Array.isArray(message.params)) return false;
+  const name = message.params.name;
+  return name === 'browser.dialogs.list' || name === 'browser.dialogs.respond';
+}
+
 function errorResponse(id: string | number | null, error: unknown): JsonRpcResponse {
   const stable = asBrowserPilotError(error);
   return { jsonrpc: '2.0', id, error: stable.toJsonRpcError() };
 }
 
-async function writeLine(output: Writable, value: JsonRpcResponse, maxResultBytes: number): Promise<void> {
+async function writeLine(
+  output: Writable,
+  value: JsonRpcResponse | JsonRpcNotification,
+  maxResultBytes: number,
+): Promise<void> {
   let serialized = JSON.stringify(value);
   if (Buffer.byteLength(serialized, 'utf8') > maxResultBytes) {
+    if (!('id' in value)) return;
     serialized = JSON.stringify(errorResponse(value.id, new BrowserPilotError(
       'result_too_large',
       `Protocol result exceeds ${maxResultBytes} bytes`,
@@ -78,9 +96,11 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
   let outputTail = Promise.resolve();
   let normalTail = Promise.resolve();
   let initialization: Promise<void> | undefined;
+  let notificationController: AbortController | undefined;
+  let notificationTask: Promise<void> | undefined;
   const inFlight = new Set<Promise<void>>();
 
-  const queueWrite = (value: JsonRpcResponse): Promise<void> => {
+  const queueWrite = (value: JsonRpcResponse | JsonRpcNotification): Promise<void> => {
     const write = outputTail.then(() => writeLine(options.output, value, maxResultBytes));
     outputTail = write.catch(() => {});
     return write;
@@ -97,6 +117,26 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
   const track = (task: Promise<void>): void => {
     inFlight.add(task);
     void task.finally(() => inFlight.delete(task));
+  };
+
+  const startNotifications = (): void => {
+    if (notificationTask || !options.backend.notifications) return;
+    notificationController = new AbortController();
+    notificationTask = (async () => {
+      for await (const notification of options.backend.notifications!(
+        bridgeSessionId,
+        notificationController!.signal,
+      )) {
+        if (notificationController!.signal.aborted || stopped) break;
+        await queueWrite(notification);
+      }
+    })().catch(() => {
+      if (notificationController?.signal.aborted) return;
+      stopped = true;
+      reason = 'output_closed';
+      exitCode = 1;
+      options.input.destroy();
+    });
   };
 
   const processLine = async (rawLine: Buffer): Promise<void> => {
@@ -120,6 +160,7 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
         if (requestId !== undefined && reason !== 'protocol_error') {
           await queueWrite({ jsonrpc: '2.0', id: requestId, result });
         }
+        if (message.method === 'initialize' && reason !== 'protocol_error') startNotifications();
       } catch (error) {
         if (requestId !== undefined && reason !== 'protocol_error') {
           try {
@@ -133,11 +174,11 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
       }
     };
 
-    const isCommandControl = message.method === 'commands/get' || message.method === 'commands/cancel';
-    const task = isCommandControl
+    const outOfBand = isOutOfBandControl(message);
+    const task = outOfBand
       ? (initialization ?? Promise.resolve()).then(dispatch)
       : normalTail.then(dispatch);
-    if (!isCommandControl) normalTail = task.catch(() => {});
+    if (!outOfBand) normalTail = task.catch(() => {});
     if (message.method === 'initialize') initialization = task.catch(() => {});
     track(task);
     if (message.method === 'shutdown') {
@@ -184,6 +225,8 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
       if (stopped) break;
     }
     if (!stopped && pending.length > 0) await processLine(pending);
+    notificationController?.abort();
+    await notificationTask;
     if (!framingFailed) await Promise.allSettled([...inFlight]);
     await outputTail;
   } catch {
@@ -192,6 +235,8 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
       exitCode = 1;
     }
   } finally {
+    notificationController?.abort();
+    await notificationTask;
     try { await options.backend.disconnect(bridgeSessionId); } catch { /* disconnect is best-effort */ }
   }
   return { exitCode, reason };

@@ -316,3 +316,79 @@ test('Broker records unknown outcomes after a dispatched browser disconnect', as
   assert.equal(queried.command.status, 'unknown_outcome');
   assert.equal(queried.error.data.code, 'unknown_outcome');
 });
+
+test('Broker replays Workspace events, pushes notifications, and enforces Principal isolation', async () => {
+  const runtime = createRuntime();
+  await initialize(runtime, 'bridge:events', {
+    requestedCapabilities: ['workspace.manage', 'event.read'],
+  });
+  const created = await runtime.call('bridge:events', 'workspaces/create', {});
+  assert.equal(created.eventCursor, 'cursor:0');
+
+  runtime.publishBrowserEvent({
+    workspaceId: created.workspace.id,
+    type: 'navigation',
+    sensitivity: 'browser_data',
+    payload: { url: 'https://example.test' },
+  });
+  const notification = await runtime.nextNotification('bridge:events', { waitMs: 0 });
+  assert.equal(notification.method, 'events/event');
+  assert.equal(notification.params.event.sequence, 1);
+
+  const replayed = await runtime.call('bridge:events', 'events/poll', {
+    workspaceId: created.workspace.id,
+    cursor: created.eventCursor,
+  });
+  assert.equal(replayed.events.length, 1);
+  assert.equal(replayed.events[0].payload.url, 'https://example.test');
+  assert.equal(replayed.nextCursor, 'cursor:1');
+
+  await initialize(runtime, 'bridge:other-events', {
+    client: { id: 'org.other.agent', instanceId: 'instance:other-events' },
+    requestedCapabilities: ['workspace.manage', 'event.read'],
+  });
+  await assert.rejects(
+    () => runtime.call('bridge:other-events', 'events/poll', {
+      workspaceId: created.workspace.id,
+      cursor: 'cursor:0',
+    }),
+    error => error.code === 'workspace_not_found',
+  );
+
+  runtime.disconnect('bridge:events');
+  await initialize(runtime, 'bridge:events-reconnected', {
+    requestedCapabilities: ['workspace.manage', 'event.read'],
+  });
+  const resumed = await runtime.call('bridge:events-reconnected', 'workspaces/get', {
+    workspaceId: created.workspace.id,
+  });
+  assert.equal(resumed.eventCursor, 'cursor:1');
+  const recovered = await runtime.call('bridge:events-reconnected', 'events/poll', {
+    workspaceId: created.workspace.id,
+    cursor: 'cursor:0',
+  });
+  assert.equal(recovered.events[0].id, replayed.events[0].id);
+});
+
+test('Broker returns cursor_expired after bounded Workspace event compaction', async () => {
+  const runtime = createRuntime({ limits: { eventJournalSize: 2 } });
+  await initialize(runtime, 'bridge:compact', {
+    requestedCapabilities: ['workspace.manage', 'event.read'],
+  });
+  const created = await runtime.call('bridge:compact', 'workspaces/create', {});
+  for (let value = 1; value <= 3; value += 1) {
+    runtime.publishBrowserEvent({
+      workspaceId: created.workspace.id,
+      type: 'document.changed',
+      sensitivity: 'browser_data',
+      payload: { value },
+    });
+  }
+  await assert.rejects(
+    () => runtime.call('bridge:compact', 'events/poll', {
+      workspaceId: created.workspace.id,
+      cursor: created.eventCursor,
+    }),
+    error => error.code === 'cursor_expired' && error.context.earliestCursor === 'cursor:1',
+  );
+});

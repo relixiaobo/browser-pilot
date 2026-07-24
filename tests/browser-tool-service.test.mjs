@@ -16,6 +16,7 @@ function png(width, height) {
 
 class BrowserFixtureTransport {
   calls = [];
+  handlers = new Map();
   targets = new Map([
     ['user-form', {
       targetId: 'user-form',
@@ -58,6 +59,9 @@ class BrowserFixtureTransport {
         this.loaders.delete(params.targetId);
         return { success: true };
       case 'Page.enable': return {};
+      case 'Page.handleJavaScriptDialog':
+        this.emit('Page.javascriptDialogClosed', { result: params.accept }, sessionId);
+        return {};
       case 'Page.navigate':
         target.url = params.url;
         target.title = params.url.includes('managed') ? 'Managed Page' : 'Navigated';
@@ -152,6 +156,16 @@ class BrowserFixtureTransport {
     }
   }
 
+  on(method, handler) {
+    const handlers = this.handlers.get(method) ?? [];
+    handlers.push(handler);
+    this.handlers.set(method, handlers);
+  }
+
+  emit(method, params, sessionId) {
+    for (const handler of this.handlers.get(method) ?? []) handler(params, sessionId);
+  }
+
   close() {}
 }
 
@@ -189,6 +203,7 @@ function initialize(runtime, bridge, clientId, instanceId) {
       'action.input',
       'cookies.read',
       'artifact.read',
+      'event.read',
       'developer.eval',
     ],
     launchMode: 'embedded',
@@ -197,9 +212,9 @@ function initialize(runtime, bridge, clientId, instanceId) {
 
 async function createClient(runtime, bridge, clientId, instanceId) {
   await initialize(runtime, bridge, clientId, instanceId);
-  const { workspace, managedTabSet } = await runtime.call(bridge, 'workspaces/create', {});
+  const { workspace, managedTabSet, eventCursor } = await runtime.call(bridge, 'workspaces/create', {});
   const { lease } = await runtime.call(bridge, 'leases/create', { workspaceId: workspace.id });
-  return { bridge, workspace, managedTabSet, lease };
+  return { bridge, workspace, managedTabSet, lease, eventCursor };
 }
 
 async function tool(runtime, client, name, args, targetId) {
@@ -263,6 +278,60 @@ test('tools/call lists user tabs, creates a managed target, and preserves user t
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(transport.targets.has('user-form'), true);
   assert.equal([...transport.targets.keys()].some(id => id.startsWith('managed-')), false);
+});
+
+test('dialogs remain pending, emit ordered events, and require an explicit response', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:dialog', 'com.example.agent', 'instance:dialog');
+  const listed = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
+  const targetId = listed.targets[0].targetId;
+  await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const sessionId = [...transport.sessions.entries()]
+    .find(([, cdpTargetId]) => cdpTargetId === 'user-form')[0];
+
+  transport.emit('Page.javascriptDialogOpening', {
+    type: 'confirm',
+    message: 'Submit this form?',
+    url: 'https://example.test/form',
+  }, sessionId);
+  assert.equal(
+    transport.calls.some(call => call.method === 'Page.handleJavaScriptDialog'),
+    false,
+  );
+
+  const pending = await tool(runtime, client, 'browser.dialogs.list', {});
+  assert.equal(pending.dialogs.length, 1);
+  assert.equal(pending.dialogs[0].message, 'Submit this form?');
+  const dialogId = pending.dialogs[0].dialogId;
+  const response = await tool(runtime, client, 'browser.dialogs.respond', {
+    dialogId,
+    action: 'dismiss',
+  }, targetId);
+  assert.equal(response.action, 'dismiss');
+  assert.deepEqual(
+    transport.calls.find(call => call.method === 'Page.handleJavaScriptDialog'),
+    {
+      method: 'Page.handleJavaScriptDialog',
+      params: { accept: false },
+      sessionId,
+    },
+  );
+  assert.deepEqual((await tool(runtime, client, 'browser.dialogs.list', {})).dialogs, []);
+
+  const events = await runtime.call(client.bridge, 'events/poll', {
+    workspaceId: client.workspace.id,
+    cursor: client.eventCursor,
+  });
+  const dialogEvents = events.events.filter(event => event.type === 'dialog');
+  assert.deepEqual(dialogEvents.map(event => event.payload.state), ['opened', 'closed']);
+  assert.equal(dialogEvents[0].payload.dialogId, dialogId);
+  assert.equal(dialogEvents[1].payload.action, 'dismiss');
 });
 
 test('Observation refs are Lease-scoped, stale after navigation, and actions return a new Observation', async () => {
@@ -420,7 +489,6 @@ test('screenshot and PDF tools return protected Artifacts that can be read, expo
   });
   await assert.rejects(() => stat(accessed.path), error => error.code === 'ENOENT');
   await runtime.call(client.bridge, 'workspaces/release', { workspaceId: client.workspace.id });
-  await new Promise(resolve => setImmediate(resolve));
   await assert.rejects(() => stat(pdfAccess.path), error => error.code === 'ENOENT');
 });
 

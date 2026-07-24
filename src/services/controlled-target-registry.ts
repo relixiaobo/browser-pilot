@@ -146,7 +146,11 @@ export class MemoryControlledTargetRegistry {
     context: WorkspaceCallerContext,
     browserInstanceId: BrowserInstanceId,
     userTargets: readonly UserBrowserTarget[],
-  ): { targets: ControlledTargetRecord[]; invalidated: ControlledTargetInvalidation[] } {
+  ): {
+    targets: ControlledTargetRecord[];
+    created: ControlledTargetRecord[];
+    invalidated: ControlledTargetInvalidation[];
+  } {
     const targetsByKey = new Map<string, UserBrowserTarget>();
     for (const target of userTargets) {
       if (target.browserInstanceId !== browserInstanceId) continue;
@@ -172,6 +176,7 @@ export class MemoryControlledTargetRegistry {
     }
 
     const targets: ControlledTargetRecord[] = [];
+    const created: ControlledTargetRecord[] = [];
     for (const target of targetsByKey.values()) {
       const key = targetKey(context.workspaceId, target.browserInstanceId, target.cdpTargetId);
       const existingId = this.activeKeys.get(key);
@@ -200,8 +205,9 @@ export class MemoryControlledTargetRegistry {
       this.records.set(record.id, record);
       this.activeKeys.set(key, record.id);
       targets.push(cloneRecord(record));
+      created.push(cloneRecord(record));
     }
-    return { targets, invalidated };
+    return { targets, created, invalidated };
   }
 
   reconcileBrowserTargets(
@@ -306,9 +312,9 @@ export class MemoryControlledTargetRegistry {
     return { target: cloneRecord(record), newlyAcquired };
   }
 
-  release(context: WorkspaceCallerContext, leaseId: ControlLeaseId, targetId: ControlledTargetId): void {
+  release(context: WorkspaceCallerContext, leaseId: ControlLeaseId, targetId: ControlledTargetId): boolean {
     const record = this.records.get(targetId);
-    if (!record || record.state !== 'active') return;
+    if (!record || record.state !== 'active') return false;
     this.assertCallerOwns(context, record);
     const physicalKey = physicalTargetKey(record.browserInstanceId, record.cdpTargetId);
     const controller = this.controllers.get(physicalKey);
@@ -320,8 +326,17 @@ export class MemoryControlledTargetRegistry {
     ) {
       this.controllers.delete(physicalKey);
       record.controllerLeaseId = undefined;
+      if (this.activeByLease.get(leaseId) === targetId) this.activeByLease.delete(leaseId);
+      return true;
     }
     if (this.activeByLease.get(leaseId) === targetId) this.activeByLease.delete(leaseId);
+    return false;
+  }
+
+  controlledByLease(leaseId: ControlLeaseId): ControlledTargetRecord[] {
+    return [...this.records.values()]
+      .filter(record => record.state === 'active' && record.controllerLeaseId === leaseId)
+      .map(cloneRecord);
   }
 
   releaseLease(leaseId: ControlLeaseId): void {

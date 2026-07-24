@@ -20,7 +20,10 @@ import { ActionService, type InputVerificationEvidence } from './action-service.
 import { ArtifactStore } from './artifact-store.js';
 import { CdpBrowserTargetCatalog } from './browser-target-catalog.js';
 import { createBrowserControlPolicy } from './browser-control-policy.js';
-import { MemoryControlledTargetRegistry } from './controlled-target-registry.js';
+import {
+  MemoryControlledTargetRegistry,
+  type ControlledTargetRecord,
+} from './controlled-target-registry.js';
 import { CookieService } from './cookie-service.js';
 import { CaptureService } from './capture-service.js';
 import { MemoryObservationStore, type StoredObservation } from './observation-store.js';
@@ -32,6 +35,7 @@ import type {
   BrokerToolCallContext,
   BrowserToolExecutor,
 } from './broker-runtime.js';
+import type { PublishBrowserEventInput } from './event-journal.js';
 
 const BASE_SUPPORTED_TOOLS = [
   'browser.discover',
@@ -46,6 +50,8 @@ const BASE_SUPPORTED_TOOLS = [
   'browser.tabs.list',
   'browser.tabs.switch',
   'browser.tabs.close',
+  'browser.dialogs.list',
+  'browser.dialogs.respond',
   'browser.cookies.list',
   'browser.eval',
 ] as const;
@@ -65,6 +71,28 @@ interface CreatedObservation {
   snapshot: SnapshotResult;
   record: StoredObservation;
 }
+
+type DialogType = 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+
+interface PendingDialog {
+  id: string;
+  workspaceId: BrowserWorkspaceId;
+  leaseId: ControlLeaseId;
+  targetId: ControlledTargetId;
+  sessionId: string;
+  type: DialogType;
+  message: string;
+  defaultPrompt: string;
+  url: string;
+  openedAt: number;
+}
+
+interface PendingDialogResponse extends Record<string, JsonValue> {
+  action: 'accept' | 'dismiss';
+  promptTextProvided: boolean;
+}
+
+const DIALOG_TYPES = new Set<DialogType>(['alert', 'confirm', 'prompt', 'beforeunload']);
 
 function asRecord(value: JsonValue): Record<string, JsonValue> {
   return value as Record<string, JsonValue>;
@@ -92,7 +120,11 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly inventory: TargetInventoryService;
   private readonly sessions = new Map<string, TargetSession>();
   private readonly managedWindowIds = new Map<ManagedTabSetId, number>();
+  private readonly pendingDialogs = new Map<string, PendingDialog>();
+  private readonly pendingDialogBySession = new Map<string, string>();
+  private readonly dialogResponseBySession = new Map<string, PendingDialogResponse>();
   private readonly artifactStore?: ArtifactStore;
+  private eventPublisher?: (event: PublishBrowserEventInput) => void;
 
   constructor(
     private readonly transport: Transport,
@@ -128,12 +160,52 @@ export class BrowserToolService implements BrowserToolExecutor {
       policy,
       this.registry,
       {
-        onInvalidated: invalidation => this.observations.invalidateTarget(
-          invalidation.targetId,
-          invalidation.reason,
-        ),
+        onInvalidated: invalidation => {
+          this.observations.invalidateTarget(invalidation.targetId, invalidation.reason);
+          this.publishEvent({
+            workspaceId: invalidation.workspaceId,
+            targetId: invalidation.targetId,
+            type: 'observation.invalidated',
+            sensitivity: 'browser_data',
+            payload: { reason: invalidation.reason },
+          });
+          this.publishEvent({
+            workspaceId: invalidation.workspaceId,
+            targetId: invalidation.targetId,
+            type: 'target.detached',
+            sensitivity: 'browser_data',
+            payload: { reason: invalidation.reason },
+          });
+        },
+        onTargetAttached: target => this.publishTargetEvent('target.attached', target),
+        onPopup: target => this.publishTargetEvent('popup', target),
+        onControlAcquired: (target, leaseId) => this.publishEvent({
+          workspaceId: target.workspaceId,
+          leaseId,
+          targetId: target.id,
+          type: 'target_control.acquired',
+          sensitivity: 'browser_data',
+          payload: { origin: target.origin, url: target.url },
+        }),
+        onControlReleased: (target, leaseId) => this.publishEvent({
+          workspaceId: target.workspaceId,
+          leaseId,
+          targetId: target.id,
+          type: 'target_control.released',
+          sensitivity: 'browser_data',
+          payload: { origin: target.origin, url: target.url },
+        }),
       },
     );
+    this.installDialogHandlers();
+  }
+
+  setEventPublisher(publisher: (event: PublishBrowserEventInput) => void): void {
+    this.eventPublisher = publisher;
+  }
+
+  ownsSession(sessionId: string): boolean {
+    return [...this.sessions.values()].some(session => session.sessionId === sessionId);
   }
 
   async call(
@@ -158,6 +230,8 @@ export class BrowserToolService implements BrowserToolExecutor {
       case 'browser.capture': return this.capture(context, args);
       case 'browser.pdf': return this.pdf(context, args);
       case 'browser.cookies.list': return this.cookies(context, args);
+      case 'browser.dialogs.list': return this.listDialogs(context);
+      case 'browser.dialogs.respond': return this.respondToDialog(context, args);
       case 'browser.eval': return this.evaluate(context, args);
       default: throw invalidArgument(`Unsupported browser tool: ${definition.name}`, 'name');
     }
@@ -169,6 +243,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     argsValue: JsonValue,
   ): string {
     const browserId = context.browser.instance.id;
+    if (definition.name.startsWith('browser.dialogs.')) {
+      return `${browserId}\u0000dialogs\u0000${context.workspace?.id ?? context.connection.id}`;
+    }
     const targetId = this.commandTargetId(context, definition, argsValue);
     if (targetId) return `${browserId}\u0000target\u0000${targetId}`;
     if (context.workspace) return `${browserId}\u0000workspace\u0000${context.workspace.id}`;
@@ -201,6 +278,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       this.sessions.delete(key);
       void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId }).catch(() => {});
     }
+    this.deleteDialogs(dialog => dialog.leaseId === lease.id);
   }
 
   releaseWorkspace(
@@ -222,6 +300,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       if (target.origin === 'user_tab') continue;
       void this.transport.send('Target.closeTarget', { targetId: target.cdpTargetId }).catch(() => {});
     }
+    this.deleteDialogs(dialog => dialog.workspaceId === workspace.id);
   }
 
   private discover(): JsonValue {
@@ -311,12 +390,31 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.registry.setActive(inventoryContext, inventoryContext.leaseId, targetId);
     const session = await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
     this.observations.invalidateTarget(targetId, 'navigation');
+    this.publishEvent({
+      workspaceId: inventoryContext.workspaceId,
+      leaseId: inventoryContext.leaseId,
+      targetId,
+      type: 'observation.invalidated',
+      sensitivity: 'browser_data',
+      payload: { reason: 'navigation' },
+    });
     const navigation = await this.transport.send('Page.navigate', { url }, session.sessionId);
     if (navigation?.errorText) {
       throw new BrowserPilotError('invalid_argument', `Navigation failed: ${navigation.errorText}`, {
         context: { targetId, url },
       });
     }
+    this.publishEvent({
+      workspaceId: inventoryContext.workspaceId,
+      leaseId: inventoryContext.leaseId,
+      targetId,
+      type: 'navigation',
+      sensitivity: 'browser_data',
+      payload: {
+        url,
+        ...(typeof navigation?.loaderId === 'string' ? { loaderId: navigation.loaderId } : {}),
+      },
+    });
     await waitForLoad(this.transport, session.sessionId);
     return this.observationResult(
       context,
@@ -531,6 +629,71 @@ export class BrowserToolService implements BrowserToolExecutor {
     return asJson({ ...this.targetResult(context, targetId, record.url), value, truncated });
   }
 
+  private listDialogs(context: BrokerToolCallContext): JsonValue {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    const dialogs = [...this.pendingDialogs.values()]
+      .filter(dialog => dialog.workspaceId === workspace.id && dialog.leaseId === lease.id)
+      .sort((left, right) => left.openedAt - right.openedAt)
+      .map(dialog => ({
+        dialogId: dialog.id,
+        targetId: dialog.targetId,
+        type: dialog.type,
+        message: dialog.message,
+      }));
+    return asJson({ workspaceId: workspace.id, leaseId: lease.id, dialogs });
+  }
+
+  private async respondToDialog(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    const targetId = this.requireTargetId(context);
+    const dialogId = args.dialogId as string;
+    const dialog = this.pendingDialogs.get(dialogId);
+    if (
+      !dialog ||
+      dialog.workspaceId !== workspace.id ||
+      dialog.leaseId !== lease.id ||
+      dialog.targetId !== targetId
+    ) {
+      throw new BrowserPilotError('target_not_owned', 'Dialog is not pending for this Lease and target', {
+        context: { workspaceId: workspace.id, leaseId: lease.id, targetId, dialogId },
+      });
+    }
+    const promptText = args.promptText as string | undefined;
+    if (promptText !== undefined && dialog.type !== 'prompt') {
+      throw invalidArgument('promptText is valid only for prompt dialogs', 'promptText');
+    }
+    const accept = args.action === 'accept';
+    const response: PendingDialogResponse = {
+      action: accept ? 'accept' : 'dismiss',
+      promptTextProvided: promptText !== undefined,
+    };
+    this.markDispatched(context);
+    this.dialogResponseBySession.set(dialog.sessionId, response);
+    try {
+      await this.transport.send('Page.handleJavaScriptDialog', {
+        accept,
+        ...(promptText !== undefined ? { promptText } : {}),
+      }, dialog.sessionId);
+      if (this.pendingDialogs.get(dialog.id) === dialog) {
+        this.removeDialog(dialog);
+        this.publishDialogEvent(dialog, 'closed', response);
+      }
+    } finally {
+      if (this.dialogResponseBySession.get(dialog.sessionId) === response) {
+        this.dialogResponseBySession.delete(dialog.sessionId);
+      }
+    }
+    const target = this.registry.get(this.inventoryContext(context), targetId);
+    return asJson({
+      ...this.targetResult(context, targetId, target.url),
+      dialogId,
+      action: accept ? 'accept' : 'dismiss',
+    });
+  }
+
   private async createManagedTarget(
     context: BrokerToolCallContext,
     inventoryContext: TargetInventoryContext,
@@ -556,6 +719,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         title: '',
         url: 'about:blank',
       });
+      this.publishTargetEvent('target.attached', registered);
       await this.inventory.activate(inventoryContext, registered.id);
       return registered.id;
     } catch (error) {
@@ -589,6 +753,14 @@ export class BrowserToolService implements BrowserToolExecutor {
       } catch {
         this.sessions.delete(key);
         this.observations.invalidateSession(existing.sessionId);
+        this.publishEvent({
+          workspaceId: existing.workspaceId,
+          leaseId: existing.leaseId,
+          targetId: existing.targetId,
+          type: 'observation.invalidated',
+          sensitivity: 'browser_data',
+          payload: { reason: 'session_replaced' },
+        });
       }
     }
     const attached = await this.transport.send('Target.attachToTarget', {
@@ -598,8 +770,6 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (typeof attached?.sessionId !== 'string') {
       throw new BrowserPilotError('internal_error', 'Chrome returned an invalid CDP session');
     }
-    await this.transport.send('Page.enable', {}, attached.sessionId).catch(() => {});
-    await this.transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, attached.sessionId).catch(() => {});
     const session: TargetSession = {
       workspaceId: context.workspaceId,
       leaseId: context.leaseId,
@@ -608,6 +778,8 @@ export class BrowserToolService implements BrowserToolExecutor {
       sessionId: attached.sessionId,
     };
     this.sessions.set(key, session);
+    await this.transport.send('Page.enable', {}, attached.sessionId).catch(() => {});
+    await this.transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, attached.sessionId).catch(() => {});
     return session;
   }
 
@@ -667,6 +839,14 @@ export class BrowserToolService implements BrowserToolExecutor {
       }
     } catch (cause) {
       this.observations.invalidateTarget(targetId, 'loader_replaced');
+      this.publishEvent({
+        workspaceId: context.workspace!.id,
+        leaseId: context.lease!.id,
+        targetId,
+        type: 'observation.invalidated',
+        sensitivity: 'browser_data',
+        payload: { reason: 'loader_replaced', observationId },
+      });
       throw new BrowserPilotError('stale_ref', 'Observation node is no longer resolvable', {
         context: { workspaceId: context.workspace!.id, targetId, observationId, ref },
         cause,
@@ -702,6 +882,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       observationService,
     }));
     if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
+    this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next);
   }
 
@@ -734,6 +915,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     }));
     evidence = result.evidence;
     if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
+    this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, evidence);
   }
 
@@ -839,10 +1021,141 @@ export class BrowserToolService implements BrowserToolExecutor {
 
   private cleanupTarget(targetId: ControlledTargetId, reason: 'target_closed'): void {
     this.observations.invalidateTarget(targetId, reason);
+    const session = [...this.sessions.values()].find(candidate => candidate.targetId === targetId);
+    if (session) {
+      this.publishEvent({
+        workspaceId: session.workspaceId,
+        leaseId: session.leaseId,
+        targetId,
+        type: 'observation.invalidated',
+        sensitivity: 'browser_data',
+        payload: { reason },
+      });
+    }
     for (const [key, session] of this.sessions) {
       if (session.targetId !== targetId) continue;
       this.sessions.delete(key);
       void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId }).catch(() => {});
+    }
+    this.deleteDialogs(dialog => dialog.targetId === targetId);
+  }
+
+  private installDialogHandlers(): void {
+    this.transport.on?.('Page.javascriptDialogOpening', (params: any, sessionId?: string) => {
+      if (!sessionId) return;
+      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+      const type = params?.type as DialogType | undefined;
+      if (!session || !type || !DIALOG_TYPES.has(type)) return;
+      const existingId = this.pendingDialogBySession.get(sessionId);
+      if (existingId) {
+        const existing = this.pendingDialogs.get(existingId);
+        if (existing) this.removeDialog(existing);
+      }
+      const dialog: PendingDialog = {
+        id: `dialog:${randomUUID()}`,
+        workspaceId: session.workspaceId,
+        leaseId: session.leaseId,
+        targetId: session.targetId,
+        sessionId,
+        type,
+        message: typeof params.message === 'string' ? params.message : '',
+        defaultPrompt: typeof params.defaultPrompt === 'string' ? params.defaultPrompt : '',
+        url: typeof params.url === 'string' ? params.url : '',
+        openedAt: Date.now(),
+      };
+      this.pendingDialogs.set(dialog.id, dialog);
+      this.pendingDialogBySession.set(sessionId, dialog.id);
+      this.publishDialogEvent(dialog, 'opened');
+    });
+    this.transport.on?.('Page.javascriptDialogClosed', (params: any, sessionId?: string) => {
+      if (!sessionId) return;
+      const dialogId = this.pendingDialogBySession.get(sessionId);
+      const dialog = dialogId ? this.pendingDialogs.get(dialogId) : undefined;
+      if (!dialog) return;
+      const response = this.dialogResponseBySession.get(sessionId);
+      this.removeDialog(dialog);
+      this.publishDialogEvent(dialog, 'closed', response ?? {
+        action: params?.result === true ? 'accept' : 'dismiss',
+        externallyHandled: true,
+      });
+    });
+  }
+
+  private publishTargetEvent(
+    type: 'target.attached' | 'popup',
+    target: ControlledTargetRecord,
+  ): void {
+    this.publishEvent({
+      workspaceId: target.workspaceId,
+      ...(target.controllerLeaseId ? { leaseId: target.controllerLeaseId } : {}),
+      targetId: target.id,
+      type,
+      sensitivity: 'browser_data',
+      payload: {
+        origin: target.origin,
+        url: target.url,
+        title: target.title,
+        ...(target.managedTabSetId ? { managedTabSetId: target.managedTabSetId } : {}),
+      },
+    });
+  }
+
+  private publishDialogEvent(
+    dialog: PendingDialog,
+    state: 'opened' | 'closed',
+    extra: Record<string, JsonValue> = {},
+  ): void {
+    this.publishEvent({
+      workspaceId: dialog.workspaceId,
+      leaseId: dialog.leaseId,
+      targetId: dialog.targetId,
+      type: 'dialog',
+      sensitivity: 'browser_data',
+      payload: {
+        dialogId: dialog.id,
+        state,
+        type: dialog.type,
+        message: dialog.message,
+        url: dialog.url,
+        ...(dialog.type === 'prompt' ? { defaultPrompt: dialog.defaultPrompt } : {}),
+        ...extra,
+      },
+    });
+  }
+
+  private publishEvent(event: PublishBrowserEventInput): void {
+    try { this.eventPublisher?.(event); } catch { /* browser event handlers must stay non-throwing */ }
+  }
+
+  private publishDocumentChanged(
+    context: BrokerToolCallContext,
+    targetId: ControlledTargetId,
+    observation: CreatedObservation,
+  ): void {
+    this.publishEvent({
+      workspaceId: context.workspace!.id,
+      leaseId: context.lease!.id,
+      targetId,
+      type: 'document.changed',
+      sensitivity: 'browser_data',
+      payload: {
+        source: 'action',
+        observationId: observation.record.id,
+        url: observation.snapshot.data.url,
+      },
+    });
+  }
+
+  private removeDialog(dialog: PendingDialog): void {
+    this.pendingDialogs.delete(dialog.id);
+    if (this.pendingDialogBySession.get(dialog.sessionId) === dialog.id) {
+      this.pendingDialogBySession.delete(dialog.sessionId);
+    }
+  }
+
+  private deleteDialogs(predicate: (dialog: PendingDialog) => boolean): void {
+    for (const dialog of [...this.pendingDialogs.values()]) {
+      if (predicate(dialog)) this.removeDialog(dialog);
     }
   }
 }

@@ -15,6 +15,7 @@ export type ObservationId = OpaqueId<'ObservationId'>;
 export type CommandId = OpaqueId<'CommandId'>;
 export type ArtifactId = OpaqueId<'ArtifactId'>;
 export type BrowserEventId = OpaqueId<'BrowserEventId'>;
+export type EventCursor = OpaqueId<'EventCursor'>;
 
 export interface ProtocolVersion {
   major: number;
@@ -125,6 +126,7 @@ export interface WorkspaceReleaseParams {
 export interface WorkspaceResult {
   workspace: BrowserWorkspace;
   managedTabSet: ManagedTabSet;
+  eventCursor: EventCursor;
 }
 
 export interface WorkspaceReleaseResult {
@@ -169,6 +171,12 @@ export interface ToolCallParams {
 export interface CommandAccessParams {
   commandId: CommandId;
   workspaceId?: BrowserWorkspaceId;
+}
+
+export interface EventsPollParams {
+  workspaceId: BrowserWorkspaceId;
+  cursor: EventCursor;
+  limit?: number;
 }
 
 export interface ArtifactAccessParams {
@@ -410,4 +418,11 @@ export interface BrowserEvent {
   payloadVersion: number;
   sensitivity: Sensitivity;
   payload: JsonValue;
+}
+
+export interface EventsPollResult {
+  workspaceId: BrowserWorkspaceId;
+  events: BrowserEvent[];
+  nextCursor: EventCursor;
+  hasMore: boolean;
 }

@@ -51,6 +51,8 @@ export interface MemoryCommandRuntimeOptions {
   idFactory?: () => string;
 }
 
+export type CommandStatusListener = (outcome: CommandOutcome) => void;
+
 interface StoredCommand extends CommandDescriptor {
   principalId: ClientPrincipalId;
   connectionId: ClientConnectionId;
@@ -110,6 +112,7 @@ export class MemoryCommandRuntime {
   private readonly records = new Map<CommandId, StoredCommand>();
   private readonly commandsByIdempotency = new Map<string, CommandId>();
   private readonly actorTails = new Map<string, Promise<void>>();
+  private readonly statusListeners = new Set<CommandStatusListener>();
   private readonly defaultDeadlineMs: number;
   private readonly maxDeadlineMs: number;
   private readonly terminalTtlMs: number;
@@ -204,8 +207,14 @@ export class MemoryCommandRuntime {
     this.commandsByIdempotency.set(idempotencyIndex, id);
     record.deadlineTimer = setTimeout(() => this.expire(record), deadlineMs);
     record.deadlineTimer.unref();
+    this.emitStatus(record);
     this.enqueue(input.actorKey, () => this.execute(record, execute));
     return completion;
+  }
+
+  subscribe(listener: CommandStatusListener): () => void {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
   }
 
   get(context: CommandAccessContext): CommandOutcome {
@@ -230,6 +239,7 @@ export class MemoryCommandRuntime {
       return this.outcome(record);
     }
     record.cancellationRequested = true;
+    this.emitStatus(record);
     if (record.cancellation === 'best_effort') record.abortController.abort();
     return this.outcome(record);
   }
@@ -298,6 +308,7 @@ export class MemoryCommandRuntime {
         if (record.status !== 'accepted') return;
         record.status = 'dispatched';
         record.dispatchedAt = this.now();
+        this.emitStatus(record);
       };
       const result = await execute({ signal: record.abortController.signal, markDispatched });
       if (TERMINAL_STATUSES.has(record.status)) return;
@@ -306,6 +317,7 @@ export class MemoryCommandRuntime {
       record.completedAt = this.now();
       record.result = cloneJson(result);
       this.clearDeadline(record);
+      this.emitStatus(record);
       this.resolve(record);
     } catch (error) {
       if (TERMINAL_STATUSES.has(record.status)) return;
@@ -361,6 +373,7 @@ export class MemoryCommandRuntime {
     record.completedAt = this.now();
     record.error = stable.toJsonRpcError();
     this.clearDeadline(record);
+    this.emitStatus(record);
     if (!record.settled) {
       record.settled = true;
       record.reject(stable);
@@ -385,6 +398,7 @@ export class MemoryCommandRuntime {
       return;
     }
     record.cancellationRequested = true;
+    this.emitStatus(record);
     record.abortController.abort();
   }
 
@@ -482,5 +496,12 @@ export class MemoryCommandRuntime {
     if (!record.deadlineTimer) return;
     clearTimeout(record.deadlineTimer);
     record.deadlineTimer = undefined;
+  }
+
+  private emitStatus(record: StoredCommand): void {
+    const outcome = this.outcome(record);
+    for (const listener of this.statusListeners) {
+      try { listener(outcome); } catch { /* observers cannot affect Command execution */ }
+    }
   }
 }
