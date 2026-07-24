@@ -93,13 +93,18 @@ test('ActionService dispatches a coordinate click and observes the result', asyn
     },
   });
 
-  assert.deepEqual(
-    await service.click(
-      { kind: 'coordinates', x: 10, y: 20 },
-      { button: 'left', clickCount: 2, observationLimit: 25 },
-    ),
-    snapshot,
+  const result = await service.click(
+    { kind: 'coordinates', x: 10, y: 20 },
+    { button: 'left', clickCount: 2, observationLimit: 25 },
   );
+  assert.deepEqual(result.observation, snapshot);
+  assert.deepEqual(result.evidence, {
+    action: 'click',
+    status: 'unavailable',
+    kind: 'coordinates',
+    effects: [],
+    reason: 'coordinate_target',
+  });
   assert.equal(observations, 1);
   assert.deepEqual(transport.calls.map(call => call.params.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
   assert.equal(transport.calls[1].params.clickCount, 2);
@@ -110,16 +115,23 @@ test('ActionService resolves a ref, clicks its current coordinates, and releases
   refs.save('target-4', [{ backendNodeId: 99, role: 'link', name: 'Details' }]);
   const transport = new FakeTransport(method => {
     if (method === 'DOM.resolveNode') return { object: { objectId: 'object-1' } };
-    if (method === 'Runtime.callFunctionOn') return { result: { value: { status: 'ready', x: 44, y: 55 } } };
+    if (method === 'Runtime.callFunctionOn') return { result: { value: {
+      status: 'ready',
+      x: 44,
+      y: 55,
+      targetState: { connected: true, kind: 'control', focused: false },
+    } } };
     return {};
   });
   const service = new ActionService(transport, 'session-4', 'target-4', {
     refStore: refs,
+    readbackDelayMs: 0,
     observationService: { async observeAfterAction() { return snapshot; } },
   });
 
-  await service.click({ kind: 'ref', ref: '1' });
+  const result = await service.click({ kind: 'ref', ref: '1' });
 
+  assert.equal(result.evidence.status, 'unavailable');
   assert.equal(transport.calls[0].method, 'DOM.resolveNode');
   assert.equal(transport.calls[0].params.backendNodeId, 99);
   assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
@@ -189,20 +201,45 @@ test('ActionService reports a detached pointer target as a stale ref', async () 
 test('ActionService dispatches a page-validated descendant or label hit point', async () => {
   const refs = new MemoryRefStore();
   refs.save('target-label', [{ backendNodeId: 103, role: 'checkbox', name: 'Remember me' }]);
-  const transport = new FakeTransport(method => {
+  let verificationReads = 0;
+  const transport = new FakeTransport((method, params) => {
     if (method === 'DOM.resolveNode') return { object: { objectId: 'object-label' } };
     if (method === 'Runtime.callFunctionOn') {
-      return { result: { value: { status: 'ready', x: 12.5, y: 18.75 } } };
+      if (String(params.functionDeclaration).includes('elementsFromPoint')) {
+        return { result: { value: {
+          status: 'ready',
+          x: 12.5,
+          y: 18.75,
+          targetState: { connected: true, kind: 'checkbox', focused: false, checked: false },
+        } } };
+      }
+      verificationReads += 1;
+      return { result: { value: {
+        connected: true,
+        kind: 'checkbox',
+        focused: true,
+        checked: true,
+      } } };
     }
     return {};
   });
   const service = new ActionService(transport, 'session-label', 'target-label', {
     refStore: refs,
+    readbackDelayMs: 0,
     observationService: { async observeAfterAction() { return snapshot; } },
   });
 
-  await service.click({ kind: 'ref', ref: '1' });
+  const result = await service.click({ kind: 'ref', ref: '1' });
 
+  assert.equal(verificationReads, 1);
+  assert.deepEqual(result.evidence, {
+    action: 'click',
+    status: 'verified',
+    kind: 'checkbox',
+    effects: ['checked_changed', 'focus_changed'],
+    checked: true,
+    focused: true,
+  });
   assert.deepEqual(
     transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').map(call => [call.params.x, call.params.y]),
     [[12.5, 18.75], [12.5, 18.75], [12.5, 18.75]],
@@ -210,6 +247,37 @@ test('ActionService dispatches a page-validated descendant or label hit point', 
   const validationCall = transport.calls.find(call => call.method === 'Runtime.callFunctionOn');
   assert.match(validationCall.params.functionDeclaration, /elementsFromPoint/);
   assert.match(validationCall.params.functionDeclaration, /labels/);
+});
+
+test('ActionService reports a checkbox that did not toggle as a mismatch', async () => {
+  const refs = new MemoryRefStore();
+  refs.save('target-checkbox', [{ backendNodeId: 105, role: 'checkbox', name: 'Accept' }]);
+  const state = { connected: true, kind: 'checkbox', focused: false, checked: false };
+  const transport = new FakeTransport((method, params) => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'object-checkbox' } };
+    if (method === 'Runtime.callFunctionOn' && String(params.functionDeclaration).includes('elementsFromPoint')) {
+      return { result: { value: { status: 'ready', x: 30, y: 40, targetState: state } } };
+    }
+    if (method === 'Runtime.callFunctionOn') return { result: { value: state } };
+    return {};
+  });
+  const service = new ActionService(transport, 'session-checkbox', 'target-checkbox', {
+    refStore: refs,
+    readbackDelayMs: 0,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  const result = await service.click({ kind: 'ref', ref: '1' });
+
+  assert.deepEqual(result.evidence, {
+    action: 'click',
+    status: 'mismatch',
+    kind: 'checkbox',
+    effects: [],
+    checked: false,
+    focused: false,
+    reason: 'expected_state_unchanged',
+  });
 });
 
 test('ActionService fails closed when Chrome returns an invalid pointer target state', async () => {

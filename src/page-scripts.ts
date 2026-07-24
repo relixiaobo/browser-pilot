@@ -1,5 +1,77 @@
 // JavaScript injected into the page via Runtime.callFunctionOn / Runtime.evaluate.
 
+const CLICK_TARGET_STATE_FUNCTION = `function() {
+  const target = this;
+  if (!target || target.nodeType !== 1 || !target.isConnected) {
+    return {connected:false, kind:'other', focused:false};
+  }
+  const composedParent = node => {
+    if (node && node.parentElement) return node.parentElement;
+    const root = node && typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    return root && root.host ? root.host : null;
+  };
+  const composedContains = (container, node) => {
+    for (let current = node; current; current = composedParent(current)) {
+      if (current === container) return true;
+    }
+    return false;
+  };
+  const isShadowHostOf = (node, possibleHost) => {
+    let root = node && typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    while (root && root.host) {
+      if (root.host === possibleHost) return true;
+      root = typeof root.host.getRootNode === 'function' ? root.host.getRootNode() : null;
+    }
+    return false;
+  };
+  const token = (value, mixed) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+    return mixed && normalized === 'mixed' ? 'mixed' : undefined;
+  };
+  const tag = String(target.tagName || '').toLowerCase();
+  const role = String(target.getAttribute && target.getAttribute('role') || '').trim().toLowerCase();
+  const inputType = tag === 'input' ? String(target.type || '').toLowerCase() : '';
+  let kind = 'other';
+  if (inputType === 'checkbox' || role === 'checkbox' || role === 'menuitemcheckbox') kind = 'checkbox';
+  else if (inputType === 'radio' || role === 'radio' || role === 'menuitemradio') kind = 'radio';
+  else if (role === 'switch') kind = 'switch';
+  else if (tag === 'option' || role === 'option') kind = 'option';
+  else if (tag === 'select' || role === 'listbox' || role === 'combobox') kind = 'select';
+  else if (
+    tag === 'button' || tag === 'a' || tag === 'input' || tag === 'textarea' ||
+    role === 'button' || role === 'link' || role === 'tab' || role === 'menuitem'
+  ) kind = 'control';
+
+  const state = {connected:true, kind, focused:false};
+  if ((kind === 'checkbox' || kind === 'radio') && tag === 'input') {
+    state.checked = !!target.checked;
+  } else if (kind === 'checkbox' || kind === 'radio' || kind === 'switch') {
+    const checked = token(target.getAttribute('aria-checked'), true);
+    if (checked !== undefined) state.checked = checked;
+  }
+  if (kind === 'option' && tag === 'option') state.selected = !!target.selected;
+  else {
+    const selected = token(target.getAttribute('aria-selected'), false);
+    if (selected !== undefined) state.selected = selected === true;
+  }
+  const pressed = token(target.getAttribute('aria-pressed'), true);
+  if (pressed !== undefined) state.pressed = pressed;
+  const expanded = token(target.getAttribute('aria-expanded'), false);
+  if (expanded !== undefined) state.expanded = expanded === true;
+
+  let active = document.activeElement;
+  for (let depth = 0; depth < 32 && active && active.shadowRoot && active.shadowRoot.activeElement; depth += 1) {
+    active = active.shadowRoot.activeElement;
+  }
+  state.focused = active === target || composedContains(target, active) || isShadowHostOf(target, active);
+  return state;
+}`;
+
+/** Read bounded semantic and focus state for click verification. */
+export const READ_CLICK_TARGET_STATE = CLICK_TARGET_STATE_FUNCTION;
+
 /** Validate `this` as a pointer target and return a safe in-viewport point. */
 export const GET_POINTER_TARGET_STATE = `function() {
   const blocked = (reason, obstruction) => ({
@@ -107,7 +179,10 @@ export const GET_POINTER_TARGET_STATE = `function() {
     ];
     for (const [x, y] of points) {
       const hit = document.elementsFromPoint(x, y)[0];
-      if (accepts(hit)) return {status:'ready', x, y};
+      if (accepts(hit)) {
+        const readClickTargetState = ${CLICK_TARGET_STATE_FUNCTION};
+        return {status:'ready', x, y, targetState:readClickTargetState.call(target)};
+      }
       if (!firstObstruction && hit) firstObstruction = describes(hit);
     }
   }

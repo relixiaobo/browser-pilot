@@ -32,7 +32,15 @@ class BrowserFixtureTransport {
   screenshotDimensions;
   responseBodies = new Map();
   childFrames = [];
-  pointerTargetState = { status: 'ready', x: 100, y: 80 };
+  extraAxButtons = [];
+  pointerTargetState = {
+    status: 'ready',
+    x: 100,
+    y: 80,
+    targetState: { connected: true, kind: 'control', focused: false },
+  };
+  pointerReadbackState = { connected: true, kind: 'control', focused: true };
+  onMouseReleased;
 
   async send(method, params = {}, sessionId) {
     this.calls.push({ method, params, sessionId });
@@ -110,12 +118,21 @@ class BrowserFixtureTransport {
         }
         return { result: { value: undefined } };
       }
-      case 'Accessibility.getFullAXTree':
+      case 'Accessibility.getFullAXTree': {
+        const extraNodes = this.extraAxButtons.map((name, index) => ({
+          nodeId: `button-extra-${index}`,
+          parentId: 'root',
+          ignored: false,
+          role: { value: 'button' },
+          name: { value: name },
+          properties: [],
+          backendDOMNodeId: 100 + index,
+        }));
         return {
           nodes: [
             {
               nodeId: 'root',
-              childIds: ['button'],
+              childIds: ['button', ...extraNodes.map(node => node.nodeId)],
               ignored: false,
               role: { value: 'RootWebArea' },
               properties: [],
@@ -129,8 +146,10 @@ class BrowserFixtureTransport {
               properties: [],
               backendDOMNodeId: 42,
             },
+            ...extraNodes,
           ],
         };
+      }
       case 'DOM.resolveNode': return { object: { objectId: `object:${params.backendNodeId}` } };
       case 'DOM.describeNode': return {
         node: { backendNodeId: 72, nodeName: 'INPUT', attributes: ['type', 'file'] },
@@ -141,8 +160,13 @@ class BrowserFixtureTransport {
         if (String(params.functionDeclaration).includes('elementsFromPoint')) {
           return { result: { value: this.pointerTargetState } };
         }
+        if (String(params.functionDeclaration).includes("connected:false, kind:'other'")) {
+          return { result: { value: this.pointerReadbackState } };
+        }
         return { result: { value: { kind: 'input', value: '', sensitive: false } } };
-      case 'Input.dispatchMouseEvent': return {};
+      case 'Input.dispatchMouseEvent':
+        if (params.type === 'mouseReleased') this.onMouseReleased?.(sessionId);
+        return {};
       case 'Input.dispatchKeyEvent': return {};
       case 'Input.insertText': return {};
       case 'Page.getLayoutMetrics': return {
@@ -693,6 +717,13 @@ test('Observation refs are Lease-scoped, stale after navigation, and actions ret
   }, targetId);
   assert.notEqual(clicked.observationId, observed.observationId);
   assert.equal(clicked.elements[0].name, 'Submit');
+  assert.deepEqual(clicked.evidence, {
+    action: 'click',
+    status: 'verified',
+    kind: 'control',
+    effects: ['focus_changed'],
+    focused: true,
+  });
 
   transport.loaders.set('user-form', 'loader:user-form:external-navigation');
   await assert.rejects(
@@ -732,6 +763,79 @@ test('browser.click returns a typed obstruction error without dispatching pointe
     ),
   );
   assert.equal(transport.calls.some(call => call.method === 'Input.dispatchMouseEvent'), false);
+});
+
+test('browser.click merges element, navigation, document, dialog, and popup evidence', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:click-effects', 'com.example.agent', 'instance:click-effects');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  transport.onMouseReleased = sessionId => {
+    const target = transport.targets.get('user-form');
+    target.url = 'https://example.test/submitted';
+    target.title = 'Submitted';
+    transport.loaders.set('user-form', 'loader:user-form:submitted');
+    transport.emit('Page.javascriptDialogOpening', {
+      type: 'alert',
+      message: 'Saved',
+      url: target.url,
+    }, sessionId);
+    transport.emit('Target.targetCreated', {
+      targetInfo: {
+        targetId: 'user-popup',
+        type: 'page',
+        url: 'https://example.test/receipt',
+        openerId: 'user-form',
+      },
+    });
+  };
+
+  const clicked = await tool(runtime, client, 'browser.click', {
+    target: { observationId: observed.observationId, ref: 1 },
+  }, targetId);
+
+  assert.equal(clicked.url, 'https://example.test/submitted');
+  assert.deepEqual(clicked.evidence, {
+    action: 'click',
+    status: 'verified',
+    kind: 'control',
+    effects: [
+      'focus_changed',
+      'navigation',
+      'document_changed',
+      'dialog_opened',
+      'popup_opened',
+    ],
+    focused: true,
+  });
+});
+
+test('browser.click does not mistake a larger post-click ref limit for a document change', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.extraAxButtons = ['Cancel', 'Help'];
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:click-limit', 'com.example.agent', 'instance:click-limit');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 1 }, targetId);
+  assert.equal(observed.truncated, true);
+
+  const clicked = await tool(runtime, client, 'browser.click', {
+    target: { observationId: observed.observationId, ref: 1 },
+  }, targetId);
+
+  assert.equal(clicked.elements.length, 3);
+  assert.deepEqual(clicked.evidence.effects, ['focus_changed']);
 });
 
 test('the same physical user tab is exclusive across unrelated Agent Leases', async () => {

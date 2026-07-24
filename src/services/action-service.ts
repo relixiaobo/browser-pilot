@@ -4,6 +4,7 @@ import {
   CONTENTEDITABLE_FOCUS_END,
   GET_POINTER_TARGET_STATE,
   READ_ACTIVE_EDITABLE_STATE,
+  READ_CLICK_TARGET_STATE,
   READ_EDITABLE_STATE,
   SET_VALUE,
 } from '../page-scripts.js';
@@ -60,6 +61,45 @@ export interface InputVerificationEvidence {
   reason?: 'active_element_not_readable' | 'value_mismatch';
 }
 
+export type ClickEffect =
+  | 'checked_changed'
+  | 'selected_changed'
+  | 'pressed_changed'
+  | 'expanded_changed'
+  | 'focus_changed'
+  | 'navigation'
+  | 'document_changed'
+  | 'dialog_opened'
+  | 'popup_opened';
+
+export type ClickTargetKind =
+  | 'checkbox'
+  | 'radio'
+  | 'switch'
+  | 'option'
+  | 'select'
+  | 'control'
+  | 'other'
+  | 'coordinates';
+
+export interface ClickVerificationEvidence {
+  action: 'click';
+  status: 'verified' | 'mismatch' | 'unavailable';
+  kind: ClickTargetKind;
+  effects: ClickEffect[];
+  checked?: boolean | 'mixed';
+  selected?: boolean;
+  pressed?: boolean | 'mixed';
+  expanded?: boolean;
+  focused?: boolean;
+  reason?: 'coordinate_target' | 'target_unavailable' | 'expected_state_unchanged' | 'no_observable_effect';
+}
+
+export interface ClickActionResult {
+  observation: SnapshotResult;
+  evidence: ClickVerificationEvidence;
+}
+
 export interface InputActionResult {
   observation: SnapshotResult;
   evidence: InputVerificationEvidence;
@@ -81,8 +121,18 @@ type PointerTargetFailureReason =
 type PointerObstruction = Record<string, string> & { tagName: string };
 
 type PointerTargetState =
-  | { status: 'ready'; x: number; y: number }
+  | { status: 'ready'; x: number; y: number; targetState: ClickTargetState }
   | { status: 'blocked'; reason: PointerTargetFailureReason; obstruction?: PointerObstruction };
+
+interface ClickTargetState {
+  connected: boolean;
+  kind: Exclude<ClickTargetKind, 'coordinates'>;
+  focused: boolean;
+  checked?: boolean | 'mixed';
+  selected?: boolean;
+  pressed?: boolean | 'mixed';
+  expanded?: boolean;
+}
 
 const POINTER_FAILURE_REASONS = new Set<PointerTargetFailureReason>([
   'detached',
@@ -98,7 +148,12 @@ function parsePointerTargetState(value: unknown): PointerTargetState {
   }
   const record = value as Record<string, unknown>;
   if (record.status === 'ready' && Number.isFinite(record.x) && Number.isFinite(record.y)) {
-    return { status: 'ready', x: Number(record.x), y: Number(record.y) };
+    return {
+      status: 'ready',
+      x: Number(record.x),
+      y: Number(record.y),
+      targetState: parseClickTargetState(record.targetState),
+    };
   }
   if (record.status !== 'blocked' || !POINTER_FAILURE_REASONS.has(record.reason as PointerTargetFailureReason)) {
     throw new BrowserPilotError('internal_error', 'Chrome returned invalid pointer target state');
@@ -129,6 +184,95 @@ function parsePointerTargetState(value: unknown): PointerTargetState {
     status: 'blocked',
     reason: record.reason as PointerTargetFailureReason,
     ...(obstruction ? { obstruction } : {}),
+  };
+}
+
+const CLICK_TARGET_KINDS = new Set<ClickTargetState['kind']>([
+  'checkbox',
+  'radio',
+  'switch',
+  'option',
+  'select',
+  'control',
+  'other',
+]);
+
+function parseClickTargetState(value: unknown): ClickTargetState {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid click verification state');
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.connected !== 'boolean' ||
+    !CLICK_TARGET_KINDS.has(record.kind as ClickTargetState['kind']) ||
+    typeof record.focused !== 'boolean' ||
+    (record.checked !== undefined && typeof record.checked !== 'boolean' && record.checked !== 'mixed') ||
+    (record.selected !== undefined && typeof record.selected !== 'boolean') ||
+    (record.pressed !== undefined && typeof record.pressed !== 'boolean' && record.pressed !== 'mixed') ||
+    (record.expanded !== undefined && typeof record.expanded !== 'boolean')
+  ) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid click verification state');
+  }
+  return {
+    connected: record.connected,
+    kind: record.kind as ClickTargetState['kind'],
+    focused: record.focused,
+    ...(record.checked !== undefined ? { checked: record.checked as ClickTargetState['checked'] } : {}),
+    ...(record.selected !== undefined ? { selected: record.selected } : {}),
+    ...(record.pressed !== undefined ? { pressed: record.pressed as ClickTargetState['pressed'] } : {}),
+    ...(record.expanded !== undefined ? { expanded: record.expanded } : {}),
+  };
+}
+
+function clickEvidence(
+  before: ClickTargetState,
+  after: ClickTargetState | undefined,
+  button: NonNullable<ClickOptions['button']>,
+  clickCount: NonNullable<ClickOptions['clickCount']>,
+): ClickVerificationEvidence {
+  if (!after?.connected) {
+    return {
+      action: 'click',
+      status: 'unavailable',
+      kind: before.kind,
+      effects: [],
+      reason: 'target_unavailable',
+    };
+  }
+
+  const effects: ClickEffect[] = [];
+  if (before.checked !== after.checked) effects.push('checked_changed');
+  if (before.selected !== after.selected) effects.push('selected_changed');
+  if (before.pressed !== after.pressed) effects.push('pressed_changed');
+  if (before.expanded !== after.expanded) effects.push('expanded_changed');
+  if (!before.focused && after.focused) effects.push('focus_changed');
+
+  let status: ClickVerificationEvidence['status'] = effects.length > 0 ? 'verified' : 'unavailable';
+  let reason: ClickVerificationEvidence['reason'] | undefined = effects.length > 0
+    ? undefined
+    : 'no_observable_effect';
+  if (button === 'left' && clickCount === 1 && after.checked !== undefined) {
+    const expected = before.kind === 'radio'
+      ? true
+      : before.checked === true ? false : true;
+    status = after.checked === expected ? 'verified' : 'mismatch';
+    reason = status === 'mismatch' ? 'expected_state_unchanged' : undefined;
+  } else if (button === 'left' && clickCount === 1 && before.kind === 'option' && after.selected !== undefined) {
+    status = after.selected ? 'verified' : 'mismatch';
+    reason = status === 'mismatch' ? 'expected_state_unchanged' : undefined;
+  }
+
+  return {
+    action: 'click',
+    status,
+    kind: after.kind,
+    effects,
+    ...(after.checked !== undefined ? { checked: after.checked } : {}),
+    ...(after.selected !== undefined ? { selected: after.selected } : {}),
+    ...(after.pressed !== undefined ? { pressed: after.pressed } : {}),
+    ...(after.expanded !== undefined ? { expanded: after.expanded } : {}),
+    focused: after.focused,
+    ...(reason ? { reason } : {}),
   };
 }
 
@@ -193,15 +337,23 @@ export class ActionService {
     this.executionContextId = options.executionContextId;
   }
 
-  async click(target: ClickTarget, options: ClickOptions = {}): Promise<SnapshotResult> {
+  async click(target: ClickTarget, options: ClickOptions = {}): Promise<ClickActionResult> {
     const button = options.button ?? 'left';
     const clickCount = options.clickCount ?? 1;
     if (button === 'right' && clickCount === 2) {
       throw invalidArgument('Double-click and right-click are mutually exclusive');
     }
 
+    let evidence: ClickVerificationEvidence;
     if (target.kind === 'coordinates') {
       await this.input.click(target.x, target.y, { button, clickCount });
+      evidence = {
+        action: 'click',
+        status: 'unavailable',
+        kind: 'coordinates',
+        effects: [],
+        reason: 'coordinate_target',
+      };
     } else {
       const objectId = await resolveTarget(
         this.transport,
@@ -235,12 +387,30 @@ export class ActionService {
           });
         }
         await this.input.click(state.x, state.y, { button, clickCount });
+        if (this.readbackDelayMs > 0) {
+          await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
+        }
+        let after: ClickTargetState | undefined;
+        try {
+          const response = await this.transport.send('Runtime.callFunctionOn', {
+            objectId,
+            functionDeclaration: READ_CLICK_TARGET_STATE,
+            returnByValue: true,
+          }, this.sessionId);
+          after = parseClickTargetState(response.result.value);
+        } catch (error) {
+          if (error instanceof BrowserPilotError && error.code === 'browser_disconnected') throw error;
+        }
+        evidence = clickEvidence(state.targetState, after, button, clickCount);
       } finally {
         await this.transport.send('Runtime.releaseObject', { objectId }, this.sessionId).catch(() => {});
       }
     }
 
-    return this.observations.observeAfterAction(options.observationLimit);
+    return {
+      observation: await this.observations.observeAfterAction(options.observationLimit),
+      evidence,
+    };
   }
 
   async press(key: string, observationLimit = 50): Promise<SnapshotResult> {

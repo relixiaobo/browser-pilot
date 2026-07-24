@@ -275,11 +275,12 @@ Examples:
         target = { kind: 'ref', ref };
       }
       const service = new ActionService(transport, sessionId, state.activeTargetId);
-      emitSnapshot(await service.click(target, {
+      const result = await service.click(target, {
         button: opts.right ? 'right' : 'left',
         clickCount: opts.double ? 2 : 1,
         observationLimit: limit,
-      }));
+      });
+      emitSnapshot(result.observation);
     });
   }));
 

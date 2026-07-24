@@ -161,6 +161,21 @@ browser dispatch becomes `unknown_outcome` and is never automatically replayed.
 Known tool failures are stored as a completed Command with a nested JSON-RPC
 `error`; the original call also returns that error normally.
 
+`browser.click` returns a new Observation plus bounded evidence. For example,
+a checkbox may return:
+
+```json
+{"action":"click","status":"verified","kind":"checkbox","effects":["checked_changed","focus_changed"],"checked":true,"focused":true}
+```
+
+Effects can also include `selected_changed`, `pressed_changed`,
+`expanded_changed`, `navigation`, `document_changed`, `dialog_opened`, and
+`popup_opened`. A semantic control that does not reach its expected state uses
+`mismatch`; coordinate clicks and ref clicks with no conclusive observable
+effect use `unavailable`. Treat evidence as browser-level execution evidence,
+then inspect the returned Observation to decide whether the task itself
+succeeded.
+
 Inventory includes every eligible ordinary user tab plus the Workspace's
 managed tabs. A physical tab can be controlled by only one Lease at a time.
 Releasing a Workspace closes managed tabs but leaves user tabs open.

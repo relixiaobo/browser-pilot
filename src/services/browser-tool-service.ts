@@ -21,7 +21,13 @@ import { INJECT_BORDER } from '../page-scripts.js';
 import { MemoryRefStore, type RefStore, type SnapshotResult } from '../snapshot.js';
 import type { Transport } from '../transport.js';
 import { waitForLoad } from '../session.js';
-import { ActionService, type InputVerificationEvidence } from './action-service.js';
+import {
+  ActionService,
+  type ClickActionResult,
+  type ClickEffect,
+  type ClickVerificationEvidence,
+  type InputVerificationEvidence,
+} from './action-service.js';
 import { ArtifactStore } from './artifact-store.js';
 import { DownloadController } from './download-controller.js';
 import { CdpBrowserTargetCatalog } from './browser-target-catalog.js';
@@ -114,6 +120,11 @@ interface CreatedObservation {
   record: StoredObservation;
 }
 
+interface ActionServiceHarness {
+  service: ActionService;
+  observation(): CreatedObservation | undefined;
+}
+
 type DialogType = 'alert' | 'confirm' | 'prompt' | 'beforeunload';
 
 interface PendingDialog {
@@ -132,6 +143,11 @@ interface PendingDialog {
 interface PendingDialogResponse extends Record<string, JsonValue> {
   action: 'accept' | 'dismiss';
   promptTextProvided: boolean;
+}
+
+interface PopupSignal {
+  sequence: number;
+  openerCdpTargetId: string;
 }
 
 const DIALOG_TYPES = new Set<DialogType>(['alert', 'confirm', 'prompt', 'beforeunload']);
@@ -154,6 +170,21 @@ function fixedRefStore(targetId: ControlledTargetId, observation: StoredObservat
   return store;
 }
 
+function refsChanged(before: StoredObservation, after: StoredObservation): boolean {
+  const sharedLength = Math.min(before.refs.length, after.refs.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const ref = before.refs[index];
+    const next = after.refs[index];
+    if (!next ||
+      ref.backendNodeId !== next.backendNodeId ||
+      ref.role !== next.role ||
+      ref.name !== next.name
+    ) return true;
+  }
+  if (before.refs.length === after.refs.length) return false;
+  return !before.truncated && !after.truncated;
+}
+
 export class BrowserToolService implements BrowserToolExecutor {
   readonly supportedTools: readonly string[];
 
@@ -167,6 +198,10 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly pendingDialogs = new Map<string, PendingDialog>();
   private readonly pendingDialogBySession = new Map<string, string>();
   private readonly dialogResponseBySession = new Map<string, PendingDialogResponse>();
+  private readonly dialogOpenSequenceBySession = new Map<string, number>();
+  private dialogOpenSequence = 0;
+  private readonly popupSignals: PopupSignal[] = [];
+  private popupSequence = 0;
   private readonly artifactStore?: ArtifactStore;
   private readonly downloads?: DownloadController;
   private readonly network: WorkspaceNetworkController;
@@ -637,7 +672,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         Number(target.ref),
       );
       this.markDispatched(context);
-      return this.runAction(context, targetId, session, observation, service => service.click(
+      return this.runClickAction(context, targetId, session, observation, service => service.click(
         { kind: 'ref', ref: String(target.ref) },
         {
           button: args.button as 'left' | 'right' | undefined,
@@ -646,7 +681,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       ));
     }
     this.markDispatched(context);
-    return this.runAction(context, targetId, session, undefined, service => service.click({
+    return this.runClickAction(context, targetId, session, undefined, service => service.click({
       kind: 'coordinates',
       x: Number(target.x),
       y: Number(target.y),
@@ -1130,6 +1165,8 @@ export class BrowserToolService implements BrowserToolExecutor {
       browserConnectionGeneration: context.browser.instance.connectionGeneration,
       sessionId: session.sessionId,
       loaderId,
+      title: snapshot.data.title,
+      url: snapshot.data.url,
       refs: refs.load(targetId),
       truncated: snapshot.truncated ?? false,
       truncationReasons: snapshot.truncationReasons ?? [],
@@ -1189,37 +1226,51 @@ export class BrowserToolService implements BrowserToolExecutor {
     observation: StoredObservation | undefined,
     action: (service: ActionService) => Promise<SnapshotResult>,
   ): Promise<JsonValue> {
-    let next: CreatedObservation | undefined;
-    const refStore = observation ? fixedRefStore(targetId, observation) : new MemoryRefStore();
-    const observationService = {
-      refs: refStore,
-      locate: (selector: string) => new ObservationService(
-        this.transport,
-        session.sessionId,
-        targetId,
-        {
-          refStore,
-          ...(session.activeFrame?.executionContextId !== undefined
-            ? { executionContextId: session.activeFrame.executionContextId }
-            : {}),
-          ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
-        },
-      ).locate(selector),
-      observeAfterAction: async (limit = 50) => {
-        next = await this.createObservation(context, targetId, session, limit, true);
-        return next.snapshot;
-      },
-    };
-    await action(new ActionService(this.transport, session.sessionId, targetId, {
-      refStore,
-      observationService,
-      ...(session.activeFrame?.executionContextId !== undefined
-        ? { executionContextId: session.activeFrame.executionContextId }
-        : {}),
-    }));
+    const harness = this.createActionHarness(context, targetId, session, observation);
+    await action(harness.service);
+    const next = harness.observation();
     if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next);
+  }
+
+  private async runClickAction(
+    context: BrokerToolCallContext,
+    targetId: ControlledTargetId,
+    session: TargetSession,
+    observation: StoredObservation | undefined,
+    action: (service: ActionService) => Promise<ClickActionResult>,
+  ): Promise<JsonValue> {
+    const beforeLoaderId = observation?.loaderId ?? await this.loaderId(session);
+    const beforeUrl = observation?.url ?? await this.currentUrl(session);
+    const beforeDialogSequence = this.dialogOpenSequenceBySession.get(session.sessionId) ?? 0;
+    const beforePopupSequence = this.popupSequence;
+    const harness = this.createActionHarness(context, targetId, session, observation);
+    const result = await action(harness.service);
+    const next = harness.observation();
+    if (!next) throw new BrowserPilotError('internal_error', 'Click did not produce an Observation');
+
+    const extraEffects: ClickEffect[] = [];
+    const navigated = beforeLoaderId !== next.record.loaderId ||
+      (beforeUrl !== undefined && beforeUrl !== next.record.url);
+    const documentChanged = beforeLoaderId !== next.record.loaderId ||
+      (observation !== undefined && (
+        observation.title !== next.record.title || refsChanged(observation, next.record)
+      ));
+    if (navigated) extraEffects.push('navigation');
+    if (documentChanged) extraEffects.push('document_changed');
+    if ((this.dialogOpenSequenceBySession.get(session.sessionId) ?? 0) > beforeDialogSequence) {
+      extraEffects.push('dialog_opened');
+    }
+    if (this.popupSignals.some(signal => (
+      signal.sequence > beforePopupSequence && signal.openerCdpTargetId === session.cdpTargetId
+    ))) {
+      extraEffects.push('popup_opened');
+    }
+
+    const evidence = this.mergeClickEvidence(result.evidence, extraEffects);
+    this.publishDocumentChanged(context, targetId, next);
+    return this.observationResult(context, targetId, next, evidence);
   }
 
   private async runInputAction(
@@ -1229,46 +1280,59 @@ export class BrowserToolService implements BrowserToolExecutor {
     observation: StoredObservation | undefined,
     action: (service: ActionService) => Promise<{ observation: SnapshotResult; evidence: InputVerificationEvidence }>,
   ): Promise<JsonValue> {
-    let evidence: InputVerificationEvidence | undefined;
+    const harness = this.createActionHarness(context, targetId, session, observation);
+    const result = await action(harness.service);
+    const next = harness.observation();
+    if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
+    this.publishDocumentChanged(context, targetId, next);
+    return this.observationResult(context, targetId, next, result.evidence);
+  }
+
+  private createActionHarness(
+    context: BrokerToolCallContext,
+    targetId: ControlledTargetId,
+    session: TargetSession,
+    observation: StoredObservation | undefined,
+  ): ActionServiceHarness {
     let next: CreatedObservation | undefined;
     const refStore = observation ? fixedRefStore(targetId, observation) : new MemoryRefStore();
+    const observationOptions = {
+      refStore,
+      ...(session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {}),
+      ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
+    };
     const observationService = {
       refs: refStore,
       locate: (selector: string) => new ObservationService(
         this.transport,
         session.sessionId,
         targetId,
-        {
-          refStore,
-          ...(session.activeFrame?.executionContextId !== undefined
-            ? { executionContextId: session.activeFrame.executionContextId }
-            : {}),
-          ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
-        },
+        observationOptions,
       ).locate(selector),
       observeAfterAction: async (limit = 50) => {
         next = await this.createObservation(context, targetId, session, limit, true);
         return next.snapshot;
       },
     };
-    const result = await action(new ActionService(this.transport, session.sessionId, targetId, {
-      refStore,
-      observationService,
-      ...(session.activeFrame?.executionContextId !== undefined
-        ? { executionContextId: session.activeFrame.executionContextId }
-        : {}),
-    }));
-    evidence = result.evidence;
-    if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
-    this.publishDocumentChanged(context, targetId, next);
-    return this.observationResult(context, targetId, next, evidence);
+    return {
+      service: new ActionService(this.transport, session.sessionId, targetId, {
+        refStore,
+        observationService,
+        ...(session.activeFrame?.executionContextId !== undefined
+          ? { executionContextId: session.activeFrame.executionContextId }
+          : {}),
+      }),
+      observation: () => next,
+    };
   }
 
   private observationResult(
     context: BrokerToolCallContext,
     targetId: ControlledTargetId,
     created: CreatedObservation,
-    evidence?: InputVerificationEvidence,
+    evidence?: InputVerificationEvidence | ClickVerificationEvidence,
   ): JsonValue {
     return asJson({
       ...this.targetResult(context, targetId, created.snapshot.data.url),
@@ -1372,6 +1436,21 @@ export class BrowserToolService implements BrowserToolExecutor {
     return loaderId;
   }
 
+  private async currentUrl(session: TargetSession): Promise<string> {
+    const params: Record<string, unknown> = {
+      expression: 'location.href',
+      returnByValue: true,
+    };
+    if (session.activeFrame?.executionContextId !== undefined) {
+      params.contextId = session.activeFrame.executionContextId;
+    }
+    const { result } = await this.transport.send('Runtime.evaluate', params, session.sessionId);
+    if (typeof result?.value !== 'string' || result.value.length === 0 || result.value.length > 16_384) {
+      throw new BrowserPilotError('internal_error', 'Chrome returned an invalid document URL');
+    }
+    return result.value;
+  }
+
   private cleanupTarget(targetId: ControlledTargetId, reason: 'target_closed'): void {
     this.observations.invalidateTarget(targetId, reason);
     const session = [...this.sessions.values()].find(candidate => candidate.targetId === targetId);
@@ -1415,6 +1494,8 @@ export class BrowserToolService implements BrowserToolExecutor {
         url: typeof params.url === 'string' ? params.url : '',
         openedAt: Date.now(),
       };
+      this.dialogOpenSequence += 1;
+      this.dialogOpenSequenceBySession.set(sessionId, this.dialogOpenSequence);
       this.pendingDialogs.set(dialog.id, dialog);
       this.pendingDialogBySession.set(sessionId, dialog.id);
       this.publishDialogEvent(dialog, 'opened');
@@ -1434,6 +1515,16 @@ export class BrowserToolService implements BrowserToolExecutor {
   }
 
   private installSessionHandlers(): void {
+    this.transport.on?.('Target.targetCreated', (params: any) => {
+      const info = params?.targetInfo;
+      if (info?.type !== 'page' || typeof info.openerId !== 'string') return;
+      this.popupSequence += 1;
+      this.popupSignals.push({
+        sequence: this.popupSequence,
+        openerCdpTargetId: info.openerId,
+      });
+      if (this.popupSignals.length > 256) this.popupSignals.shift();
+    });
     this.transport.on?.('Target.detachedFromTarget', (params: any) => {
       const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : undefined;
       if (!sessionId || !this.ownedSessionIds.has(sessionId)) return;
@@ -1569,6 +1660,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.network.detachSession(sessionId);
     this.downloads?.detachSession(sessionId, 'target_detached');
     this.framesBySession.delete(sessionId);
+    this.dialogOpenSequenceBySession.delete(sessionId);
     this.ownedSessionIds.delete(sessionId);
     this.deleteDialogs(dialog => dialog.sessionId === sessionId);
   }
@@ -1590,6 +1682,22 @@ export class BrowserToolService implements BrowserToolExecutor {
         ...(target.managedTabSetId ? { managedTabSetId: target.managedTabSetId } : {}),
       },
     });
+  }
+
+  private mergeClickEvidence(
+    evidence: ClickVerificationEvidence,
+    extraEffects: readonly ClickEffect[],
+  ): ClickVerificationEvidence {
+    const effects = [...new Set([...evidence.effects, ...extraEffects])];
+    if (evidence.status !== 'unavailable' || extraEffects.length === 0) {
+      return { ...evidence, effects };
+    }
+    const { reason: _reason, ...rest } = evidence;
+    return {
+      ...rest,
+      status: 'verified',
+      effects,
+    };
   }
 
   private publishDialogEvent(

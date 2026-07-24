@@ -269,3 +269,34 @@ test('tool result schemas require controlled-target context', () => {
   };
   assert.deepEqual(validateToolResult('browser.tabs.list', tabsResult), tabsResult);
 });
+
+test('browser.click result schema accepts bounded typed click evidence', () => {
+  const result = {
+    workspaceId: 'workspace:123',
+    leaseId: 'lease:123',
+    targetId: 'target:123',
+    url: 'https://example.com/complete',
+    observationId: 'observation:123',
+    title: 'Complete',
+    elements: [],
+    truncated: false,
+    truncationReasons: [],
+    evidence: {
+      action: 'click',
+      status: 'verified',
+      kind: 'checkbox',
+      effects: ['checked_changed', 'document_changed'],
+      checked: true,
+      focused: true,
+    },
+  };
+
+  assert.deepEqual(validateToolResult('browser.click', result), result);
+  assert.throws(
+    () => validateToolResult('browser.click', {
+      ...result,
+      evidence: { ...result.evidence, effects: ['raw_cdp_effect'] },
+    }),
+    error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+  );
+});

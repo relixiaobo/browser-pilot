@@ -388,6 +388,14 @@ accept a Command ID plus its Workspace ID when applicable. They authorize by
 ClientPrincipal ownership so a replacement Connection can inspect known state
 without inheriting the original Lease.
 
+Action results include bounded typed evidence where Browser Pilot can observe
+an effect. Ref clicks combine local control state and composed focus changes
+with Broker-owned navigation, normalized document, dialog, and attributable
+popup signals. `verified` means at least one supported effect was observed,
+`mismatch` means an observable control did not reach its expected state, and
+`unavailable` means dispatch completed without conclusive evidence. Evidence is
+not a claim that the Agent's higher-level business goal succeeded.
+
 The initial controlled tool families are browser discovery/status, Workspace
 and Lease lifecycle, open/observe/read, click/type/keyboard/press,
 capture/upload, tabs/frames, dialogs, auth/cookies, network, events, and

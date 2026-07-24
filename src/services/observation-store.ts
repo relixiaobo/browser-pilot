@@ -14,6 +14,8 @@ export interface StoredObservation extends ObservationDescriptor {
   leaseId: ControlLeaseId;
   sessionId: string;
   loaderId: string;
+  title: string;
+  url: string;
   refs: RefEntry[];
 }
 
@@ -24,6 +26,8 @@ export interface CreateObservationInput {
   browserConnectionGeneration: number;
   sessionId: string;
   loaderId: string;
+  title: string;
+  url: string;
   refs: readonly RefEntry[];
   truncated: boolean;
   truncationReasons: ObservationDescriptor['truncationReasons'];
@@ -94,6 +98,8 @@ export class MemoryObservationStore {
       browserConnectionGeneration: input.browserConnectionGeneration,
       sessionId: input.sessionId,
       loaderId: input.loaderId,
+      title: input.title,
+      url: input.url,
       createdAt,
       expiresAt: createdAt + this.ttlMs,
       elementCount: input.refs.length,

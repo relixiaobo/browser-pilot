@@ -106,9 +106,15 @@ Preserve Browser Pilot advantages:
     hits are accepted; detached refs return `stale_ref`, while non-interactable
     refs return bounded `action_not_verified` reasons before any pointer event.
     Explicit coordinate clicks remain the low-level escape hatch.
-- [ ] **B3.2** After click, verify expected checkbox, radio, selection, focus,
+- [x] **B3.2** After click, verify expected checkbox, radio, selection, focus,
   dialog, navigation, popup, or document effects where observable.
   - Covers: AC-8.
+  - Complete: click results now contain bounded typed evidence for native and
+    ARIA checked, selected, pressed, expanded, and composed focus state. The
+    Broker merges loader/URL changes, normalized Observation differences,
+    dialog openings, and attributable popup creation without exposing raw CDP
+    IDs. Expected checkbox/radio/option state failures report `mismatch`;
+    coordinate and otherwise unobservable clicks report `unavailable`.
 - [ ] **B3.3** Unify input behavior for native fields, controlled React/Vue
   fields, and contenteditable; read back the effective value/content.
   - Covers: AC-8.
@@ -118,9 +124,9 @@ Preserve Browser Pilot advantages:
 - [ ] **B3.4** Return typed action evidence and failure reasons instead of
   reporting success solely because CDP dispatch completed.
   - Covers: command reliability contract.
-  - Progress: input actions return `verified`, `mismatch`, or `unavailable`
-    evidence. Machine callers can require exact verification and receive
-    `action_not_verified`; the legacy CLI output remains compatible.
+  - Progress: input and click actions return bounded `verified`, `mismatch`, or
+    `unavailable` evidence. Machine input callers can require exact verification
+    and receive `action_not_verified`; the legacy CLI output remains compatible.
 - [ ] **B3.5** Stop any remaining composite action steps when target, frame,
   focus, loader, or document generation changes unexpectedly.
   - Covers: BR-10 through BR-12, AC-5.

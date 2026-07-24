@@ -106,6 +106,33 @@ const inputEvidenceSchema = objectSchema({
   reason: stringSchema({ enum: ['active_element_not_readable', 'value_mismatch'] }),
 }, ['status', 'kind', 'sensitive']);
 
+const clickEvidenceSchema = objectSchema({
+  action: stringSchema({ const: 'click' }),
+  status: stringSchema({ enum: ['verified', 'mismatch', 'unavailable'] }),
+  kind: stringSchema({ enum: [
+    'checkbox', 'radio', 'switch', 'option', 'select', 'control', 'other', 'coordinates',
+  ] }),
+  effects: arraySchema(stringSchema({ enum: [
+    'checked_changed',
+    'selected_changed',
+    'pressed_changed',
+    'expanded_changed',
+    'focus_changed',
+    'navigation',
+    'document_changed',
+    'dialog_opened',
+    'popup_opened',
+  ] }), { maxItems: 9, uniqueItems: true }),
+  checked: { oneOf: [booleanSchema(), stringSchema({ const: 'mixed' })] },
+  selected: booleanSchema(),
+  pressed: { oneOf: [booleanSchema(), stringSchema({ const: 'mixed' })] },
+  expanded: booleanSchema(),
+  focused: booleanSchema(),
+  reason: stringSchema({ enum: [
+    'coordinate_target', 'target_unavailable', 'expected_state_unchanged', 'no_observable_effect',
+  ] }),
+}, ['action', 'status', 'kind', 'effects']);
+
 const artifactSchema = objectSchema({
   id: opaqueIdSchema,
   workspaceId: opaqueIdSchema,
@@ -150,7 +177,7 @@ const observationOutput = resultSchema('target', {
   truncationReasons: arraySchema(stringSchema({
     enum: ['element_limit', 'text_limit', 'depth_limit', 'byte_limit'],
   }), { uniqueItems: true }),
-  evidence: inputEvidenceSchema,
+  evidence: { oneOf: [inputEvidenceSchema, clickEvidenceSchema] },
 }, ['observationId', 'title', 'elements', 'truncated', 'truncationReasons']);
 
 const artifactOutput = resultSchema('target', {
