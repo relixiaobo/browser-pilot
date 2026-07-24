@@ -39,6 +39,7 @@ import {
   negotiateProtocol,
   validateArtifactAccessParams,
   validateArtifactExportParams,
+  validateCommandAccessParams,
   validateInitializeParams,
   validateLeaseCreateParams,
   validateLeaseHeartbeatParams,
@@ -50,6 +51,7 @@ import {
   validateWorkspaceGetParams,
   validateWorkspaceReleaseParams,
 } from '../protocol/validation.js';
+import { MemoryCommandRuntime } from './command-runtime.js';
 
 export const DEFAULT_PROTOCOL_LIMITS: Readonly<ProtocolLimits> = {
   maxMessageBytes: 1024 * 1024,
@@ -86,6 +88,7 @@ export interface BrokerRuntimeOptions {
   onWorkspaceReleased?: (workspace: BrowserWorkspace, managedTabSet: ManagedTabSet) => void;
   toolExecutor?: BrowserToolExecutor;
   artifactStore?: BrokerArtifactStore;
+  commandRuntime?: MemoryCommandRuntime;
 }
 
 export interface BrokerArtifactStore {
@@ -116,6 +119,8 @@ export interface BrokerToolCallContext {
   lease?: ControlLease;
   targetId?: ControlledTargetId;
   browser: BrokerBrowserBinding;
+  signal: AbortSignal;
+  markDispatched(): void;
 }
 
 export interface BrowserToolExecutor {
@@ -125,6 +130,16 @@ export interface BrowserToolExecutor {
     definition: ToolDefinition,
     args: JsonValue,
   ): Promise<JsonValue>;
+  actorKey?(
+    context: BrokerToolCallContext,
+    definition: ToolDefinition,
+    args: JsonValue,
+  ): string;
+  commandTargetId?(
+    context: BrokerToolCallContext,
+    definition: ToolDefinition,
+    args: JsonValue,
+  ): ControlledTargetId | undefined;
   releaseLease?(lease: ControlLease): void;
   releaseWorkspace?(
     principal: ClientPrincipal,
@@ -188,6 +203,7 @@ export class MemoryBrokerRuntime {
   private readonly connectionIdleTtlMs: number;
   private readonly workspaceIdleTtlMs: number;
   private readonly managedTabSetIds = new Set<ManagedTabSetId>();
+  private readonly commands: MemoryCommandRuntime;
 
   constructor(private readonly options: BrokerRuntimeOptions) {
     this.browserBindings = options.browsers.map(binding => ({
@@ -208,6 +224,7 @@ export class MemoryBrokerRuntime {
     this.maxLeaseRecords = options.maxLeaseRecords ?? 8192;
     this.connectionIdleTtlMs = options.connectionIdleTtlMs ?? 10 * 60_000;
     this.workspaceIdleTtlMs = options.workspaceIdleTtlMs ?? 24 * 60 * 60_000;
+    this.commands = options.commandRuntime ?? new MemoryCommandRuntime({ now: this.now });
     if (
       this.minLeaseTtlMs <= 0 ||
       this.defaultLeaseTtlMs < this.minLeaseTtlMs ||
@@ -257,6 +274,10 @@ export class MemoryBrokerRuntime {
         ));
       case 'tools/call':
         return this.callTool(connection, params);
+      case 'commands/get':
+        return this.getCommand(connection, params);
+      case 'commands/cancel':
+        return this.cancelCommand(connection, params);
       case 'artifacts/get':
         return this.getArtifact(connection, params);
       case 'artifacts/export':
@@ -291,6 +312,7 @@ export class MemoryBrokerRuntime {
   disconnect(bridgeSessionId: string): void {
     const connection = this.connectionsByBridge.get(bridgeSessionId);
     if (!connection) return;
+    this.commands.releaseConnection(connection.value.id);
     this.connectionsByBridge.delete(bridgeSessionId);
     this.connectionsById.delete(connection.value.id);
     for (const [leaseId, lease] of this.leases) {
@@ -309,6 +331,7 @@ export class MemoryBrokerRuntime {
 
   sweepExpiredLeases(): number {
     const now = this.now();
+    this.commands.sweep();
     let expired = 0;
     for (const lease of this.leases.values()) {
       if (lease.state === 'active' && lease.expiresAt <= now) {
@@ -588,12 +611,14 @@ export class MemoryBrokerRuntime {
   private releaseLeaseRecord(lease: ControlLease, state: 'released' | 'expired'): void {
     if (lease.state !== 'active') return;
     lease.state = state;
+    this.commands.releaseLease(lease.id);
     this.options.toolExecutor?.releaseLease?.(cloneLease(lease));
     this.options.onLeaseReleased?.(cloneLease(lease));
   }
 
   private releaseWorkspaceRecord(record: RuntimeWorkspace): void {
     record.value.state = 'releasing';
+    this.commands.releaseWorkspace(record.value.id);
     for (const lease of this.leases.values()) {
       if (lease.workspaceId === record.value.id && lease.state === 'active') {
         this.releaseLeaseRecord(lease, 'released');
@@ -712,7 +737,7 @@ export class MemoryBrokerRuntime {
       });
     }
 
-    const result = await executor.call({
+    const context: Omit<BrokerToolCallContext, 'signal' | 'markDispatched'> = {
       principal: { ...principal, capabilities: [...principal.capabilities] },
       connection: { ...connection.value, protocol: { ...connection.value.protocol } },
       capabilities: [...connection.grantedCapabilities],
@@ -726,8 +751,74 @@ export class MemoryBrokerRuntime {
         candidate: { ...binding.candidate },
         instance: { ...binding.instance },
       },
-    }, definition, args);
-    return validateToolResult(definition.name, result);
+    };
+    const actorContext: BrokerToolCallContext = {
+      ...context,
+      signal: new AbortController().signal,
+      markDispatched() {},
+    };
+    const commandTargetId = params.targetId ?? executor.commandTargetId?.(actorContext, definition, args);
+    const actorKey = executor.actorKey?.(actorContext, definition, args) ?? this.defaultActorKey(
+      connection,
+      workspaceRecord?.value.id,
+      commandTargetId,
+    );
+    const request = asJson({
+      name: definition.name,
+      arguments: args,
+      ...(workspaceRecord ? { workspaceId: workspaceRecord.value.id } : {}),
+      ...(lease ? { leaseId: lease.id } : {}),
+      ...(commandTargetId ? { targetId: commandTargetId } : {}),
+    });
+    return asJson(await this.commands.run({
+      principalId: principal.id,
+      connectionId: connection.value.id,
+      ...(workspaceRecord ? { workspaceId: workspaceRecord.value.id } : {}),
+      ...(lease ? { leaseId: lease.id } : {}),
+      ...(commandTargetId ? { targetId: commandTargetId } : {}),
+      ...(params.commandId ? { commandId: params.commandId } : {}),
+      ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
+      ...(params.deadlineMs !== undefined ? { deadlineMs: params.deadlineMs } : {}),
+      method: definition.name,
+      mutating: definition.mutating,
+      cancellation: definition.cancellation,
+      actorKey,
+      request,
+    }, async ({ signal, markDispatched }) => {
+      if (!definition.mutating) markDispatched();
+      const result = await executor.call({ ...context, signal, markDispatched }, definition, args);
+      return validateToolResult(definition.name, result);
+    }));
+  }
+
+  private getCommand(connection: RuntimeConnection, value: unknown): JsonValue {
+    const params = validateCommandAccessParams(value);
+    if (params.workspaceId) this.requireWorkspace(connection, params.workspaceId, true);
+    return asJson(this.commands.get({
+      principalId: connection.value.principalId,
+      commandId: params.commandId,
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+    }));
+  }
+
+  private cancelCommand(connection: RuntimeConnection, value: unknown): JsonValue {
+    const params = validateCommandAccessParams(value);
+    if (params.workspaceId) this.requireWorkspace(connection, params.workspaceId, true);
+    return asJson(this.commands.cancel({
+      principalId: connection.value.principalId,
+      commandId: params.commandId,
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+    }));
+  }
+
+  private defaultActorKey(
+    connection: RuntimeConnection,
+    workspaceId?: BrowserWorkspaceId,
+    targetId?: ControlledTargetId,
+  ): string {
+    if (targetId) return `target:${targetId}`;
+    if (workspaceId) return `workspace:${workspaceId}`;
+    return `connection:${connection.value.id}`;
   }
 
   private async getArtifact(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {

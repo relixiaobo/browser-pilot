@@ -74,12 +74,29 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
   let reason: StdioBridgeResult['reason'] = 'eof';
   let exitCode: StdioBridgeResult['exitCode'] = 0;
   let stopped = false;
+  let framingFailed = false;
+  let outputTail = Promise.resolve();
+  let normalTail = Promise.resolve();
+  let initialization: Promise<void> | undefined;
+  const inFlight = new Set<Promise<void>>();
+
+  const queueWrite = (value: JsonRpcResponse): Promise<void> => {
+    const write = outputTail.then(() => writeLine(options.output, value, maxResultBytes));
+    outputTail = write.catch(() => {});
+    return write;
+  };
 
   const failFraming = async (error: unknown): Promise<void> => {
     exitCode = 1;
     reason = 'protocol_error';
     stopped = true;
-    await writeLine(options.output, errorResponse(null, error), maxResultBytes);
+    framingFailed = true;
+    await queueWrite(errorResponse(null, error));
+  };
+
+  const track = (task: Promise<void>): void => {
+    inFlight.add(task);
+    void task.finally(() => inFlight.delete(task));
   };
 
   const processLine = async (rawLine: Buffer): Promise<void> => {
@@ -96,20 +113,36 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
       return;
     }
 
-    const requestId = 'id' in message ? message.id : undefined;
-    try {
-      const result = await options.backend.call(bridgeSessionId, message.method, message.params);
-      if (requestId !== undefined) {
-        await writeLine(options.output, { jsonrpc: '2.0', id: requestId, result }, maxResultBytes);
+    const dispatch = async (): Promise<void> => {
+      const requestId = 'id' in message ? message.id : undefined;
+      try {
+        const result = await options.backend.call(bridgeSessionId, message.method, message.params);
+        if (requestId !== undefined && reason !== 'protocol_error') {
+          await queueWrite({ jsonrpc: '2.0', id: requestId, result });
+        }
+      } catch (error) {
+        if (requestId !== undefined && reason !== 'protocol_error') {
+          try {
+            await queueWrite(errorResponse(requestId, error));
+          } catch {
+            stopped = true;
+            reason = 'output_closed';
+            exitCode = 1;
+          }
+        }
       }
-      if (message.method === 'shutdown') {
-        stopped = true;
-        reason = 'shutdown';
-      }
-    } catch (error) {
-      if (requestId !== undefined) {
-        await writeLine(options.output, errorResponse(requestId, error), maxResultBytes);
-      }
+    };
+
+    const isCommandControl = message.method === 'commands/get' || message.method === 'commands/cancel';
+    const task = isCommandControl
+      ? (initialization ?? Promise.resolve()).then(dispatch)
+      : normalTail.then(dispatch);
+    if (!isCommandControl) normalTail = task.catch(() => {});
+    if (message.method === 'initialize') initialization = task.catch(() => {});
+    track(task);
+    if (message.method === 'shutdown') {
+      stopped = true;
+      reason = 'shutdown';
     }
   };
 
@@ -151,6 +184,8 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
       if (stopped) break;
     }
     if (!stopped && pending.length > 0) await processLine(pending);
+    if (!framingFailed) await Promise.allSettled([...inFlight]);
+    await outputTail;
   } catch {
     if (!stopped) {
       reason = 'output_closed';

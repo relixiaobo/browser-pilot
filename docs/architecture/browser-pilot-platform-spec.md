@@ -365,6 +365,13 @@ incompatible Broker that has live clients.
 - cancellation and idempotency semantics;
 - sensitivity classification.
 
+`tools/call` returns `{ command, result?, error? }`; each manifest output schema
+describes the inner `result`. Callers may provide an opaque Command ID,
+idempotency key, and relative deadline. `commands/get` and `commands/cancel`
+accept a Command ID plus its Workspace ID when applicable. They authorize by
+ClientPrincipal ownership so a replacement Connection can inspect known state
+without inheriting the original Lease.
+
 The initial controlled tool families are browser discovery/status, Workspace
 and Lease lifecycle, open/observe/read, click/type/keyboard/press,
 capture/upload, tabs/frames, dialogs, auth/cookies, network, events, and
@@ -433,6 +440,10 @@ accepted -> expired
   after dispatch is best-effort and must not claim rollback.
 - **BR-12:** Browser disconnect and reconnect change the BrowserInstance
   connection generation and invalidate sessions and observations.
+
+Normal bridge calls preserve dispatch order. `commands/get` and
+`commands/cancel` may bypass a pending `tools/call`; JSON-RPC clients therefore
+correlate responses by ID rather than relying on response order.
 
 Workspaces, Leases, target mappings, refs, command status, idempotency records,
 and bounded event journals live in Broker memory by default. Broker restart

@@ -95,6 +95,9 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [ ] **A2.4** Serialize commands through a per-target actor and implement
   explicit control transfer.
   - Covers: BR-5, BR-6, NFR-4.
+  - Progress: reads and mutations now share the same per-target actor, while
+    different targets can proceed concurrently. Lease release provides safe
+    reacquisition; an explicit transfer operation remains.
 - [ ] **A2.5** Scope auth, network rules, request journals, downloads, and
   cleanup to their owner.
   - Covers: BR-3, BR-4, AC-3.
@@ -135,9 +138,8 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [ ] **A3.1** Add in-memory Workspace, Lease, target assignment, command,
   idempotency, and bounded journal stores.
   - Covers: FR-5, NFR-2, NFR-5.
-  - Progress: Workspace and Lease stores are live in the daemon with bounded
-    active and terminal record counts. Target assignment, commands,
-    idempotency, and journals remain.
+  - Progress: Workspace, Lease, target assignment, Command, and idempotency
+    stores are bounded and live in daemon memory. Event journals remain.
 - [ ] **A3.2** Implement heartbeat, expiry, release, crash recovery, and
   idempotent cleanup for Workspaces and Leases.
   - Covers: AC-5, NFR-5.
@@ -146,9 +148,13 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   - Progress: Lease heartbeat/expiry/release, EOF cleanup, idle Connection and
     Workspace reclamation, and idempotent Workspace release are implemented.
     Resource-specific target/auth/network cleanup remains to be connected.
-- [ ] **A3.3** Implement command accepted/dispatched/completed,
+- [x] **A3.3** Implement command accepted/dispatched/completed,
   `unknown_outcome`, deadline, cancellation, and duplicate-call behavior.
   - Covers: BR-8 through BR-12, AC-5.
+  - Complete: caller or Broker IDs, Workspace-scoped idempotency, bounded
+    terminal outcomes, pre-dispatch cancellation, best-effort post-dispatch
+    cancellation, deadlines, cached results, and no-replay unknown outcomes are
+    enforced through the public bridge.
 - [ ] **A3.4** Replace dialog auto-acceptance with typed events and explicit
   accept/dismiss commands.
   - Covers: DEC-5, event contract.
@@ -159,17 +165,18 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   separation, initialization, and graceful shutdown.
   - Covers: FR-2, NFR-1.
   - Complete: fatal UTF-8 decoding, bounded line assembly, strict JSON-RPC
-    envelopes, ordered dispatch, notification semantics, stdout-only protocol,
-    EOF cleanup, bridge-only shutdown, and structured framing errors are
-    covered by black-box stream tests.
-- [ ] **A4.2** Implement tool discovery/call, Workspace/Lease lifecycle,
+  envelopes, ordered normal dispatch, command-control bypass, notification
+  semantics, stdout-only protocol, EOF cleanup, bridge-only shutdown, and
+  structured framing errors are covered by black-box stream tests.
+- [x] **A4.2** Implement tool discovery/call, Workspace/Lease lifecycle,
   cancellation, and structured errors.
   - Covers: AC-2, FR-7.
   - Includes direct all-tab inventory and optional Host-configured operation
     removal. There are no browser-access approval methods.
-  - Progress: canonical `tools/list`, validated `tools/call`, Workspace/Lease
+  - Complete: canonical `tools/list`, validated `tools/call`, Workspace/Lease
     lifecycle, all-tab inventory, and production implementation filtering are
-    implemented. Command cancellation remains.
+    implemented. `commands/get/cancel` can overtake a pending call on the same
+    stdio connection and return structured outcomes.
 - [ ] **A4.3** Implement event notifications plus cursor polling and
   `cursor_expired` recovery.
   - Covers: events contract, NFR-3.

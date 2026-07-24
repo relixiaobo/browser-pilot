@@ -30,7 +30,7 @@ stderr line as a diagnostic and never parse it as protocol data.
 The transport is JSON-RPC 2.0 over newline-delimited UTF-8 JSON:
 
 - one complete JSON object per line;
-- requests are processed in input order;
+- ordinary requests are dispatched in input order;
 - request IDs are non-empty strings or safe integers;
 - notifications have no response;
 - the default input limit is 1 MiB per line;
@@ -42,8 +42,9 @@ The transport is JSON-RPC 2.0 over newline-delimited UTF-8 JSON:
 - `shutdown` exits only the bridge process, not the shared per-user daemon.
 
 Hosts must not send concurrent writes that interleave bytes. They may pipeline
-complete lines; responses remain ordered because the bridge dispatches one
-request at a time.
+complete lines and must correlate responses by JSON-RPC ID. `commands/get` and
+`commands/cancel` may overtake a pending `tools/call`, so those responses can
+arrive earlier; all other calls preserve dispatch order.
 
 ## Initialization
 
@@ -70,6 +71,8 @@ The implemented lifecycle surface is:
 initialize
 tools/list
 tools/call
+commands/get
+commands/cancel
 workspaces/create
 workspaces/get
 workspaces/release
@@ -105,7 +108,7 @@ while its bounded tombstone remains available.
 allowed by negotiated capabilities. Call those tools with one uniform envelope:
 
 ```json
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"browser.observe","arguments":{"limit":50},"workspaceId":"workspace:...","leaseId":"lease:...","targetId":"target:..."}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"browser.observe","arguments":{"limit":50},"workspaceId":"workspace:...","leaseId":"lease:...","targetId":"target:...","commandId":"command:...","idempotencyKey":"observe:01J...","deadlineMs":30000}}
 ```
 
 Connection tools omit Workspace fields. Workspace tools require
@@ -113,6 +116,30 @@ Connection tools omit Workspace fields. Workspace tools require
 `targetId` returned by `browser.tabs.list` or `browser.open`. Raw CDP target and
 session IDs are never public inputs. The Broker validates the negotiated
 capability, Lease ownership, tool schema, and target control before dispatch.
+
+Every `tools/call` response is a Command outcome:
+
+```json
+{"command":{"id":"command:...","status":"completed","method":"browser.observe","idempotencyKey":"observe:01J...","acceptedAt":1,"deadlineAt":30001,"dispatchedAt":2,"completedAt":20,"mutating":false},"result":{"workspaceId":"workspace:...","leaseId":"lease:...","targetId":"target:...","url":"https://example.com","observationId":"observation:...","title":"Example","elements":[],"truncated":false,"truncationReasons":[]}}
+```
+
+The manifest's output schema describes the inner `result`. Clients should pass
+a unique `commandId` when they may need cancellation; otherwise the Broker
+generates one. `idempotencyKey` is optional, but retries must reuse it or reuse
+the same caller-supplied `commandId`. Reusing a key for different arguments is
+rejected. A duplicate completed call returns the recorded result; a duplicate
+that is still accepted or dispatched returns its current Command without
+dispatching again.
+
+`commands/get` and `commands/cancel` accept `commandId` plus `workspaceId` for
+Workspace commands. They are authorized by Principal ownership rather than the
+original Lease, so a replacement bridge from the same product instance can
+inspect a known outcome. Cancellation while accepted prevents browser dispatch.
+Cancellation after dispatch is best-effort and sets `cancellationRequested`;
+it never claims rollback. A mutating command whose deadline elapses after
+browser dispatch becomes `unknown_outcome` and is never automatically replayed.
+Known tool failures are stored as a completed Command with a nested JSON-RPC
+`error`; the original call also returns that error normally.
 
 Inventory includes every eligible ordinary user tab plus the Workspace's
 managed tabs. A physical tab can be controlled by only one Lease at a time.
@@ -155,4 +182,5 @@ result validation, and production filtering prevents unwired tools from being
 advertised. The current bridge supports discovery, connect, open, tab inventory,
 observe/read, core actions, cookies, eval, screenshot, PDF, and Artifact access.
 An embedding adapter should not ship against this work-in-progress bridge until
-command outcome recovery, cancellation, and event replay are complete.
+browser reconnect handling, event replay, and the remaining advertised browser
+families are complete.

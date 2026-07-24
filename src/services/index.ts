@@ -1,5 +1,6 @@
 export * from './capture-service.js';
 export * from './artifact-store.js';
+export * from './command-runtime.js';
 export * from './observation-service.js';
 export * from './observation-store.js';
 export * from './input-dispatcher.js';

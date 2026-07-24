@@ -163,6 +163,36 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
   }
 
+  actorKey(
+    context: BrokerToolCallContext,
+    definition: ToolDefinition,
+    argsValue: JsonValue,
+  ): string {
+    const browserId = context.browser.instance.id;
+    const targetId = this.commandTargetId(context, definition, argsValue);
+    if (targetId) return `${browserId}\u0000target\u0000${targetId}`;
+    if (context.workspace) return `${browserId}\u0000workspace\u0000${context.workspace.id}`;
+    return `${browserId}\u0000connection\u0000${context.connection.id}`;
+  }
+
+  commandTargetId(
+    context: BrokerToolCallContext,
+    definition: ToolDefinition,
+    argsValue: JsonValue,
+  ): ControlledTargetId | undefined {
+    if (context.targetId) return context.targetId;
+    const args = asRecord(argsValue);
+    const argumentTarget = args.targetId as ControlledTargetId | undefined;
+    if (argumentTarget) return argumentTarget;
+    if (definition.name !== 'browser.open' || !context.workspace || !context.lease || args.newTarget === true) {
+      return undefined;
+    }
+    return this.registry.activeTarget(
+      { principalId: context.principal.id, workspaceId: context.workspace.id },
+      context.lease.id,
+    )?.id;
+  }
+
   releaseLease(lease: ControlLease): void {
     this.inventory.releaseLease(lease.id);
     this.observations.releaseLease(lease.id);
@@ -214,6 +244,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         context: { workspaceId: workspace.id, browserId: String(args.browserId) },
       });
     }
+    this.markDispatched(context);
     return asJson({
       workspaceId: workspace.id,
       leaseId: lease.id,
@@ -238,6 +269,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     const inventoryContext = this.inventoryContext(context);
     const targetId = args.targetId as ControlledTargetId;
     await this.inventory.refresh(inventoryContext);
+    this.markDispatched(context);
     const resolved = await this.inventory.activate(inventoryContext, targetId);
     const record = this.registry.get(inventoryContext, targetId);
     await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
@@ -247,6 +279,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async closeTab(context: BrokerToolCallContext): Promise<JsonValue> {
     const inventoryContext = this.inventoryContext(context);
     const targetId = this.requireTargetId(context);
+    this.markDispatched(context);
     await this.inventory.close(inventoryContext, targetId);
     this.cleanupTarget(targetId, 'target_closed');
     return asJson({
@@ -268,9 +301,13 @@ export class BrowserToolService implements BrowserToolExecutor {
     await this.inventory.refresh(inventoryContext);
     let targetId = requestedTargetId;
     if (!targetId && !newTarget) targetId = this.inventory.activeTarget(inventoryContext)?.id;
-    if (!targetId) targetId = await this.createManagedTarget(context, inventoryContext);
+    if (!targetId) {
+      this.markDispatched(context);
+      targetId = await this.createManagedTarget(context, inventoryContext);
+    }
 
     const resolved = await this.inventory.resolveForOperation(inventoryContext, targetId, 'page.navigate');
+    this.markDispatched(context);
     this.registry.setActive(inventoryContext, inventoryContext.leaseId, targetId);
     const session = await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
     this.observations.invalidateTarget(targetId, 'navigation');
@@ -323,6 +360,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         target.observationId as ObservationId,
         Number(target.ref),
       );
+      this.markDispatched(context);
       return this.runAction(context, targetId, session, observation, service => service.click(
         { kind: 'ref', ref: String(target.ref) },
         {
@@ -331,6 +369,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         },
       ));
     }
+    this.markDispatched(context);
     return this.runAction(context, targetId, session, undefined, service => service.click({
       kind: 'coordinates',
       x: Number(target.x),
@@ -351,6 +390,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       args.observationId as ObservationId,
       Number(args.ref),
     );
+    this.markDispatched(context);
     return this.runInputAction(context, targetId, session, observation, service => service.type(
       String(args.ref),
       args.text as string,
@@ -365,6 +405,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async keyboard(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.interact');
+    this.markDispatched(context);
     return this.runInputAction(context, targetId, session, undefined, service => service.keyboard(
       args.text as string,
       {
@@ -380,6 +421,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async press(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.interact');
+    this.markDispatched(context);
     return this.runAction(context, targetId, session, undefined, service => service.press(args.key as string));
   }
 
@@ -466,6 +508,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async evaluate(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'developer.eval');
+    this.markDispatched(context);
     const { result, exceptionDetails } = await this.transport.send('Runtime.evaluate', {
       expression: args.expression,
       returnByValue: true,
@@ -751,6 +794,13 @@ export class BrowserToolService implements BrowserToolExecutor {
   private requireTargetId(context: BrokerToolCallContext): ControlledTargetId {
     if (!context.targetId) throw new BrowserPilotError('internal_error', 'Browser tool is missing target context');
     return context.targetId;
+  }
+
+  private markDispatched(context: BrokerToolCallContext): void {
+    if (context.signal.aborted) {
+      throw new BrowserPilotError('command_cancelled', 'Command was cancelled before browser dispatch');
+    }
+    context.markDispatched();
   }
 
   private async createArtifact(

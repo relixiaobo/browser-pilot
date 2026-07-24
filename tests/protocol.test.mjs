@@ -9,6 +9,8 @@ import {
   negotiateCapabilities,
   negotiateProtocol,
   parseJsonRpcMessage,
+  validateCommandAccessParams,
+  validateToolCallParams,
   validateToolArguments,
   validateToolResult,
   validateInitializeParams,
@@ -133,6 +135,35 @@ test('tool arguments are validated from the same schemas returned by the manifes
   assert.throws(
     () => validateToolArguments('browser.tabs.list', { scope: 'all_authorized' }),
     error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+  );
+});
+
+test('command envelopes validate caller IDs, idempotency keys, and deadlines', () => {
+  const params = {
+    name: 'browser.observe',
+    arguments: { limit: 10 },
+    workspaceId: 'workspace:123',
+    leaseId: 'lease:123',
+    targetId: 'target:123',
+    commandId: 'command:123',
+    idempotencyKey: 'observe:123',
+    deadlineMs: 30_000,
+  };
+  assert.deepEqual(validateToolCallParams(params), params);
+  assert.deepEqual(validateCommandAccessParams({
+    workspaceId: 'workspace:123',
+    commandId: 'command:123',
+  }), {
+    workspaceId: 'workspace:123',
+    commandId: 'command:123',
+  });
+  assert.throws(
+    () => validateToolCallParams({ ...params, deadlineMs: 0 }),
+    error => error.code === 'invalid_argument' && error.context.field === 'deadlineMs',
+  );
+  assert.throws(
+    () => validateToolCallParams({ ...params, commandId: 'not-a-command' }),
+    error => error.code === 'invalid_argument' && error.context.field === 'commandId',
   );
 });
 

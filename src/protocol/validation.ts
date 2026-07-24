@@ -5,6 +5,7 @@ import {
   type ArtifactAccessParams,
   type ArtifactExportParams,
   type CapabilityNegotiation,
+  type CommandAccessParams,
   type InitializeParams,
   type LeaseCreateParams,
   type LeaseHeartbeatParams,
@@ -32,6 +33,7 @@ const WORKSPACE_ID_PATTERN = /^workspace:[A-Za-z0-9._:-]+$/;
 const LEASE_ID_PATTERN = /^lease:[A-Za-z0-9._:-]+$/;
 const TARGET_ID_PATTERN = /^target:[A-Za-z0-9._:-]+$/;
 const ARTIFACT_ID_PATTERN = /^artifact:[A-Za-z0-9._:-]+$/;
+const COMMAND_ID_PATTERN = /^command:[A-Za-z0-9._:-]+$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -208,12 +210,27 @@ export function validateShutdownParams(value: unknown): Record<string, never> {
 
 export function validateToolCallParams(value: unknown): ToolCallParams {
   if (!isRecord(value)) throw invalidArgument('tools/call params must be an object', 'params');
-  assertOnlyKeys(value, ['name', 'arguments', 'workspaceId', 'leaseId', 'targetId']);
+  assertOnlyKeys(value, [
+    'name',
+    'arguments',
+    'workspaceId',
+    'leaseId',
+    'targetId',
+    'commandId',
+    'idempotencyKey',
+    'deadlineMs',
+  ]);
   if (!Object.hasOwn(value, 'arguments') || !isJsonValue(value.arguments)) {
     throw invalidArgument('arguments must be valid JSON', 'arguments');
   }
   if (!isRecord(value.arguments)) {
     throw invalidArgument('arguments must be a JSON object', 'arguments');
+  }
+  if (
+    value.deadlineMs !== undefined &&
+    (!Number.isSafeInteger(value.deadlineMs) || Number(value.deadlineMs) < 1 || Number(value.deadlineMs) > 300_000)
+  ) {
+    throw invalidArgument('deadlineMs must be an integer from 1 through 300000', 'deadlineMs');
   }
   return {
     name: requireString(value, 'name', { maxLength: 256 }),
@@ -226,6 +243,24 @@ export function validateToolCallParams(value: unknown): ToolCallParams {
     } : {}),
     ...(value.targetId !== undefined ? {
       targetId: validateOpaqueId(value, 'targetId', TARGET_ID_PATTERN) as ToolCallParams['targetId'],
+    } : {}),
+    ...(value.commandId !== undefined ? {
+      commandId: validateOpaqueId(value, 'commandId', COMMAND_ID_PATTERN) as ToolCallParams['commandId'],
+    } : {}),
+    ...(value.idempotencyKey !== undefined ? {
+      idempotencyKey: requireString(value, 'idempotencyKey', { maxLength: 256 }),
+    } : {}),
+    ...(value.deadlineMs !== undefined ? { deadlineMs: Number(value.deadlineMs) } : {}),
+  };
+}
+
+export function validateCommandAccessParams(value: unknown): CommandAccessParams {
+  if (!isRecord(value)) throw invalidArgument('Command params must be an object', 'params');
+  assertOnlyKeys(value, ['commandId', 'workspaceId']);
+  return {
+    commandId: validateOpaqueId(value, 'commandId', COMMAND_ID_PATTERN) as CommandAccessParams['commandId'],
+    ...(value.workspaceId !== undefined ? {
+      workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as CommandAccessParams['workspaceId'],
     } : {}),
   };
 }

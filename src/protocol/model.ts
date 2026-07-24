@@ -161,6 +161,14 @@ export interface ToolCallParams {
   workspaceId?: BrowserWorkspaceId;
   leaseId?: ControlLeaseId;
   targetId?: ControlledTargetId;
+  commandId?: CommandId;
+  idempotencyKey?: string;
+  deadlineMs?: number;
+}
+
+export interface CommandAccessParams {
+  commandId: CommandId;
+  workspaceId?: BrowserWorkspaceId;
 }
 
 export interface ArtifactAccessParams {
@@ -336,9 +344,9 @@ export type CommandStatus =
 
 export interface CommandDescriptor {
   id: CommandId;
-  workspaceId: BrowserWorkspaceId;
-  leaseId: ControlLeaseId;
-  targetId: ControlledTargetId;
+  workspaceId?: BrowserWorkspaceId;
+  leaseId?: ControlLeaseId;
+  targetId?: ControlledTargetId;
   idempotencyKey: string;
   method: string;
   mutating: boolean;
@@ -347,6 +355,13 @@ export interface CommandDescriptor {
   deadlineAt: number;
   dispatchedAt?: number;
   completedAt?: number;
+  cancellationRequested?: boolean;
+}
+
+export interface CommandOutcome {
+  command: CommandDescriptor;
+  result?: JsonValue;
+  error?: JsonRpcErrorObject;
 }
 
 export type Sensitivity = 'public' | 'browser_data' | 'credential' | 'user_file';

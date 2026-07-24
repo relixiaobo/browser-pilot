@@ -202,14 +202,16 @@ async function createClient(runtime, bridge, clientId, instanceId) {
   return { bridge, workspace, managedTabSet, lease };
 }
 
-function tool(runtime, client, name, args, targetId) {
-  return runtime.call(client.bridge, 'tools/call', {
+async function tool(runtime, client, name, args, targetId) {
+  const outcome = await runtime.call(client.bridge, 'tools/call', {
     name,
     arguments: args,
     workspaceId: client.workspace.id,
     leaseId: client.lease.id,
     ...(targetId ? { targetId } : {}),
   });
+  assert.equal(outcome.command.status, 'completed');
+  return outcome.result;
 }
 
 test('production tools/list exposes only fully wired Browser tools', async () => {

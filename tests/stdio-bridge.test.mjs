@@ -155,3 +155,39 @@ test('stdio bridge replaces an oversized result with a bounded structured error'
   assert.equal(execution.messages[0].error.data.code, 'result_too_large');
   assert.equal(execution.messages[0].id, 1);
 });
+
+test('command control bypasses a pending tool call on the same stdio bridge', async () => {
+  let releaseTool;
+  const order = [];
+  const execution = await execute([
+    `${JSON.stringify(initializeMessage('init'))}\n`,
+    `${JSON.stringify({ jsonrpc: '2.0', id: 'tool', method: 'tools/call', params: {} })}\n`,
+    `${JSON.stringify({ jsonrpc: '2.0', id: 'cancel', method: 'commands/cancel', params: {} })}\n`,
+  ], {
+    backend: {
+      async call(_bridgeSessionId, method) {
+        order.push(`${method}:start`);
+        if (method === 'initialize') return { initialized: true };
+        if (method === 'tools/call') {
+          await new Promise(resolve => { releaseTool = resolve; });
+          order.push('tools/call:end');
+          return { command: { status: 'cancelled' } };
+        }
+        if (method === 'commands/cancel') {
+          releaseTool();
+          return { command: { status: 'cancelled' } };
+        }
+        throw new Error(`Unexpected method: ${method}`);
+      },
+      async disconnect() {},
+    },
+  });
+
+  assert.deepEqual(order, [
+    'initialize:start',
+    'tools/call:start',
+    'commands/cancel:start',
+    'tools/call:end',
+  ]);
+  assert.deepEqual(execution.messages.map(message => message.id), ['init', 'cancel', 'tool']);
+});

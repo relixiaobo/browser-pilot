@@ -215,3 +215,104 @@ test('Broker bounds terminal records and reclaims idle Connections and Workspace
   assert.equal(runtime.stats().activeWorkspaces, 0);
   assert.deepEqual(releasedWorkspaces, [firstWorkspace.workspace.id, secondWorkspace.workspace.id]);
 });
+
+test('Broker commands expose outcomes, deduplicate retries, and cancel queued work', async () => {
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve; });
+  let executions = 0;
+  const runtime = createRuntime({
+    toolExecutor: {
+      supportedTools: ['browser.connect'],
+      actorKey: () => 'browser:test\u0000workspace:test',
+      async call(context) {
+        executions += 1;
+        context.markDispatched();
+        if (executions === 1) {
+          markFirstStarted();
+          await new Promise(resolve => { releaseFirst = resolve; });
+        }
+        return {
+          workspaceId: context.workspace.id,
+          leaseId: context.lease.id,
+          browserInstanceId: context.browser.instance.id,
+          connectionGeneration: context.browser.instance.connectionGeneration,
+          state: 'connected',
+        };
+      },
+    },
+  });
+  await initialize(runtime, 'bridge:commands');
+  const { workspace } = await runtime.call('bridge:commands', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:commands', 'leases/create', { workspaceId: workspace.id });
+  const call = commandId => runtime.call('bridge:commands', 'tools/call', {
+    name: 'browser.connect',
+    arguments: { browserId: 'browser:test' },
+    workspaceId: workspace.id,
+    leaseId: lease.id,
+    commandId,
+  });
+
+  const first = call('command:first');
+  await firstStarted;
+  const second = call('command:second');
+  const secondRejected = assert.rejects(second, error => (
+    error.code === 'command_cancelled' && error.context.commandId === 'command:second'
+  ));
+  const cancelled = await runtime.call('bridge:commands', 'commands/cancel', {
+    workspaceId: workspace.id,
+    commandId: 'command:second',
+  });
+  assert.equal(cancelled.command.status, 'cancelled');
+  await secondRejected;
+
+  releaseFirst();
+  const completed = await first;
+  assert.equal(completed.command.status, 'completed');
+  assert.equal(completed.result.state, 'connected');
+  const replayed = await call('command:first');
+  assert.equal(replayed.result.state, 'connected');
+  assert.equal(executions, 1);
+
+  const queried = await runtime.call('bridge:commands', 'commands/get', {
+    workspaceId: workspace.id,
+    commandId: 'command:first',
+  });
+  assert.equal(queried.command.status, 'completed');
+  assert.equal(queried.result.browserInstanceId, 'browser-instance:test');
+});
+
+test('Broker records unknown outcomes after a dispatched browser disconnect', async () => {
+  const runtime = createRuntime({
+    toolExecutor: {
+      supportedTools: ['browser.connect'],
+      async call(context) {
+        context.markDispatched();
+        const error = new Error('connection lost');
+        error.code = 'browser_disconnected';
+        error.retryable = true;
+        throw error;
+      },
+    },
+  });
+  await initialize(runtime, 'bridge:unknown');
+  const { workspace } = await runtime.call('bridge:unknown', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:unknown', 'leases/create', { workspaceId: workspace.id });
+
+  await assert.rejects(
+    () => runtime.call('bridge:unknown', 'tools/call', {
+      name: 'browser.connect',
+      arguments: { browserId: 'browser:test' },
+      workspaceId: workspace.id,
+      leaseId: lease.id,
+      commandId: 'command:unknown',
+    }),
+    error => error.code === 'unknown_outcome' && error.context.commandId === 'command:unknown',
+  );
+  const queried = await runtime.call('bridge:unknown', 'commands/get', {
+    workspaceId: workspace.id,
+    commandId: 'command:unknown',
+  });
+  assert.equal(queried.command.status, 'unknown_outcome');
+  assert.equal(queried.error.data.code, 'unknown_outcome');
+});
