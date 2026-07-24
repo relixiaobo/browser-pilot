@@ -33,11 +33,14 @@ The transport is JSON-RPC 2.0 over newline-delimited UTF-8 JSON:
 - ordinary requests are dispatched in input order;
 - request IDs are non-empty strings or safe integers;
 - notifications have no response;
-- the default input limit is 1 MiB per line;
-- the default result limit is 4 MiB;
+- the default input limit is 1 MiB per line and the default result limit is
+  4 MiB; protocol 1.1 clients may negotiate lower per-Connection limits;
 - invalid JSON, invalid UTF-8, invalid envelopes, and oversized input terminate
   that bridge process after an error response with `id: null` when possible;
 - output observes stream backpressure;
+- at most 256 ordinary calls and 16 out-of-band control calls are pending per
+  bridge process; saturation returns retryable `result_too_large` without
+  dispatching the rejected call;
 - EOF releases every Lease owned by that bridge Connection;
 - `shutdown` exits only the bridge process, not the shared per-user daemon.
 
@@ -52,13 +55,25 @@ exception because a browser dialog can pause the command that caused it.
 `initialize` must be the first successful request on a bridge Connection:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"client":{"id":"com.example.agent","name":"Example Agent","version":"2.0.0","instanceId":"install:01J..."},"protocol":{"min":{"major":1,"minor":0},"max":{"major":1,"minor":0}},"requestedCapabilities":["browser.control","workspace.manage","observation.read","action.input","artifact.read","event.read"],"launchMode":"embedded"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"client":{"id":"com.example.agent","name":"Example Agent","version":"2.0.0","instanceId":"install:01J..."},"protocol":{"min":{"major":1,"minor":1},"max":{"major":1,"minor":1}},"requestedCapabilities":["browser.control","workspace.manage","observation.read","action.input","artifact.read","event.read"],"launchMode":"embedded","limits":{"maxMessageBytes":1048576,"maxResultBytes":4194304}}}
 ```
 
 The response returns the selected protocol, supported and granted
 capabilities, executable and service versions, a process-stable Broker
 identity, a Connection ID, browser candidates, and negotiated limits. Branch
 on structured `error.data.code`; never branch on English error messages.
+
+Protocol 1.0 uses the service limits returned by `initialize`. Protocol 1.1 may
+send `limits.maxMessageBytes` and `limits.maxResultBytes`; each must be from
+64 KiB through 1 GiB. The selected value is the smaller client/service maximum
+and applies only to that bridge Connection. `maxArtifactBytes` and
+`eventJournalSize` remain service resource limits, not client preferences.
+
+The initialize request and response use the service's fixed bootstrap limits.
+The bridge switches limits only after the successful response has been written,
+and waits for that switch before parsing a pipelined next line. Oversized
+responses become `result_too_large`; oversized best-effort notifications are
+dropped and remain recoverable through `events/poll`.
 
 An already-running daemon from an older executable is not replaced while it
 may have live clients. Initialization returns `protocol_incompatible` with a

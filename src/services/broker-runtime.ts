@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   BrowserPilotError,
   invalidArgument,
+  protocolIncompatible,
 } from '../protocol/errors.js';
 import {
   CAPABILITIES,
@@ -37,7 +38,9 @@ import {
   type ToolDefinition,
 } from '../protocol/tools.js';
 import {
+  MIN_NEGOTIATED_TRANSPORT_BYTES,
   negotiateCapabilities,
+  negotiateProtocolLimits,
   negotiateProtocol,
   validateArtifactAccessParams,
   validateArtifactExportParams,
@@ -161,6 +164,7 @@ interface RuntimeConnection {
   value: ClientConnection;
   bridgeSessionId: string;
   grantedCapabilities: Capability[];
+  limits: ProtocolLimits;
   notifications: JsonRpcNotification[];
   notificationWaiter?: NotificationWaiter;
 }
@@ -276,6 +280,12 @@ export class MemoryBrokerRuntime {
     }
     if (Object.values(this.limits).some(limit => !Number.isSafeInteger(limit) || limit <= 0)) {
       throw new Error('Invalid Broker protocol limits');
+    }
+    if (
+      this.limits.maxMessageBytes < MIN_NEGOTIATED_TRANSPORT_BYTES ||
+      this.limits.maxResultBytes < MIN_NEGOTIATED_TRANSPORT_BYTES
+    ) {
+      throw new Error(`Broker transport limits must be at least ${MIN_NEGOTIATED_TRANSPORT_BYTES} bytes`);
     }
     const positiveIntegerOptions = [
       this.maxWorkspacesPerPrincipal,
@@ -465,7 +475,13 @@ export class MemoryBrokerRuntime {
       });
     }
     const protocol = negotiateProtocol(params.protocol);
+    if (params.limits && (protocol.major < 1 || (protocol.major === 1 && protocol.minor < 1))) {
+      throw protocolIncompatible('Transport limit negotiation requires protocol 1.1 or newer', {
+        selectedProtocol: `${protocol.major}.${protocol.minor}`,
+      });
+    }
     const capabilities = negotiateCapabilities(params.requestedCapabilities, this.allowedCapabilities);
+    const limits = negotiateProtocolLimits(params.limits, this.limits);
     const principal = this.getOrCreatePrincipal(params.client);
     const now = this.now();
     const connectionId = this.nextId('connection', this.connectionsById) as ClientConnectionId;
@@ -486,12 +502,13 @@ export class MemoryBrokerRuntime {
       brokerProcessIdentity: this.options.brokerProcessIdentity,
       connectionId,
       browsers: this.browserBindings.map(binding => ({ ...binding.candidate })),
-      limits: { ...this.limits },
+      limits: { ...limits },
     };
     const connection: RuntimeConnection = {
       value: connectionValue,
       bridgeSessionId,
       grantedCapabilities: [...capabilities.granted],
+      limits,
       notifications: [],
     };
     this.connectionsByBridge.set(bridgeSessionId, connection);
@@ -926,7 +943,7 @@ export class MemoryBrokerRuntime {
         continue;
       }
       connection.notifications.push(structuredClone(notification));
-      if (connection.notifications.length > this.limits.eventJournalSize) {
+      if (connection.notifications.length > connection.limits.eventJournalSize) {
         connection.notifications.shift();
       }
     }

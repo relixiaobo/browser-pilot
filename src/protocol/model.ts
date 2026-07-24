@@ -29,6 +29,7 @@ export interface ProtocolRange {
 
 export const SUPPORTED_PROTOCOL_VERSIONS = [
   { major: 1, minor: 0 },
+  { major: 1, minor: 1 },
 ] as const satisfies readonly ProtocolVersion[];
 
 export const CAPABILITIES = [
@@ -59,11 +60,17 @@ export interface ClientIdentity {
 
 export type LaunchMode = 'one-shot' | 'embedded';
 
+export interface TransportLimitPreferences {
+  maxMessageBytes?: number;
+  maxResultBytes?: number;
+}
+
 export interface InitializeParams {
   client: ClientIdentity;
   protocol: ProtocolRange;
   requestedCapabilities: string[];
   launchMode: LaunchMode;
+  limits?: TransportLimitPreferences;
 }
 
 export interface CapabilityNegotiation {

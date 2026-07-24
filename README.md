@@ -113,9 +113,10 @@ launching the bridge. Bulk cleanup remains limited to managed tabs, and user
 tabs remain open when a session ends.
 
 The `browser-pilot bridge --stdio` transport, Broker lifecycle, browser tool
-dispatch, event replay, and protected Artifacts are implemented. Embedded
-products should still use the documented release gate while browser reconnect,
-resource isolation, discovery, and conformance work remains in progress.
+dispatch, event replay, protected Artifacts, and protocol 1.1 transport limit
+negotiation are implemented. Embedded products should still use the documented
+release gate while browser reconnect, resource isolation, discovery, and
+conformance work remains in progress.
 
 ## Commands
 

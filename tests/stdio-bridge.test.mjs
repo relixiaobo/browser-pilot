@@ -164,6 +164,55 @@ test('stdio bridge replaces an oversized result with a bounded structured error'
   assert.equal(execution.messages[0].id, 1);
 });
 
+test('stdio bridge applies negotiated limits to pipelined input and later results', async () => {
+  const initialize = initializeMessage('init');
+  initialize.params.protocol = {
+    min: { major: 1, minor: 1 },
+    max: { major: 1, minor: 1 },
+  };
+  initialize.params.limits = { maxMessageBytes: 256, maxResultBytes: 512 };
+  let calls = 0;
+  const inbound = await execute([
+    `${JSON.stringify(initialize)}\n${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'oversized',
+      method: 'large-input',
+      params: { value: 'x'.repeat(400) },
+    })}\n`,
+  ], {
+    backend: {
+      async call(_bridgeSessionId, method) {
+        calls += 1;
+        if (method === 'initialize') {
+          return { limits: { maxMessageBytes: 256, maxResultBytes: 512 } };
+        }
+        throw new Error('Oversized pipelined input was dispatched');
+      },
+      async disconnect() {},
+    },
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(inbound.messages.map(message => message.id), ['init', null]);
+  assert.equal(inbound.messages[1].error.data.code, 'result_too_large');
+
+  const outbound = await execute([
+    `${JSON.stringify(initialize)}\n`,
+    `${JSON.stringify({ jsonrpc: '2.0', id: 'large', method: 'large-result' })}\n`,
+  ], {
+    backend: {
+      async call(_bridgeSessionId, method) {
+        if (method === 'initialize') {
+          return { limits: { maxMessageBytes: 256, maxResultBytes: 512 } };
+        }
+        return { value: 'x'.repeat(2000) };
+      },
+      async disconnect() {},
+    },
+  });
+  assert.equal(outbound.messages[1].id, 'large');
+  assert.equal(outbound.messages[1].error.data.code, 'result_too_large');
+});
+
 test('command control bypasses a pending tool call on the same stdio bridge', async () => {
   let releaseTool;
   const order = [];
@@ -198,6 +247,39 @@ test('command control bypasses a pending tool call on the same stdio bridge', as
     'tools/call:end',
   ]);
   assert.deepEqual(execution.messages.map(message => message.id), ['init', 'cancel', 'tool']);
+});
+
+test('stdio bridge bounds queued calls without starving out-of-band control', async () => {
+  let releaseTool;
+  const execution = await execute([
+    `${JSON.stringify(initializeMessage('init'))}\n`,
+    `${JSON.stringify({ jsonrpc: '2.0', id: 'blocked', method: 'tools/call', params: {} })}\n`,
+    `${JSON.stringify({ jsonrpc: '2.0', id: 'overflow', method: 'tools/list', params: {} })}\n`,
+    `${JSON.stringify({ jsonrpc: '2.0', id: 'cancel', method: 'commands/cancel', params: {} })}\n`,
+  ], {
+    backend: {
+      async call(_bridgeSessionId, method) {
+        if (method === 'initialize') return { initialized: true };
+        if (method === 'tools/call') {
+          await new Promise(resolve => { releaseTool = resolve; });
+          return { command: { status: 'cancelled' } };
+        }
+        if (method === 'commands/cancel') {
+          releaseTool();
+          return { command: { status: 'cancelled' } };
+        }
+        throw new Error(`Queue overflow dispatched unexpectedly: ${method}`);
+      },
+      async disconnect() {},
+    },
+    bridgeOptions: { maxPendingCalls: 1, maxOutOfBandCalls: 1 },
+  });
+
+  const byId = new Map(execution.messages.map(message => [message.id, message]));
+  assert.equal(byId.get('overflow').error.data.code, 'result_too_large');
+  assert.equal(byId.get('overflow').error.data.retryable, true);
+  assert.equal(byId.get('cancel').result.command.status, 'cancelled');
+  assert.equal(byId.get('blocked').result.command.status, 'cancelled');
 });
 
 test('stdio bridge emits backend events as JSON-RPC notifications after initialize', async () => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MemoryBrokerRuntime } from '../dist/services.js';
+import { DEFAULT_PROTOCOL_LIMITS, MemoryBrokerRuntime } from '../dist/services.js';
 
 function createRuntime(options = {}) {
   return new MemoryBrokerRuntime({
@@ -35,7 +35,7 @@ function initialize(runtime, bridgeSessionId, overrides = {}) {
       instanceId: 'instance:one',
       ...overrides.client,
     },
-    protocol: {
+    protocol: overrides.protocol ?? {
       min: { major: 1, minor: 0 },
       max: { major: 1, minor: 0 },
     },
@@ -46,6 +46,7 @@ function initialize(runtime, bridgeSessionId, overrides = {}) {
       'artifact.read',
     ],
     launchMode: 'embedded',
+    ...(overrides.limits ? { limits: overrides.limits } : {}),
   });
 }
 
@@ -74,6 +75,40 @@ test('Broker initializes one connection and filters the canonical tool manifest'
     activeWorkspaces: 0,
     activeLeases: 0,
   });
+});
+
+test('Broker negotiates protocol 1.1 transport limits per Connection', async () => {
+  const runtime = createRuntime();
+  const constrained = await initialize(runtime, 'bridge:constrained', {
+    protocol: {
+      min: { major: 1, minor: 1 },
+      max: { major: 1, minor: 1 },
+    },
+    limits: {
+      maxMessageBytes: 128 * 1024,
+      maxResultBytes: 256 * 1024,
+    },
+  });
+  assert.deepEqual(constrained.protocol, { major: 1, minor: 1 });
+  assert.deepEqual(constrained.limits, {
+    ...DEFAULT_PROTOCOL_LIMITS,
+    maxMessageBytes: 128 * 1024,
+    maxResultBytes: 256 * 1024,
+  });
+
+  const compatibility = await initialize(runtime, 'bridge:compatibility', {
+    client: { instanceId: 'instance:compatibility' },
+  });
+  assert.deepEqual(compatibility.protocol, { major: 1, minor: 0 });
+  assert.deepEqual(compatibility.limits, DEFAULT_PROTOCOL_LIMITS);
+
+  await assert.rejects(
+    initialize(runtime, 'bridge:invalid-limits-version', {
+      client: { instanceId: 'instance:invalid-limits-version' },
+      limits: { maxMessageBytes: 128 * 1024 },
+    }),
+    error => error.code === 'protocol_incompatible',
+  );
 });
 
 test('Workspaces belong to a Principal while Leases belong to a live Connection', async () => {

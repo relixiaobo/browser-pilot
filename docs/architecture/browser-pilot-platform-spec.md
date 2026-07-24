@@ -343,7 +343,8 @@ notification loss, or backpressure. Notifications and responses may interleave.
 ### Initialization
 
 The client sends its product identity, instance identity, supported protocol
-range, requested capabilities, and launch mode. The response includes:
+range, requested capabilities, launch mode, and optional protocol 1.1 transport
+limits. The response includes:
 
 - service and executable versions;
 - selected protocol version;
@@ -355,6 +356,15 @@ range, requested capabilities, and launch mode. The response includes:
 Initialization must fail with a structured incompatibility error when no
 protocol overlap exists. A newer executable must not silently replace an
 incompatible Broker that has live clients.
+
+Protocol 1.0 clients use the service transport ceilings. Protocol 1.1 clients
+may declare maximum message and result byte sizes; the Broker selects the lower
+client/service value per Connection. Initialization itself uses fixed bootstrap
+ceilings, and pipelined messages after initialize are not parsed until the
+selected limits take effect. Artifact and journal capacities remain service
+resource limits. Pending ordinary and out-of-band control calls have separate
+bounds so overload cannot create an unbounded Promise queue or prevent dialog
+and cancellation control from overtaking a blocked action.
 
 ### Tool Contract
 

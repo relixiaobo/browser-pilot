@@ -19,7 +19,9 @@ import {
   type JsonValue,
   type LaunchMode,
   type ProtocolRange,
+  type ProtocolLimits,
   type ProtocolVersion,
+  type TransportLimitPreferences,
   type ToolCallParams,
   type WorkspaceCreateParams,
   type WorkspaceGetParams,
@@ -36,6 +38,8 @@ const TARGET_ID_PATTERN = /^target:[A-Za-z0-9._:-]+$/;
 const ARTIFACT_ID_PATTERN = /^artifact:[A-Za-z0-9._:-]+$/;
 const COMMAND_ID_PATTERN = /^command:[A-Za-z0-9._:-]+$/;
 const EVENT_CURSOR_PATTERN = /^cursor:(0|[1-9][0-9]{0,15})$/;
+export const MIN_NEGOTIATED_TRANSPORT_BYTES = 64 * 1024;
+const MAX_DECLARED_TRANSPORT_BYTES = 1024 * 1024 * 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -150,9 +154,44 @@ export function negotiateCapabilities(
   return { granted, denied, unsupported };
 }
 
+export function negotiateProtocolLimits(
+  requested: TransportLimitPreferences | undefined,
+  supported: ProtocolLimits,
+): ProtocolLimits {
+  return {
+    maxMessageBytes: Math.min(requested?.maxMessageBytes ?? supported.maxMessageBytes, supported.maxMessageBytes),
+    maxResultBytes: Math.min(requested?.maxResultBytes ?? supported.maxResultBytes, supported.maxResultBytes),
+    maxArtifactBytes: supported.maxArtifactBytes,
+    eventJournalSize: supported.eventJournalSize,
+  };
+}
+
+function parseTransportLimitPreferences(value: unknown): TransportLimitPreferences | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw invalidArgument('limits must be an object', 'limits');
+  assertOnlyKeys(value, ['maxMessageBytes', 'maxResultBytes'], 'limits');
+  const result: TransportLimitPreferences = {};
+  for (const key of ['maxMessageBytes', 'maxResultBytes'] as const) {
+    const limit = value[key];
+    if (limit === undefined) continue;
+    if (
+      !Number.isSafeInteger(limit) ||
+      (limit as number) < MIN_NEGOTIATED_TRANSPORT_BYTES ||
+      (limit as number) > MAX_DECLARED_TRANSPORT_BYTES
+    ) {
+      throw invalidArgument(
+        `${key} must be a safe integer from ${MIN_NEGOTIATED_TRANSPORT_BYTES} through ${MAX_DECLARED_TRANSPORT_BYTES}`,
+        `limits.${key}`,
+      );
+    }
+    result[key] = limit as number;
+  }
+  return result;
+}
+
 export function validateInitializeParams(value: unknown): InitializeParams {
   if (!isRecord(value)) throw invalidArgument('initialize params must be an object', 'params');
-  assertOnlyKeys(value, ['client', 'protocol', 'requestedCapabilities', 'launchMode']);
+  assertOnlyKeys(value, ['client', 'protocol', 'requestedCapabilities', 'launchMode', 'limits']);
   if (!isRecord(value.client)) throw invalidArgument('client must be an object', 'client');
   assertOnlyKeys(value.client, ['id', 'name', 'version', 'instanceId'], 'client');
 
@@ -176,6 +215,7 @@ export function validateInitializeParams(value: unknown): InitializeParams {
     protocol: parseProtocolRange(value.protocol),
     requestedCapabilities: [...new Set(requested as string[])],
     launchMode: launchMode as LaunchMode,
+    ...(value.limits !== undefined ? { limits: parseTransportLimitPreferences(value.limits) } : {}),
   };
 }
 

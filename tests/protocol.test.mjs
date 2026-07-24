@@ -7,6 +7,7 @@ import {
   assertToolManifest,
   getToolManifest,
   negotiateCapabilities,
+  negotiateProtocolLimits,
   negotiateProtocol,
   parseJsonRpcMessage,
   validateCommandAccessParams,
@@ -30,6 +31,10 @@ const initializeParams = {
   },
   requestedCapabilities: ['browser.control', 'developer.eval', 'future.capability'],
   launchMode: 'embedded',
+  limits: {
+    maxMessageBytes: 128 * 1024,
+    maxResultBytes: 512 * 1024,
+  },
 };
 
 test('validates initialize parameters without Agent-specific concepts', () => {
@@ -50,6 +55,30 @@ test('selects the highest compatible protocol version', () => {
       [{ major: 1, minor: 0 }, { major: 1, minor: 2 }, { major: 2, minor: 1 }],
     ),
     { major: 1, minor: 2 },
+  );
+});
+
+test('validates and negotiates transport limits without changing resource limits', () => {
+  assert.deepEqual(
+    negotiateProtocolLimits(initializeParams.limits, {
+      maxMessageBytes: 1024 * 1024,
+      maxResultBytes: 256 * 1024,
+      maxArtifactBytes: 100 * 1024 * 1024,
+      eventJournalSize: 1000,
+    }),
+    {
+      maxMessageBytes: 128 * 1024,
+      maxResultBytes: 256 * 1024,
+      maxArtifactBytes: 100 * 1024 * 1024,
+      eventJournalSize: 1000,
+    },
+  );
+  assert.throws(
+    () => validateInitializeParams({
+      ...initializeParams,
+      limits: { maxMessageBytes: 1024 },
+    }),
+    error => error.code === 'invalid_argument' && error.context?.field === 'limits.maxMessageBytes',
   );
 });
 

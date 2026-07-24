@@ -187,12 +187,15 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   - Complete: bounded Workspace journals, explicit initial cursors, ordered
     replay, `cursor_expired` bounds, Principal isolation, best-effort stdio
     notifications, and daemon notification long-polling are implemented.
-- [ ] **A4.4** Add protocol backpressure, negotiated message limits, and
+- [x] **A4.4** Add protocol backpressure, negotiated message limits, and
   malformed-client isolation.
   - Covers: NFR-1, NFR-5.
-  - Progress: stdin and stdout backpressure, 1 MiB messages, 4 MiB results,
-    oversized-result replacement, and bounded Broker registries are
-    implemented. Per-connection limit negotiation remains.
+  - Complete: protocol 1.1 negotiates per-Connection message/result ceilings;
+    bootstrap and pipelined framing apply them deterministically. Input/output
+    backpressure, bounded ordinary/control call queues, oversized-result
+    replacement, notification dropping with cursor recovery, and bridge-local
+    malformed-client termination prevent one client from exhausting or
+    terminating another.
 
 ### A5. Deliver secure Artifacts
 

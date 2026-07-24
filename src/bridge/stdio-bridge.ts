@@ -31,6 +31,8 @@ export interface StdioBridgeOptions {
   bridgeSessionId?: string;
   maxMessageBytes?: number;
   maxResultBytes?: number;
+  maxPendingCalls?: number;
+  maxOutOfBandCalls?: number;
 }
 
 export interface StdioBridgeResult {
@@ -73,6 +75,25 @@ async function writeLine(
   if (!output.write(`${serialized}\n`)) await once(output, 'drain');
 }
 
+function negotiatedTransportLimits(
+  value: JsonValue,
+  ceilings: { maxMessageBytes: number; maxResultBytes: number },
+): { maxMessageBytes: number; maxResultBytes: number } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const limits = value.limits;
+  if (!limits || typeof limits !== 'object' || Array.isArray(limits)) return undefined;
+  if (
+    !Number.isSafeInteger(limits.maxMessageBytes) ||
+    !Number.isSafeInteger(limits.maxResultBytes) ||
+    (limits.maxMessageBytes as number) <= 0 ||
+    (limits.maxResultBytes as number) <= 0
+  ) return undefined;
+  return {
+    maxMessageBytes: Math.min(limits.maxMessageBytes as number, ceilings.maxMessageBytes),
+    maxResultBytes: Math.min(limits.maxResultBytes as number, ceilings.maxResultBytes),
+  };
+}
+
 function decodeLine(bytes: Buffer): string {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -86,8 +107,18 @@ function decodeLine(bytes: Buffer): string {
 
 export async function runStdioBridge(options: StdioBridgeOptions): Promise<StdioBridgeResult> {
   const bridgeSessionId = options.bridgeSessionId ?? `bridge:${randomUUID()}`;
-  const maxMessageBytes = options.maxMessageBytes ?? DEFAULT_PROTOCOL_LIMITS.maxMessageBytes;
-  const maxResultBytes = options.maxResultBytes ?? DEFAULT_PROTOCOL_LIMITS.maxResultBytes;
+  const ceilings = {
+    maxMessageBytes: options.maxMessageBytes ?? DEFAULT_PROTOCOL_LIMITS.maxMessageBytes,
+    maxResultBytes: options.maxResultBytes ?? DEFAULT_PROTOCOL_LIMITS.maxResultBytes,
+  };
+  let maxMessageBytes = ceilings.maxMessageBytes;
+  let maxResultBytes = ceilings.maxResultBytes;
+  const maxPendingCalls = options.maxPendingCalls ?? 256;
+  const maxOutOfBandCalls = options.maxOutOfBandCalls ?? 16;
+  if (
+    !Number.isSafeInteger(maxPendingCalls) || maxPendingCalls <= 0 ||
+    !Number.isSafeInteger(maxOutOfBandCalls) || maxOutOfBandCalls <= 0
+  ) throw new Error('Bridge in-flight call limits must be positive integers');
   let pending = Buffer.alloc(0);
   let reason: StdioBridgeResult['reason'] = 'eof';
   let exitCode: StdioBridgeResult['exitCode'] = 0;
@@ -99,6 +130,8 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
   let notificationController: AbortController | undefined;
   let notificationTask: Promise<void> | undefined;
   const inFlight = new Set<Promise<void>>();
+  let pendingCalls = 0;
+  let outOfBandCalls = 0;
 
   const queueWrite = (value: JsonRpcResponse | JsonRpcNotification): Promise<void> => {
     const write = outputTail.then(() => writeLine(options.output, value, maxResultBytes));
@@ -114,9 +147,16 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
     await queueWrite(errorResponse(null, error));
   };
 
-  const track = (task: Promise<void>): void => {
+  const track = (task: Promise<void>, outOfBand: boolean): void => {
     inFlight.add(task);
-    void task.finally(() => inFlight.delete(task));
+    if (outOfBand) outOfBandCalls += 1;
+    else pendingCalls += 1;
+    const finished = (): void => {
+      inFlight.delete(task);
+      if (outOfBand) outOfBandCalls -= 1;
+      else pendingCalls -= 1;
+    };
+    void task.then(finished, finished);
   };
 
   const startNotifications = (): void => {
@@ -153,14 +193,42 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
       return;
     }
 
+    const requestId = 'id' in message ? message.id : undefined;
+    const outOfBand = isOutOfBandControl(message);
+    const saturated = outOfBand
+      ? outOfBandCalls >= maxOutOfBandCalls
+      : pendingCalls >= maxPendingCalls;
+    if (saturated) {
+      if (requestId !== undefined) {
+        await queueWrite(errorResponse(requestId, new BrowserPilotError(
+          'result_too_large',
+          `Bridge ${outOfBand ? 'control' : 'request'} queue is full`,
+          {
+            retryable: true,
+            context: {
+              limit: outOfBand ? maxOutOfBandCalls : maxPendingCalls,
+              queue: outOfBand ? 'control' : 'request',
+            },
+          },
+        )));
+      }
+      return;
+    }
+
     const dispatch = async (): Promise<void> => {
-      const requestId = 'id' in message ? message.id : undefined;
       try {
         const result = await options.backend.call(bridgeSessionId, message.method, message.params);
         if (requestId !== undefined && reason !== 'protocol_error') {
           await queueWrite({ jsonrpc: '2.0', id: requestId, result });
         }
-        if (message.method === 'initialize' && reason !== 'protocol_error') startNotifications();
+        if (message.method === 'initialize' && reason !== 'protocol_error') {
+          const negotiated = negotiatedTransportLimits(result, ceilings);
+          if (negotiated) {
+            maxMessageBytes = negotiated.maxMessageBytes;
+            maxResultBytes = negotiated.maxResultBytes;
+          }
+          startNotifications();
+        }
       } catch (error) {
         if (requestId !== undefined && reason !== 'protocol_error') {
           try {
@@ -174,13 +242,12 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
       }
     };
 
-    const outOfBand = isOutOfBandControl(message);
     const task = outOfBand
       ? (initialization ?? Promise.resolve()).then(dispatch)
       : normalTail.then(dispatch);
     if (!outOfBand) normalTail = task.catch(() => {});
     if (message.method === 'initialize') initialization = task.catch(() => {});
-    track(task);
+    track(task, outOfBand);
     if (message.method === 'shutdown') {
       stopped = true;
       reason = 'shutdown';
@@ -221,6 +288,7 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<Stdio
         pending = Buffer.alloc(0);
         offset = newline + 1;
         await processLine(line);
+        if (initialization) await initialization;
       }
       if (stopped) break;
     }
