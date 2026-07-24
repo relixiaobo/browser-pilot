@@ -14,6 +14,7 @@ export * from './frame-service.js';
 export * from './cookie-service.js';
 export * from './auth-service.js';
 export * from './network-service.js';
+export * from './workspace-network-controller.js';
 export * from './browser-control-policy.js';
 export * from './broker-runtime.js';
 export * from './controlled-target-registry.js';

@@ -2,13 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import type {
   ArtifactDescriptor,
+  ArtifactId,
   BrowserOperation,
   BrowserWorkspaceId,
   ControlledTargetId,
   ControlLease,
   ControlLeaseId,
+  FrameId,
   JsonValue,
   ManagedTabSetId,
+  NetworkRequestId,
+  NetworkRuleId,
   ObservationId,
 } from '../protocol/model.js';
 import type { ToolDefinition } from '../protocol/tools.js';
@@ -26,10 +30,16 @@ import {
 } from './controlled-target-registry.js';
 import { CookieService } from './cookie-service.js';
 import { CaptureService } from './capture-service.js';
+import { FrameService, type PageFrame } from './frame-service.js';
 import { MemoryObservationStore, type StoredObservation } from './observation-store.js';
 import { ObservationService } from './observation-service.js';
 import { PageContentService } from './page-content-service.js';
 import { TargetInventoryService, type TargetInventoryContext } from './target-inventory-service.js';
+import { UploadService } from './upload-service.js';
+import {
+  WorkspaceNetworkController,
+  type WorkspaceNetworkRuleInput,
+} from './workspace-network-controller.js';
 import type {
   BrokerBrowserBinding,
   BrokerToolCallContext,
@@ -50,9 +60,19 @@ const BASE_SUPPORTED_TOOLS = [
   'browser.tabs.list',
   'browser.tabs.switch',
   'browser.tabs.close',
+  'browser.frames.list',
+  'browser.frames.switch',
   'browser.dialogs.list',
   'browser.dialogs.respond',
+  'browser.auth.set',
+  'browser.auth.clear',
   'browser.cookies.list',
+  'browser.network.requests',
+  'browser.network.request',
+  'browser.network.clear',
+  'browser.network.rules.list',
+  'browser.network.rules.add',
+  'browser.network.rules.remove',
   'browser.eval',
 ] as const;
 
@@ -65,6 +85,26 @@ interface TargetSession {
   targetId: ControlledTargetId;
   cdpTargetId: string;
   sessionId: string;
+  activeFrame?: ActiveFrame;
+}
+
+interface ActiveFrame {
+  id: FrameId;
+  cdpFrameId: string;
+  executionContextId?: number;
+}
+
+interface BrokerFrameRecord extends ActiveFrame {
+  parentCdpFrameId?: string;
+  loaderId?: string;
+  url: string;
+  name: string;
+}
+
+interface SessionFrames {
+  byId: Map<FrameId, BrokerFrameRecord>;
+  byCdpId: Map<string, BrokerFrameRecord>;
+  topFrameId: FrameId;
 }
 
 interface CreatedObservation {
@@ -120,10 +160,13 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly inventory: TargetInventoryService;
   private readonly sessions = new Map<string, TargetSession>();
   private readonly managedWindowIds = new Map<ManagedTabSetId, number>();
+  private readonly ownedSessionIds = new Set<string>();
+  private readonly framesBySession = new Map<string, SessionFrames>();
   private readonly pendingDialogs = new Map<string, PendingDialog>();
   private readonly pendingDialogBySession = new Map<string, string>();
   private readonly dialogResponseBySession = new Map<string, PendingDialogResponse>();
   private readonly artifactStore?: ArtifactStore;
+  private readonly network: WorkspaceNetworkController;
   private eventPublisher?: (event: PublishBrowserEventInput) => void;
 
   constructor(
@@ -136,8 +179,11 @@ export class BrowserToolService implements BrowserToolExecutor {
   ) {
     this.observations = options.observations ?? new MemoryObservationStore();
     this.artifactStore = options.artifactStore;
+    this.network = new WorkspaceNetworkController(transport, {
+      publishEvent: event => this.publishEvent(event),
+    });
     this.supportedTools = this.artifactStore
-      ? [...BASE_SUPPORTED_TOOLS, 'browser.capture', 'browser.pdf']
+      ? [...BASE_SUPPORTED_TOOLS, 'browser.capture', 'browser.pdf', 'browser.upload']
       : BASE_SUPPORTED_TOOLS;
     const catalog = new CdpBrowserTargetCatalog(
       transport,
@@ -198,6 +244,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       },
     );
     this.installDialogHandlers();
+    this.installSessionHandlers();
   }
 
   setEventPublisher(publisher: (event: PublishBrowserEventInput) => void): void {
@@ -205,7 +252,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   }
 
   ownsSession(sessionId: string): boolean {
-    return [...this.sessions.values()].some(session => session.sessionId === sessionId);
+    return this.ownedSessionIds.has(sessionId);
   }
 
   async call(
@@ -220,6 +267,8 @@ export class BrowserToolService implements BrowserToolExecutor {
       case 'browser.tabs.list': return this.listTabs(context, args);
       case 'browser.tabs.switch': return this.switchTab(context, args);
       case 'browser.tabs.close': return this.closeTab(context);
+      case 'browser.frames.list': return this.listFrames(context);
+      case 'browser.frames.switch': return this.switchFrame(context, args);
       case 'browser.open': return this.open(context, args);
       case 'browser.observe': return this.observe(context, args);
       case 'browser.read': return this.read(context, args);
@@ -227,11 +276,20 @@ export class BrowserToolService implements BrowserToolExecutor {
       case 'browser.type': return this.type(context, args);
       case 'browser.keyboard': return this.keyboard(context, args);
       case 'browser.press': return this.press(context, args);
+      case 'browser.upload': return this.upload(context, args);
       case 'browser.capture': return this.capture(context, args);
       case 'browser.pdf': return this.pdf(context, args);
       case 'browser.cookies.list': return this.cookies(context, args);
       case 'browser.dialogs.list': return this.listDialogs(context);
       case 'browser.dialogs.respond': return this.respondToDialog(context, args);
+      case 'browser.auth.set': return this.setAuth(context, args);
+      case 'browser.auth.clear': return this.clearAuth(context);
+      case 'browser.network.requests': return this.networkRequests(context, args);
+      case 'browser.network.request': return this.networkRequest(context, args);
+      case 'browser.network.clear': return this.clearNetwork(context);
+      case 'browser.network.rules.list': return this.listNetworkRules(context);
+      case 'browser.network.rules.add': return this.addNetworkRule(context, args);
+      case 'browser.network.rules.remove': return this.removeNetworkRules(context, args);
       case 'browser.eval': return this.evaluate(context, args);
       default: throw invalidArgument(`Unsupported browser tool: ${definition.name}`, 'name');
     }
@@ -275,8 +333,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.observations.releaseLease(lease.id);
     for (const [key, session] of this.sessions) {
       if (session.leaseId !== lease.id) continue;
-      this.sessions.delete(key);
-      void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId }).catch(() => {});
+      this.retireSession(key, session);
     }
     this.deleteDialogs(dialog => dialog.leaseId === lease.id);
   }
@@ -291,10 +348,10 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.inventory.releaseWorkspace(caller);
     this.observations.releaseWorkspace(workspace.id);
     this.managedWindowIds.delete(managedTabSet.id);
+    this.network.releaseWorkspace(workspace.id);
     for (const [key, session] of this.sessions) {
       if (session.workspaceId !== workspace.id) continue;
-      this.sessions.delete(key);
-      void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId }).catch(() => {});
+      this.retireSession(key, session);
     }
     for (const target of records) {
       if (target.origin === 'user_tab') continue;
@@ -368,6 +425,64 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
   }
 
+  private async listFrames(context: BrokerToolCallContext): Promise<JsonValue> {
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const frames = this.syncFrames(session, await new FrameService(
+      this.transport,
+      session.sessionId,
+    ).list());
+    const target = this.registry.get(this.inventoryContext(context), targetId);
+    return asJson({
+      ...this.targetResult(context, targetId, target.url),
+      frames: [...frames.byId.values()].map(frame => ({
+        frameId: frame.id,
+        ...(frame.parentCdpFrameId ? {
+          parentFrameId: frames.byCdpId.get(frame.parentCdpFrameId)?.id,
+        } : {}),
+        url: frame.url,
+        name: frame.name,
+      })),
+    });
+  }
+
+  private async switchFrame(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const service = new FrameService(this.transport, session.sessionId);
+    const frames = this.syncFrames(session, await service.list());
+    const selected = args.top === true
+      ? frames.byId.get(frames.topFrameId)
+      : frames.byId.get(args.frameId as FrameId);
+    if (!selected) throw invalidArgument('Frame is stale or does not belong to this target session', 'frameId');
+    this.markDispatched(context);
+    const selection = await service.selectById(selected.cdpFrameId);
+    session.activeFrame = {
+      id: selected.id,
+      cdpFrameId: selected.cdpFrameId,
+      ...(selection.executionContextId !== undefined
+        ? { executionContextId: selection.executionContextId }
+        : {}),
+    };
+    this.observations.invalidateTarget(targetId, 'frame_changed');
+    this.publishEvent({
+      workspaceId: session.workspaceId,
+      leaseId: session.leaseId,
+      targetId,
+      type: 'observation.invalidated',
+      sensitivity: 'browser_data',
+      payload: { reason: 'frame_changed', frameId: selected.id },
+    });
+    const target = this.registry.get(this.inventoryContext(context), targetId);
+    return asJson({
+      ...this.targetResult(context, targetId, target.url),
+      frameId: selected.id,
+    });
+  }
+
   private async open(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const inventoryContext = this.inventoryContext(context);
     const url = args.url as string;
@@ -389,6 +504,8 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.markDispatched(context);
     this.registry.setActive(inventoryContext, inventoryContext.leaseId, targetId);
     const session = await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
+    session.activeFrame = undefined;
+    this.framesBySession.delete(session.sessionId);
     this.observations.invalidateTarget(targetId, 'navigation');
     this.publishEvent({
       workspaceId: inventoryContext.workspaceId,
@@ -436,6 +553,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     const result = await new PageContentService(this.transport, session.sessionId).read(
       args.selector as string | undefined,
       Number(args.limit ?? 100_000),
+      session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {},
     );
     return asJson({
       ...this.targetResult(context, targetId, result.url),
@@ -523,6 +643,51 @@ export class BrowserToolService implements BrowserToolExecutor {
     return this.runAction(context, targetId, session, undefined, service => service.press(args.key as string));
   }
 
+  private async upload(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    if (!this.artifactStore || !context.workspace) {
+      throw new BrowserPilotError('internal_error', 'Browser Artifact storage is unavailable');
+    }
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'files.upload');
+    const artifact = await this.artifactStore.get(context.workspace.id, args.artifactId as ArtifactId);
+    if (artifact.descriptor.kind !== 'upload_input' || artifact.descriptor.sensitivity !== 'user_file') {
+      throw invalidArgument('browser.upload requires an imported upload_input Artifact', 'artifactId');
+    }
+    let backendNodeId: number | undefined;
+    if (args.observationId !== undefined) {
+      const observation = await this.resolveObservation(
+        context,
+        targetId,
+        session,
+        args.observationId as ObservationId,
+        Number(args.ref),
+      );
+      backendNodeId = observation.refs[Number(args.ref) - 1].backendNodeId;
+    }
+
+    let next: CreatedObservation | undefined;
+    const observations = {
+      observeAfterAction: async (limit = 50) => {
+        next = await this.createObservation(context, targetId, session, limit, true);
+        return next.snapshot;
+      },
+    };
+    this.markDispatched(context);
+    await new UploadService(this.transport, session.sessionId, observations).upload(artifact.path, {
+      inputIndex: args.inputIndex as number | undefined,
+      ...(backendNodeId !== undefined ? { backendNodeId } : {}),
+      ...(session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {}),
+    });
+    if (!next) throw new BrowserPilotError('internal_error', 'Upload did not produce an Observation');
+    this.publishDocumentChanged(context, targetId, next);
+    return this.observationResult(context, targetId, next);
+  }
+
   private async capture(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.capture');
@@ -603,6 +768,91 @@ export class BrowserToolService implements BrowserToolExecutor {
     return asJson({ ...this.targetResult(context, targetId, record.url), cookies });
   }
 
+  private async setAuth(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    this.markDispatched(context);
+    await this.network.setAuth(workspace.id, args.username as string, args.password as string);
+    return asJson({ workspaceId: workspace.id, leaseId: lease.id, configured: true });
+  }
+
+  private async clearAuth(context: BrokerToolCallContext): Promise<JsonValue> {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    this.markDispatched(context);
+    await this.network.clearAuth(workspace.id);
+    return asJson({ workspaceId: workspace.id, leaseId: lease.id, configured: false });
+  }
+
+  private networkRequests(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): JsonValue {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    const result = this.network.listRequests(workspace.id, {
+      limit: args.limit as number | undefined,
+      after: args.after as number | undefined,
+      url: args.url as string | undefined,
+      method: args.method as string | undefined,
+      status: args.status as string | undefined,
+      type: args.type as string[] | undefined,
+    });
+    return asJson({ workspaceId: workspace.id, leaseId: lease.id, ...result });
+  }
+
+  private async networkRequest(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    const result = await this.network.request(
+      workspace.id,
+      args.requestId as NetworkRequestId,
+      args.includeBody !== false,
+    );
+    return asJson({ workspaceId: workspace.id, leaseId: lease.id, ...result });
+  }
+
+  private clearNetwork(context: BrokerToolCallContext): JsonValue {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    this.markDispatched(context);
+    this.network.clearRequests(workspace.id);
+    return asJson({ workspaceId: workspace.id, leaseId: lease.id, cleared: true });
+  }
+
+  private listNetworkRules(context: BrokerToolCallContext): JsonValue {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    return asJson({
+      workspaceId: workspace.id,
+      leaseId: lease.id,
+      rules: this.network.listRules(workspace.id),
+    });
+  }
+
+  private async addNetworkRule(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    this.markDispatched(context);
+    const ruleId = await this.network.addRule(workspace.id, args as unknown as WorkspaceNetworkRuleInput);
+    return asJson({ workspaceId: workspace.id, leaseId: lease.id, ruleId });
+  }
+
+  private async removeNetworkRules(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const { workspace, lease } = this.requireWorkspaceContext(context);
+    this.markDispatched(context);
+    const removed = await this.network.removeRules(workspace.id, {
+      ruleId: args.ruleId as NetworkRuleId | undefined,
+      all: args.all === true,
+    });
+    return asJson({ workspaceId: workspace.id, leaseId: lease.id, removed });
+  }
+
   private async evaluate(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'developer.eval');
@@ -611,6 +861,9 @@ export class BrowserToolService implements BrowserToolExecutor {
       expression: args.expression,
       returnByValue: true,
       awaitPromise: args.awaitPromise ?? true,
+      ...(session.activeFrame?.executionContextId !== undefined
+        ? { contextId: session.activeFrame.executionContextId }
+        : {}),
     }, session.sessionId);
     if (exceptionDetails) {
       throw invalidArgument(
@@ -736,7 +989,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     const inventoryContext = this.inventoryContext(context);
     await this.inventory.refresh(inventoryContext);
     const resolved = await this.inventory.resolveForOperation(inventoryContext, targetId, operation);
-    return this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
+    const session = await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
+    await this.refreshActiveFrameContext(session);
+    return session;
   }
 
   private async ensureSession(
@@ -751,7 +1006,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         await this.transport.send('Runtime.evaluate', { expression: '1' }, existing.sessionId);
         return existing;
       } catch {
-        this.sessions.delete(key);
+        this.retireSession(key, existing);
         this.observations.invalidateSession(existing.sessionId);
         this.publishEvent({
           workspaceId: existing.workspaceId,
@@ -778,9 +1033,16 @@ export class BrowserToolService implements BrowserToolExecutor {
       sessionId: attached.sessionId,
     };
     this.sessions.set(key, session);
-    await this.transport.send('Page.enable', {}, attached.sessionId).catch(() => {});
-    await this.transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, attached.sessionId).catch(() => {});
-    return session;
+    this.ownedSessionIds.add(attached.sessionId);
+    try {
+      await this.network.attachSession(session);
+      await this.transport.send('Page.enable', {}, attached.sessionId).catch(() => {});
+      await this.transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, attached.sessionId).catch(() => {});
+      return session;
+    } catch (error) {
+      this.retireSession(key, session);
+      throw error;
+    }
   }
 
   private async createObservation(
@@ -791,11 +1053,17 @@ export class BrowserToolService implements BrowserToolExecutor {
     afterAction: boolean,
   ): Promise<CreatedObservation> {
     const refs = new MemoryRefStore();
-    const service = new ObservationService(this.transport, session.sessionId, targetId, { refStore: refs });
+    const service = new ObservationService(this.transport, session.sessionId, targetId, {
+      refStore: refs,
+      ...(session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {}),
+      ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
+    });
     const snapshot = afterAction
       ? await service.observeAfterAction(limit)
       : await service.observe(limit);
-    const loaderId = await this.loaderId(session.sessionId);
+    const loaderId = await this.loaderId(session);
     const record = this.observations.create({
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
@@ -817,7 +1085,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     observationId: ObservationId,
     ref: number,
   ): Promise<StoredObservation> {
-    const loaderId = await this.loaderId(session.sessionId);
+    const loaderId = await this.loaderId(session);
     const observation = this.observations.resolve({
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
@@ -870,7 +1138,13 @@ export class BrowserToolService implements BrowserToolExecutor {
         this.transport,
         session.sessionId,
         targetId,
-        { refStore },
+        {
+          refStore,
+          ...(session.activeFrame?.executionContextId !== undefined
+            ? { executionContextId: session.activeFrame.executionContextId }
+            : {}),
+          ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
+        },
       ).locate(selector),
       observeAfterAction: async (limit = 50) => {
         next = await this.createObservation(context, targetId, session, limit, true);
@@ -880,6 +1154,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     await action(new ActionService(this.transport, session.sessionId, targetId, {
       refStore,
       observationService,
+      ...(session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {}),
     }));
     if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
     this.publishDocumentChanged(context, targetId, next);
@@ -902,7 +1179,13 @@ export class BrowserToolService implements BrowserToolExecutor {
         this.transport,
         session.sessionId,
         targetId,
-        { refStore },
+        {
+          refStore,
+          ...(session.activeFrame?.executionContextId !== undefined
+            ? { executionContextId: session.activeFrame.executionContextId }
+            : {}),
+          ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
+        },
       ).locate(selector),
       observeAfterAction: async (limit = 50) => {
         next = await this.createObservation(context, targetId, session, limit, true);
@@ -912,6 +1195,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     const result = await action(new ActionService(this.transport, session.sessionId, targetId, {
       refStore,
       observationService,
+      ...(session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {}),
     }));
     evidence = result.evidence;
     if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
@@ -1010,9 +1296,17 @@ export class BrowserToolService implements BrowserToolExecutor {
     return scale < 0.999 ? scale : undefined;
   }
 
-  private async loaderId(sessionId: string): Promise<string> {
-    const { frameTree } = await this.transport.send('Page.getFrameTree', {}, sessionId);
-    const loaderId = frameTree?.frame?.loaderId;
+  private async loaderId(session: TargetSession): Promise<string> {
+    const { frameTree } = await this.transport.send('Page.getFrameTree', {}, session.sessionId);
+    const findFrame = (node: any): any => {
+      if (!session.activeFrame || node?.frame?.id === session.activeFrame.cdpFrameId) return node?.frame;
+      for (const child of node?.childFrames ?? []) {
+        const match = findFrame(child);
+        if (match?.id === session.activeFrame.cdpFrameId) return match;
+      }
+      return undefined;
+    };
+    const loaderId = findFrame(frameTree)?.loaderId;
     if (typeof loaderId !== 'string' || loaderId.length === 0) {
       throw new BrowserPilotError('internal_error', 'Chrome returned an invalid document loader');
     }
@@ -1034,8 +1328,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
     for (const [key, session] of this.sessions) {
       if (session.targetId !== targetId) continue;
-      this.sessions.delete(key);
-      void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId }).catch(() => {});
+      this.retireSession(key, session);
     }
     this.deleteDialogs(dialog => dialog.targetId === targetId);
   }
@@ -1079,6 +1372,144 @@ export class BrowserToolService implements BrowserToolExecutor {
         externallyHandled: true,
       });
     });
+  }
+
+  private installSessionHandlers(): void {
+    this.transport.on?.('Target.detachedFromTarget', (params: any) => {
+      const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : undefined;
+      if (!sessionId || !this.ownedSessionIds.has(sessionId)) return;
+      this.forgetSession(sessionId);
+    });
+    this.transport.on?.('Page.frameDetached', (params: any, sessionId?: string) => {
+      if (!sessionId || typeof params?.frameId !== 'string') return;
+      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+      const frames = this.framesBySession.get(sessionId);
+      const detached = frames?.byCdpId.get(params.frameId);
+      if (!session || !frames || !detached) return;
+      frames.byCdpId.delete(detached.cdpFrameId);
+      frames.byId.delete(detached.id);
+      if (session.activeFrame?.id !== detached.id) return;
+      session.activeFrame = undefined;
+      this.observations.invalidateTarget(session.targetId, 'frame_detached');
+      this.publishEvent({
+        workspaceId: session.workspaceId,
+        leaseId: session.leaseId,
+        targetId: session.targetId,
+        type: 'observation.invalidated',
+        sensitivity: 'browser_data',
+        payload: { reason: 'frame_detached', frameId: detached.id },
+      });
+    });
+    this.transport.on?.('Page.frameNavigated', (params: any, sessionId?: string) => {
+      if (!sessionId || typeof params?.frame?.id !== 'string') return;
+      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+      if (session?.activeFrame && session.activeFrame.cdpFrameId === params.frame.id) {
+        session.activeFrame.executionContextId = undefined;
+      }
+    });
+    this.transport.on?.('Runtime.executionContextDestroyed', (params: any, sessionId?: string) => {
+      if (!sessionId || !Number.isSafeInteger(params?.executionContextId)) return;
+      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+      if (session?.activeFrame && session.activeFrame.executionContextId === params.executionContextId) {
+        session.activeFrame.executionContextId = undefined;
+      }
+    });
+    this.transport.on?.('Runtime.executionContextsCleared', (_params: any, sessionId?: string) => {
+      if (!sessionId) return;
+      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+      if (session?.activeFrame) session.activeFrame.executionContextId = undefined;
+    });
+  }
+
+  private async refreshActiveFrameContext(session: TargetSession): Promise<void> {
+    if (!session.activeFrame) return;
+    const service = new FrameService(this.transport, session.sessionId);
+    const frames = this.syncFrames(session, await service.list());
+    const frame = frames.byId.get(session.activeFrame.id);
+    if (!frame) {
+      session.activeFrame = undefined;
+      this.observations.invalidateTarget(session.targetId, 'frame_detached');
+      throw invalidArgument('Active frame is no longer attached; switch frames and observe again', 'frameId');
+    }
+    if (frame.id === frames.topFrameId) {
+      session.activeFrame = { id: frame.id, cdpFrameId: frame.cdpFrameId };
+      return;
+    }
+    if (session.activeFrame.executionContextId !== undefined) return;
+    const selection = await service.selectById(frame.cdpFrameId);
+    session.activeFrame = {
+      id: frame.id,
+      cdpFrameId: frame.cdpFrameId,
+      ...(selection.executionContextId !== undefined
+        ? { executionContextId: selection.executionContextId }
+        : {}),
+    };
+  }
+
+  private syncFrames(session: TargetSession, pageFrames: PageFrame[]): SessionFrames {
+    if (pageFrames.length === 0) {
+      throw new BrowserPilotError('internal_error', 'Chrome returned an empty frame tree');
+    }
+    let frames = this.framesBySession.get(session.sessionId);
+    if (!frames) {
+      const top: BrokerFrameRecord = {
+        id: `frame:${randomUUID()}` as FrameId,
+        cdpFrameId: pageFrames[0].id,
+        ...(pageFrames[0].loaderId ? { loaderId: pageFrames[0].loaderId } : {}),
+        url: pageFrames[0].url,
+        name: pageFrames[0].name,
+      };
+      frames = {
+        byId: new Map([[top.id, top]]),
+        byCdpId: new Map([[top.cdpFrameId, top]]),
+        topFrameId: top.id,
+      };
+      this.framesBySession.set(session.sessionId, frames);
+    }
+    const liveCdpIds = new Set(pageFrames.map(frame => frame.id));
+    for (const pageFrame of pageFrames) {
+      let frame = frames.byCdpId.get(pageFrame.id);
+      if (!frame) {
+        frame = {
+          id: `frame:${randomUUID()}` as FrameId,
+          cdpFrameId: pageFrame.id,
+          url: pageFrame.url,
+          name: pageFrame.name,
+        };
+        frames.byCdpId.set(pageFrame.id, frame);
+        frames.byId.set(frame.id, frame);
+      }
+      frame.parentCdpFrameId = pageFrame.parentId;
+      frame.loaderId = pageFrame.loaderId;
+      frame.url = pageFrame.url;
+      frame.name = pageFrame.name;
+    }
+    for (const frame of [...frames.byId.values()]) {
+      if (liveCdpIds.has(frame.cdpFrameId)) continue;
+      frames.byId.delete(frame.id);
+      frames.byCdpId.delete(frame.cdpFrameId);
+    }
+    const top = frames.byCdpId.get(pageFrames[0].id);
+    if (!top) throw new BrowserPilotError('internal_error', 'Chrome returned an invalid top frame');
+    frames.topFrameId = top.id;
+    return frames;
+  }
+
+  private retireSession(key: string, session: TargetSession): void {
+    if (this.sessions.get(key) === session) this.sessions.delete(key);
+    void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId })
+      .finally(() => this.forgetSession(session.sessionId))
+      .catch(() => {});
+  }
+
+  private forgetSession(sessionId: string): void {
+    for (const [key, session] of this.sessions) {
+      if (session.sessionId === sessionId) this.sessions.delete(key);
+    }
+    this.network.detachSession(sessionId);
+    this.framesBySession.delete(sessionId);
+    this.ownedSessionIds.delete(sessionId);
+    this.deleteDialogs(dialog => dialog.sessionId === sessionId);
   }
 
   private publishTargetEvent(

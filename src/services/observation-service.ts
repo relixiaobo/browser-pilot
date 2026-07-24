@@ -22,6 +22,8 @@ export interface ObservationServiceOptions {
   settleDelayMs?: number;
   loadTimeoutMs?: number;
   waitForLoad?: (transport: Transport, sessionId: string, timeout: number) => Promise<void>;
+  executionContextId?: number;
+  frameId?: string;
 }
 
 export class ObservationService {
@@ -29,6 +31,8 @@ export class ObservationService {
   private readonly settleDelayMs: number;
   private readonly loadTimeoutMs: number;
   private readonly loadWaiter: (transport: Transport, sessionId: string, timeout: number) => Promise<void>;
+  private readonly executionContextId?: number;
+  private readonly frameId?: string;
 
   constructor(
     private readonly transport: Transport,
@@ -40,6 +44,8 @@ export class ObservationService {
     this.settleDelayMs = options.settleDelayMs ?? 300;
     this.loadTimeoutMs = options.loadTimeoutMs ?? 10_000;
     this.loadWaiter = options.waitForLoad ?? waitForLoad;
+    this.executionContextId = options.executionContextId;
+    this.frameId = options.frameId;
   }
 
   get refs(): RefStore {
@@ -50,7 +56,10 @@ export class ObservationService {
     if (!Number.isSafeInteger(limit) || limit < 1) {
       throw invalidArgument('Observation limit must be a positive integer', 'limit');
     }
-    return takeSnapshot(this.transport, this.sessionId, this.targetId, limit, this.refStore);
+    return takeSnapshot(this.transport, this.sessionId, this.targetId, limit, this.refStore, {
+      ...(this.executionContextId !== undefined ? { executionContextId: this.executionContextId } : {}),
+      ...(this.frameId !== undefined ? { frameId: this.frameId } : {}),
+    });
   }
 
   async observeAfterAction(limit = 50): Promise<SnapshotResult> {
@@ -63,10 +72,12 @@ export class ObservationService {
 
   async locate(selector: string): Promise<ElementLocation> {
     if (!selector) throw invalidArgument('Selector must not be empty', 'selector');
-    const { result } = await this.transport.send('Runtime.evaluate', {
+    const params: Record<string, unknown> = {
       expression: `JSON.stringify((function(){var el=document.querySelector(${JSON.stringify(selector)});if(!el)return null;el.scrollIntoView({block:'center',inline:'center'});var r=el.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2),top:Math.round(r.top),left:Math.round(r.left),width:Math.round(r.width),height:Math.round(r.height)}})())`,
       returnByValue: true,
-    }, this.sessionId);
+    };
+    if (this.executionContextId) params.contextId = this.executionContextId;
+    const { result } = await this.transport.send('Runtime.evaluate', params, this.sessionId);
     if (!result.value || result.value === 'null') {
       throw invalidArgument(`Element not found: ${selector}`, 'selector');
     }

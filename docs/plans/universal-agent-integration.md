@@ -92,6 +92,9 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [ ] **A2.3** Replace global target/frame/session state with Workspace and
   Lease state; provide a compatibility Workspace for one-shot CLI calls.
   - Covers: FR-1, FR-3, AC-1, AC-3.
+  - Progress: Broker targets, CDP sessions, active frames, and opaque frame IDs
+    are Lease/session scoped. The one-shot compatibility path deliberately keeps
+    its existing file-backed state until the compatibility Workspace is added.
 - [ ] **A2.4** Serialize commands through a per-target actor and implement
   explicit control transfer.
   - Covers: BR-5, BR-6, NFR-4.
@@ -101,9 +104,12 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [ ] **A2.5** Scope auth, network rules, request journals, downloads, and
   cleanup to their owner.
   - Covers: BR-3, BR-4, AC-3.
-  - Progress: auth and network calls now cross explicit service interfaces with
-    validated inputs. The current daemon storage is still global and must not
-    be treated as isolated.
+  - Progress: Broker auth, interception rules, and bounded request journals are
+    Workspace scoped; request identity includes CDP session identity, sensitive
+    events are metadata-only, and legacy daemon handlers ignore Broker sessions.
+    Lease replacement preserves Workspace configuration while Workspace release
+    clears it. The isolated download staging lifecycle is specified; download
+    ingestion remains.
 - [x] **A2.6** Implement the default-unrestricted BrowserControlPolicy and
   optional launch-time Host operation removal.
   - Covers: FLOW-5, BR-21, BR-22, AC-4.
@@ -147,7 +153,8 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     observe again. Do not recover stale browser state from disk.
   - Progress: Lease heartbeat/expiry/release, EOF cleanup, idle Connection and
     Workspace reclamation, and idempotent Workspace release are implemented.
-    Resource-specific target/auth/network cleanup remains to be connected.
+    Target, auth, network, frame, Observation, and Artifact cleanup is connected;
+    partial download staging and browser reconnect cleanup remain.
 - [x] **A3.3** Implement command accepted/dispatched/completed,
   `unknown_outcome`, deadline, cancellation, and duplicate-call behavior.
   - Covers: BR-8 through BR-12, AC-5.
@@ -211,8 +218,11 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [x] **A5.3** Add adapter-facing file authorization and revoke access on
   release or expiry.
   - Covers: CON-5, NFR-5.
-  - Complete: get/export/retain/release require an owning active Workspace and
-    Lease; release, expiry, Workspace cleanup, and Broker shutdown delete bytes.
+  - Complete: import/get/export/retain/release require an owning active Workspace
+    and Lease. `artifacts/import` copies an absolute client-authorized path to a
+    `user_file` / `upload_input` Artifact, and `browser.upload` accepts only that
+    kind. Release, expiry, Workspace cleanup, and Broker shutdown delete Broker
+    bytes without deleting the source file.
 
 ### A6. Browser discovery and multi-version operation
 

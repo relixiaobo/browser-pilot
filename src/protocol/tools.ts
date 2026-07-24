@@ -54,6 +54,39 @@ const headerSchema = objectSchema({
   name: stringSchema({ minLength: 1, maxLength: 256 }),
   value: stringSchema({ maxLength: 8192 }),
 }, ['name', 'value']);
+const networkRuleSchema = objectSchema({
+  ruleId: opaqueIdSchema,
+  type: stringSchema({ enum: ['block', 'mock', 'headers'] }),
+  pattern: boundedUrl,
+  status: integerSchema({ minimum: 100, maximum: 999 }),
+  headers: arraySchema(headerSchema, { maxItems: 256 }),
+  bodySize: integerSchema({ minimum: 0 }),
+}, ['ruleId', 'type', 'pattern']);
+const networkRequestDetailSchema = objectSchema({
+  requestId: opaqueIdSchema,
+  method: stringSchema({ maxLength: 32 }),
+  url: boundedUrl,
+  type: stringSchema({ maxLength: 128 }),
+  requestHeaders: arraySchema(headerSchema, { maxItems: 256 }),
+  postData: stringSchema({ maxLength: 65_536 }),
+  postDataTruncated: booleanSchema(),
+  status: integerSchema({ minimum: 100, maximum: 999 }),
+  statusText: stringSchema({ maxLength: 4096 }),
+  responseHeaders: arraySchema(headerSchema, { maxItems: 256 }),
+  mimeType: stringSchema({ maxLength: 256 }),
+  size: integerSchema({ minimum: 0 }),
+  durationMs: numberSchema({ minimum: 0 }),
+  error: stringSchema({ maxLength: 4096 }),
+  bodyAvailable: booleanSchema(),
+}, [
+  'requestId',
+  'method',
+  'url',
+  'type',
+  'requestHeaders',
+  'postDataTruncated',
+  'bodyAvailable',
+]);
 
 const elementSchema = objectSchema({
   ref: integerSchema({ minimum: 1 }),
@@ -76,9 +109,10 @@ const inputEvidenceSchema = objectSchema({
 const artifactSchema = objectSchema({
   id: opaqueIdSchema,
   workspaceId: opaqueIdSchema,
-  kind: stringSchema({ enum: ['screenshot', 'screenshot_preview', 'pdf', 'download', 'upload_receipt'] }),
+  kind: stringSchema({ enum: ['screenshot', 'screenshot_preview', 'pdf', 'download', 'upload_input'] }),
   mimeType: stringSchema({ minLength: 1, maxLength: 256 }),
   byteSize: integerSchema({ minimum: 0 }),
+  fileName: stringSchema({ minLength: 1, maxLength: 4096 }),
   width: integerSchema({ minimum: 1 }),
   height: integerSchema({ minimum: 1 }),
   sensitivity: stringSchema({ enum: ['public', 'browser_data', 'credential', 'user_file'] }),
@@ -340,19 +374,27 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     title: 'Upload file',
     description: 'Assign a client-authorized local file to a page file input.',
     context: 'target',
-    inputSchema: objectSchema({
-      artifactId: opaqueIdSchema,
-      observationId: opaqueIdSchema,
-      ref: integerSchema({ minimum: 1 }),
-      inputIndex: integerSchema({ minimum: 1 }),
-    }, ['artifactId']),
+    inputSchema: {
+      oneOf: [
+        objectSchema({
+          artifactId: opaqueIdSchema,
+          observationId: opaqueIdSchema,
+          ref: integerSchema({ minimum: 1 }),
+        }, ['artifactId', 'observationId', 'ref']),
+        objectSchema({
+          artifactId: opaqueIdSchema,
+          inputIndex: integerSchema({ minimum: 1 }),
+        }, ['artifactId', 'inputIndex']),
+        objectSchema({ artifactId: opaqueIdSchema }, ['artifactId']),
+      ],
+    },
     outputSchema: observationOutput,
     requiredCapabilities: ['action.input', 'artifact.read', 'observation.read'],
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
     sensitivity: { input: ['user_file'], output: ['browser_data'] },
-    artifactKinds: ['upload_receipt'],
+    artifactKinds: [],
   }),
   tool({
     name: 'browser.tabs.list',
@@ -583,8 +625,10 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     context: 'workspace',
     inputSchema: objectSchema({ requestId: opaqueIdSchema, includeBody: booleanSchema() }, ['requestId']),
     outputSchema: resultSchema('workspace', {
-      request: objectSchema({}, [], { additionalProperties: true }),
+      request: networkRequestDetailSchema,
       body: stringSchema({ maxLength: 1_000_000 }),
+      bodyEncoding: stringSchema({ enum: ['utf8', 'base64'] }),
+      mimeType: stringSchema({ maxLength: 256 }),
       bodyTruncated: booleanSchema(),
     }, ['request', 'bodyTruncated']),
     requiredCapabilities: ['network.observe'],
@@ -615,7 +659,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     context: 'workspace',
     inputSchema: emptyInput,
     outputSchema: resultSchema('workspace', {
-      rules: arraySchema(objectSchema({}, [], { additionalProperties: true })),
+      rules: arraySchema(networkRuleSchema),
     }, ['rules']),
     requiredCapabilities: ['network.observe'],
     mutating: false,

@@ -73,6 +73,10 @@ const trackedRequests: TrackedRequest[] = [];
 const requestsByNetworkId = new Map<string, TrackedRequest>();
 const networkEnabledSessions = new Set<string>();
 
+function legacyNetworkKey(sessionId: string | undefined, networkId: string): string {
+  return `${sessionId ?? ''}\u0000${networkId}`;
+}
+
 // ── Interception rules ──────────────────────────────
 
 interface BlockRule { id: number; type: 'block'; pattern: string; }
@@ -195,6 +199,7 @@ async function main() {
 
   // ── Auth handling ─────────────────────────────────
   cdp.on('Fetch.authRequired', (params: any, sessionId?: string) => {
+    if (sessionId && browserTools.ownsSession(sessionId)) return;
     const resp = authCredentials
       ? { response: 'ProvideCredentials' as const, username: authCredentials.username, password: authCredentials.password }
       : { response: 'CancelAuth' as const };
@@ -203,6 +208,7 @@ async function main() {
 
   // ── Fetch interception — Fix 1: try/catch with fallback ──
   cdp.on('Fetch.requestPaused', (params: any, sessionId?: string) => {
+    if (sessionId && browserTools.ownsSession(sessionId)) return;
     try {
       const url = params.request?.url || '';
       for (const rule of interceptRules) {
@@ -234,6 +240,7 @@ async function main() {
 
   // ── Network monitoring events ─────────────────────
   cdp.on('Network.requestWillBeSent', (params: any, sessionId?: string) => {
+    if (sessionId && browserTools.ownsSession(sessionId)) return;
     const entry: TrackedRequest = {
       id: nextReqId++, networkId: params.requestId, sessionId,
       method: params.request.method, url: params.request.url, type: params.type || 'Other',
@@ -241,22 +248,26 @@ async function main() {
       startTime: Date.now(), bodyAvailable: false,
     };
     trackedRequests.push(entry);
-    requestsByNetworkId.set(params.requestId, entry);
+    requestsByNetworkId.set(legacyNetworkKey(sessionId, params.requestId), entry);
     if (trackedRequests.length > MAX_TRACKED) {
       const old = trackedRequests.shift()!;
-      requestsByNetworkId.delete(old.networkId);
+      const key = legacyNetworkKey(old.sessionId, old.networkId);
+      if (requestsByNetworkId.get(key) === old) requestsByNetworkId.delete(key);
     }
   });
-  cdp.on('Network.responseReceived', (params: any) => {
-    const e = requestsByNetworkId.get(params.requestId);
+  cdp.on('Network.responseReceived', (params: any, sessionId?: string) => {
+    if (sessionId && browserTools.ownsSession(sessionId)) return;
+    const e = requestsByNetworkId.get(legacyNetworkKey(sessionId, params.requestId));
     if (e) { e.status = params.response.status; e.statusText = params.response.statusText; e.responseHeaders = params.response.headers; e.mimeType = params.response.mimeType; }
   });
-  cdp.on('Network.loadingFinished', (params: any) => {
-    const e = requestsByNetworkId.get(params.requestId);
+  cdp.on('Network.loadingFinished', (params: any, sessionId?: string) => {
+    if (sessionId && browserTools.ownsSession(sessionId)) return;
+    const e = requestsByNetworkId.get(legacyNetworkKey(sessionId, params.requestId));
     if (e) { e.size = params.encodedDataLength; e.endTime = Date.now(); e.bodyAvailable = true; }
   });
-  cdp.on('Network.loadingFailed', (params: any) => {
-    const e = requestsByNetworkId.get(params.requestId);
+  cdp.on('Network.loadingFailed', (params: any, sessionId?: string) => {
+    if (sessionId && browserTools.ownsSession(sessionId)) return;
+    const e = requestsByNetworkId.get(legacyNetworkKey(sessionId, params.requestId));
     if (e) { e.error = params.errorText; e.endTime = Date.now(); }
   });
 

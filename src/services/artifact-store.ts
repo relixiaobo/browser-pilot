@@ -2,14 +2,17 @@ import { randomUUID } from 'node:crypto';
 import {
   chmod,
   copyFile,
+  lstat,
   mkdir,
+  realpath,
   readdir,
+  rm,
   stat,
   unlink,
   writeFile,
 } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ARTIFACT_DIR } from '../paths.js';
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import type {
@@ -29,6 +32,7 @@ export interface CreateArtifactInput {
   kind: ArtifactDescriptor['kind'];
   mimeType: string;
   bytes: Uint8Array;
+  fileName?: string;
   width?: number;
   height?: number;
   sensitivity?: Sensitivity;
@@ -58,6 +62,23 @@ const ARTIFACT_ID_PATTERN = /^artifact:[A-Za-z0-9][A-Za-z0-9._:-]{0,118}$/;
 
 function clone(record: ArtifactRecord): ArtifactRecord {
   return { descriptor: { ...record.descriptor }, path: record.path };
+}
+
+function inferredMimeType(path: string): string {
+  const known: Record<string, string> = {
+    '.csv': 'text/csv',
+    '.gif': 'image/gif',
+    '.jpeg': 'image/jpeg',
+    '.jpg': 'image/jpeg',
+    '.json': 'application/json',
+    '.pdf': 'application/pdf',
+    '.png': 'image/png',
+    '.txt': 'text/plain',
+    '.webp': 'image/webp',
+    '.xml': 'application/xml',
+    '.zip': 'application/zip',
+  };
+  return known[extname(path).toLowerCase()] ?? 'application/octet-stream';
 }
 
 export class ArtifactStore {
@@ -109,6 +130,91 @@ export class ArtifactStore {
     return this.withLock(() => this.createUnlocked(input));
   }
 
+  async importFile(
+    workspaceId: BrowserWorkspaceId,
+    sourcePath: string,
+    mimeType?: string,
+  ): Promise<ArtifactRecord> {
+    if (!isAbsolute(sourcePath)) throw invalidArgument('Artifact import path must be absolute', 'path');
+    const source = resolve(sourcePath);
+    if (this.isInsideStore(source)) {
+      throw invalidArgument('Artifact import path must be outside Broker storage', 'path');
+    }
+    return this.withLock(async () => {
+      await this.sweepUnlocked();
+      await this.ensureDirectory();
+      const canonicalStore = await realpath(this.directory);
+      let canonicalSource: string;
+      try {
+        canonicalSource = await realpath(source);
+      } catch (cause) {
+        throw new BrowserPilotError('invalid_argument', 'Artifact import file is not accessible', {
+          context: { field: 'path' },
+          rpcCode: -32602,
+          cause,
+        });
+      }
+      if (this.isWithin(canonicalStore, canonicalSource)) {
+        throw invalidArgument('Artifact import path must be outside Broker storage', 'path');
+      }
+      let sourceInfo;
+      try {
+        sourceInfo = await stat(canonicalSource);
+      } catch (cause) {
+        throw new BrowserPilotError('invalid_argument', 'Artifact import file is not accessible', {
+          context: { field: 'path' },
+          rpcCode: -32602,
+          cause,
+        });
+      }
+      if (!sourceInfo.isFile()) throw invalidArgument('Artifact import path must identify a regular file', 'path');
+      this.assertQuota(workspaceId, sourceInfo.size);
+      const fileName = basename(source);
+      if (!fileName || fileName.length > 4096) {
+        throw invalidArgument('Artifact import filename is invalid or too long', 'path');
+      }
+      const resolvedMimeType = mimeType ?? inferredMimeType(source);
+      if (!resolvedMimeType || resolvedMimeType.length > 256 || /[\r\n]/.test(resolvedMimeType)) {
+        throw invalidArgument('Artifact MIME type is invalid or too long', 'mimeType');
+      }
+
+      const id = this.nextArtifactId();
+      const storageDirectory = join(this.directory, randomUUID());
+      const destination = join(storageDirectory, fileName);
+      await mkdir(storageDirectory, { mode: 0o700 });
+      try {
+        await copyFile(canonicalSource, destination, fsConstants.COPYFILE_EXCL);
+        await chmod(destination, 0o600).catch(() => {});
+        const copied = await stat(destination);
+        if (!copied.isFile() || copied.size !== sourceInfo.size) {
+          throw new BrowserPilotError('invalid_argument', 'Artifact import file changed while it was being copied', {
+            context: { field: 'path' },
+            rpcCode: -32602,
+          });
+        }
+        const createdAt = this.now();
+        const descriptor: ArtifactDescriptor = {
+          id,
+          workspaceId,
+          kind: 'upload_input',
+          mimeType: resolvedMimeType,
+          byteSize: copied.size,
+          fileName,
+          sensitivity: 'user_file',
+          createdAt,
+          expiresAt: createdAt + this.ttlMs,
+          retained: false,
+        };
+        const record = { descriptor, path: destination };
+        this.records.set(id, record);
+        return clone(record);
+      } catch (error) {
+        await rm(storageDirectory, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
+    });
+  }
+
   async initialize(): Promise<void> {
     await this.withLock(() => this.ensureDirectory());
   }
@@ -130,6 +236,26 @@ export class ArtifactStore {
     }
     return this.withLock(async () => {
       const record = await this.requireRecordUnlocked(workspaceId, artifactId);
+      let canonicalParent: string;
+      try {
+        canonicalParent = await realpath(dirname(target));
+      } catch (cause) {
+        throw new BrowserPilotError('invalid_argument', 'Artifact export directory is not accessible', {
+          context: { field: 'path' },
+          rpcCode: -32602,
+          cause,
+        });
+      }
+      const canonicalStore = await realpath(this.directory);
+      if (this.isWithin(canonicalStore, join(canonicalParent, basename(target)))) {
+        throw invalidArgument('Artifact export path must be outside Broker storage', 'path');
+      }
+      if (overwrite) {
+        const existing = await lstat(target).catch(() => undefined);
+        if (existing?.isSymbolicLink()) {
+          throw invalidArgument('Artifact export does not follow symbolic links', 'path');
+        }
+      }
       await copyFile(
         record.path,
         target,
@@ -162,7 +288,7 @@ export class ArtifactStore {
       if (!record || record.descriptor.workspaceId !== workspaceId) return;
       this.records.delete(artifactId);
       this.expired.delete(artifactId);
-      await unlink(record.path).catch(() => {});
+      await this.removeStoredFile(record.path);
     });
   }
 
@@ -175,7 +301,7 @@ export class ArtifactStore {
       for (const [artifactId, tombstone] of this.expired) {
         if (tombstone.workspaceId === workspaceId) this.expired.delete(artifactId);
       }
-      await Promise.all(records.map(record => unlink(record.path).catch(() => {})));
+      await Promise.all(records.map(record => this.removeStoredFile(record.path)));
     });
   }
 
@@ -188,7 +314,7 @@ export class ArtifactStore {
       const records = [...this.records.values()];
       this.records.clear();
       this.expired.clear();
-      await Promise.all(records.map(record => unlink(record.path).catch(() => {})));
+      await Promise.all(records.map(record => this.removeStoredFile(record.path)));
     });
   }
 
@@ -199,31 +325,10 @@ export class ArtifactStore {
   private async createUnlocked(input: CreateArtifactInput): Promise<ArtifactRecord> {
     await this.sweepUnlocked();
     const byteSize = input.bytes.byteLength;
-    if (byteSize > this.maxArtifactBytes) {
-      throw new BrowserPilotError('result_too_large', 'Artifact exceeds the per-item size limit', {
-        context: { maxArtifactBytes: this.maxArtifactBytes, byteSize },
-      });
-    }
-    const workspaceBytes = [...this.records.values()]
-      .filter(record => record.descriptor.workspaceId === input.workspaceId)
-      .reduce((sum, record) => sum + record.descriptor.byteSize, 0);
-    const totalBytes = [...this.records.values()]
-      .reduce((sum, record) => sum + record.descriptor.byteSize, 0);
-    if (workspaceBytes + byteSize > this.maxWorkspaceBytes || totalBytes + byteSize > this.maxTotalBytes) {
-      throw new BrowserPilotError('result_too_large', 'Artifact Store quota exceeded', {
-        context: {
-          workspaceId: input.workspaceId,
-          maxWorkspaceBytes: this.maxWorkspaceBytes,
-          maxTotalBytes: this.maxTotalBytes,
-        },
-      });
-    }
+    this.assertQuota(input.workspaceId, byteSize);
 
     await this.ensureDirectory();
-    const id = this.idFactory() as ArtifactId;
-    if (!ARTIFACT_ID_PATTERN.test(id) || this.records.has(id) || this.expired.has(id)) {
-      throw new BrowserPilotError('internal_error', 'Invalid or duplicate Artifact ID');
-    }
+    const id = this.nextArtifactId();
     const file = join(this.directory, `${randomUUID()}.bin`);
     const createdAt = this.now();
     await writeFile(file, input.bytes, { mode: 0o600, flag: 'wx' });
@@ -234,6 +339,7 @@ export class ArtifactStore {
       kind: input.kind,
       mimeType: input.mimeType,
       byteSize,
+      ...(input.fileName !== undefined ? { fileName: input.fileName } : {}),
       ...(input.width !== undefined ? { width: input.width } : {}),
       ...(input.height !== undefined ? { height: input.height } : {}),
       sensitivity: input.sensitivity ?? 'browser_data',
@@ -279,7 +385,7 @@ export class ArtifactStore {
       });
     }
     this.pruneExpiredTombstones(now);
-    await Promise.all(expiredRecords.map(record => unlink(record.path).catch(() => {})));
+    await Promise.all(expiredRecords.map(record => this.removeStoredFile(record.path)));
     return expiredRecords.length;
   }
 
@@ -289,8 +395,8 @@ export class ArtifactStore {
       if (this.purgeOrphansOnInitialize) {
         const entries = await readdir(this.directory, { withFileTypes: true });
         await Promise.all(entries
-          .filter(entry => entry.isFile() && entry.name.endsWith('.bin'))
-          .map(entry => unlink(join(this.directory, entry.name)).catch(() => {})));
+          .filter(entry => (entry.isFile() && entry.name.endsWith('.bin')) || entry.isDirectory())
+          .map(entry => rm(join(this.directory, entry.name), { recursive: true, force: true }).catch(() => {})));
       }
       this.initialized = true;
     }
@@ -311,7 +417,50 @@ export class ArtifactStore {
 
   private isInsideStore(path: string): boolean {
     const child = relative(this.directory, path);
-    return child === '' || (!child.startsWith('..') && !isAbsolute(child));
+    return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child));
+  }
+
+  private isWithin(parent: string, path: string): boolean {
+    const child = relative(parent, path);
+    return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child));
+  }
+
+  private nextArtifactId(): ArtifactId {
+    const id = this.idFactory() as ArtifactId;
+    if (!ARTIFACT_ID_PATTERN.test(id) || this.records.has(id) || this.expired.has(id)) {
+      throw new BrowserPilotError('internal_error', 'Invalid or duplicate Artifact ID');
+    }
+    return id;
+  }
+
+  private assertQuota(workspaceId: BrowserWorkspaceId, byteSize: number): void {
+    if (!Number.isSafeInteger(byteSize) || byteSize < 0 || byteSize > this.maxArtifactBytes) {
+      throw new BrowserPilotError('result_too_large', 'Artifact exceeds the per-item size limit', {
+        context: { maxArtifactBytes: this.maxArtifactBytes, byteSize },
+      });
+    }
+    const workspaceBytes = [...this.records.values()]
+      .filter(record => record.descriptor.workspaceId === workspaceId)
+      .reduce((sum, record) => sum + record.descriptor.byteSize, 0);
+    const totalBytes = [...this.records.values()]
+      .reduce((sum, record) => sum + record.descriptor.byteSize, 0);
+    if (workspaceBytes + byteSize > this.maxWorkspaceBytes || totalBytes + byteSize > this.maxTotalBytes) {
+      throw new BrowserPilotError('result_too_large', 'Artifact Store quota exceeded', {
+        context: {
+          workspaceId,
+          maxWorkspaceBytes: this.maxWorkspaceBytes,
+          maxTotalBytes: this.maxTotalBytes,
+        },
+      });
+    }
+  }
+
+  private async removeStoredFile(path: string): Promise<void> {
+    await unlink(path).catch(() => {});
+    const parent = dirname(path);
+    if (parent !== this.directory && this.isInsideStore(parent)) {
+      await rm(parent, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   private pruneExpiredTombstones(now: number): void {

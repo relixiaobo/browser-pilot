@@ -4,6 +4,7 @@ import {
   type Capability,
   type ArtifactAccessParams,
   type ArtifactExportParams,
+  type ArtifactImportParams,
   type CapabilityNegotiation,
   type CommandAccessParams,
   type EventsPollParams,
@@ -349,6 +350,17 @@ export function validateArtifactExportParams(value: unknown): ArtifactExportPara
     artifactId: validateOpaqueId(value, 'artifactId', ARTIFACT_ID_PATTERN) as ArtifactExportParams['artifactId'],
     path: requireString(value, 'path', { maxLength: 16_384 }),
     ...(value.overwrite !== undefined ? { overwrite: value.overwrite } : {}),
+  };
+}
+
+export function validateArtifactImportParams(value: unknown): ArtifactImportParams {
+  if (!isRecord(value)) throw invalidArgument('artifacts/import params must be an object', 'params');
+  assertOnlyKeys(value, ['workspaceId', 'leaseId', 'path', 'mimeType']);
+  return {
+    workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as ArtifactImportParams['workspaceId'],
+    leaseId: validateOpaqueId(value, 'leaseId', LEASE_ID_PATTERN) as ArtifactImportParams['leaseId'],
+    path: requireString(value, 'path', { maxLength: 16_384 }),
+    ...(value.mimeType !== undefined ? { mimeType: requireString(value, 'mimeType', { maxLength: 256 }) } : {}),
   };
 }
 

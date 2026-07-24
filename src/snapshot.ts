@@ -85,6 +85,11 @@ export interface SnapshotResult {
   truncationReasons?: Array<'element_limit'>;
 }
 
+export interface SnapshotContext {
+  executionContextId?: number;
+  frameId?: string;
+}
+
 // ── Ref persistence (scoped to targetId) ────────────
 
 export function loadRefs(expectedTargetId?: string): RefEntry[] {
@@ -99,13 +104,20 @@ export async function takeSnapshot(
   targetId: string,
   limit = 50,
   refStore: RefStore = legacyRefStore,
+  context: SnapshotContext = {},
 ): Promise<SnapshotResult> {
-  const { result: info } = await transport.send('Runtime.evaluate', {
+  const infoParams: Record<string, unknown> = {
     expression: PAGE_INFO, returnByValue: true,
-  }, sessionId);
+  };
+  if (context.executionContextId) infoParams.contextId = context.executionContextId;
+  const { result: info } = await transport.send('Runtime.evaluate', infoParams, sessionId);
   const { title, url } = JSON.parse(info.value);
 
-  const { nodes } = await transport.send('Accessibility.getFullAXTree', {}, sessionId);
+  const { nodes } = await transport.send(
+    'Accessibility.getFullAXTree',
+    context.frameId ? { frameId: context.frameId } : {},
+    sessionId,
+  );
 
   // Build tree using childIds ordering
   const map = new Map<string, any>();

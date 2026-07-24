@@ -44,6 +44,7 @@ import {
   negotiateProtocol,
   validateArtifactAccessParams,
   validateArtifactExportParams,
+  validateArtifactImportParams,
   validateCommandAccessParams,
   validateEventsPollParams,
   validateInitializeParams,
@@ -119,6 +120,11 @@ export interface BrokerArtifactStore {
   }>;
   release(workspaceId: BrowserWorkspaceId, artifactId: ArtifactId): Promise<void>;
   releaseWorkspace(workspaceId: BrowserWorkspaceId): Promise<void>;
+  importFile(
+    workspaceId: BrowserWorkspaceId,
+    sourcePath: string,
+    mimeType?: string,
+  ): Promise<{ descriptor: ArtifactDescriptor; path: string }>;
 }
 
 export interface BrokerToolCallContext {
@@ -332,6 +338,8 @@ export class MemoryBrokerRuntime {
         return this.getArtifact(connection, params);
       case 'artifacts/export':
         return this.exportArtifact(connection, params);
+      case 'artifacts/import':
+        return this.importArtifact(connection, params);
       case 'artifacts/retain':
         return this.retainArtifact(connection, params);
       case 'artifacts/release':
@@ -1009,6 +1017,17 @@ export class MemoryBrokerRuntime {
       params.path,
       params.overwrite,
     ));
+  }
+
+  private async importArtifact(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
+    const params = validateArtifactImportParams(value);
+    this.requireArtifactContext(connection, params.workspaceId, params.leaseId);
+    const record = await this.requireArtifactStore().importFile(
+      params.workspaceId,
+      params.path,
+      params.mimeType,
+    );
+    return asJson({ artifact: record.descriptor });
   }
 
   private async retainArtifact(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {

@@ -98,6 +98,7 @@ leases/release
 events/poll
 artifacts/get
 artifacts/export
+artifacts/import
 artifacts/retain
 artifacts/release
 shutdown
@@ -188,9 +189,11 @@ Never infer delivery from notification arrival alone, and never advance the
 stored cursor past an event the host has not processed.
 
 Current producers cover command status, Lease expiry, navigation, document
-change, target attach/detach, target control, managed popups, dialogs, and
-observation invalidation. Download, network, and browser reconnect producers
-remain part of the browser-capability workstream.
+change, target attach/detach, target control, managed popups, dialogs, network
+request/response metadata, and observation invalidation. Download and browser
+reconnect producers remain part of the browser-capability workstream. Network
+events never contain credentials, headers, request/response bodies, or raw CDP
+IDs; retrieve sensitive detail explicitly through the scoped network tools.
 
 JavaScript dialogs remain pending. Use `browser.dialogs.list`, then call
 `browser.dialogs.respond` with the returned `dialogId`, target, and explicit
@@ -213,6 +216,20 @@ Large screenshots default to a model-sized preview. Pass
 descriptor whose `previewOf` points to the original. The adapter reads the
 selected file and converts it to its Agent runtime's native image/file content.
 
+For upload, first call `artifacts/import` with the owning Workspace, active
+Lease, and an absolute client-authorized path:
+
+```json
+{"jsonrpc":"2.0","id":30,"method":"artifacts/import","params":{"workspaceId":"workspace:...","leaseId":"lease:...","path":"/absolute/path/resume.pdf","mimeType":"application/pdf"}}
+```
+
+The Broker copies the source into protected storage and returns an
+`upload_input` Artifact descriptor. Pass only its `artifactId` to
+`browser.upload`; optionally identify a file input with
+`observationId + ref` or `inputIndex`. Output Artifacts such as screenshots and
+downloads are rejected as upload inputs. Workspace cleanup deletes the imported
+copy but never deletes the client-owned source file.
+
 ## Cleanup
 
 Normal EOF and `shutdown` release Connection-owned Leases immediately. A killed
@@ -230,9 +247,10 @@ or command state.
 
 `tools/list` is generated from the canonical schemas used for argument and
 result validation, and production filtering prevents unwired tools from being
-advertised. The current bridge supports discovery, connect, open, tab inventory,
-observe/read, core actions, dialogs, cookies, eval, screenshot, PDF, Artifact
-access, command recovery, and event replay.
+advertised. The current bridge supports discovery, connect, open, all-tab
+inventory, observe/read, core actions, scoped frames, explicit dialogs, cookies,
+auth, network observation/rules, eval, screenshot, PDF, protected upload import,
+Artifact access, command recovery, and event replay.
 An embedding adapter should not ship against this work-in-progress bridge until
 browser reconnect handling and the remaining advertised browser families are
 complete.

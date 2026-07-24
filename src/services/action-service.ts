@@ -28,6 +28,7 @@ export interface ActionServiceOptions {
   inputDispatcher?: InputDispatcher;
   readbackDelayMs?: number;
   focusDelayMs?: number;
+  executionContextId?: number;
 }
 
 export interface ActionObservationService {
@@ -130,6 +131,7 @@ export class ActionService {
   private readonly input: InputDispatcher;
   private readonly readbackDelayMs: number;
   private readonly focusDelayMs: number;
+  private readonly executionContextId?: number;
 
   constructor(
     private readonly transport: Transport,
@@ -147,6 +149,7 @@ export class ActionService {
     this.input = options.inputDispatcher ?? new InputDispatcher(transport, sessionId);
     this.readbackDelayMs = options.readbackDelayMs ?? 50;
     this.focusDelayMs = options.focusDelayMs ?? 300;
+    this.executionContextId = options.executionContextId;
   }
 
   async click(target: ClickTarget, options: ClickOptions = {}): Promise<SnapshotResult> {
@@ -269,10 +272,12 @@ export class ActionService {
   }
 
   private async readActiveState(): Promise<EditableState> {
-    const { result } = await this.transport.send('Runtime.evaluate', {
+    const params: Record<string, unknown> = {
       expression: READ_ACTIVE_EDITABLE_STATE,
       returnByValue: true,
-    }, this.sessionId);
+    };
+    if (this.executionContextId) params.contextId = this.executionContextId;
+    const { result } = await this.transport.send('Runtime.evaluate', params, this.sessionId);
     return parseEditableState(result.value);
   }
 

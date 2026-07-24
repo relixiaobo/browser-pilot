@@ -125,8 +125,8 @@ Preserve Browser Pilot advantages:
   - Covers: event contract, NFR-3.
   - Progress: navigation, document change, target attach/detach and control,
     managed popup, dialog, Observation invalidation, Command status, and Lease
-    expiry producers are connected. Download, network, and connection recovery
-    producers remain.
+    expiry and sanitized Workspace network producers are connected. Download and
+    connection recovery producers remain.
 - [ ] **B4.2** Add watchdogs for browser disconnect, stalled navigation,
   detached frames, unhandled dialogs, and repeated no-progress actions.
   - Covers: FR-5, FR-8.
@@ -148,6 +148,9 @@ Preserve Browser Pilot advantages:
 - [ ] **B5.2** Mark passwords, cookies, auth, network bodies, uploads,
   downloads, screenshots, and selected page text with sensitivity metadata.
   - Covers: CON-5.
+  - Progress: auth input, cookie/network output, screenshots, and imported upload
+    inputs carry explicit sensitivity. Download and selected-text propagation
+    remain.
 - [x] **B5.3** Return model-sized screenshot previews and original Artifacts
   through Workstream A's Artifact service.
   - Covers: BR-20, AC-6.

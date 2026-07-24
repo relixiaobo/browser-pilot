@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -38,6 +38,44 @@ test('Artifact Store protects directories and files and does not derive paths fr
   assert.equal((await stat(record.path)).mode & 0o777, 0o600);
   assert.equal(record.path.includes('safe:id'), false);
   assert.deepEqual(await readFile(record.path), Buffer.from([1, 2, 3]));
+});
+
+test('Artifact Store imports an authorized local file as a protected upload input', async t => {
+  const { root, directory, store } = await fixture(t);
+  const source = join(root, 'resume.pdf');
+  await writeFile(source, 'resume contents');
+
+  const record = await store.importFile(workspaceA, source);
+  assert.equal(record.descriptor.kind, 'upload_input');
+  assert.equal(record.descriptor.sensitivity, 'user_file');
+  assert.equal(record.descriptor.fileName, 'resume.pdf');
+  assert.equal(record.descriptor.mimeType, 'application/pdf');
+  assert.equal(record.path.startsWith(`${directory}/`), true);
+  assert.equal(record.path.endsWith('/resume.pdf'), true);
+  assert.equal((await stat(record.path)).mode & 0o777, 0o600);
+  assert.deepEqual(await readFile(record.path), Buffer.from('resume contents'));
+  assert.deepEqual(await readFile(source), Buffer.from('resume contents'));
+
+  await store.release(workspaceA, record.descriptor.id);
+  await assert.rejects(() => stat(record.path), error => error.code === 'ENOENT');
+});
+
+test('Artifact import and export reject symbolic-link paths into Broker storage', async t => {
+  const { root, directory, store } = await fixture(t);
+  const record = await store.create(screenshot(workspaceA));
+  const fileLink = join(root, 'broker-file-link');
+  const directoryLink = join(root, 'broker-directory-link');
+  await symlink(record.path, fileLink);
+  await symlink(directory, directoryLink);
+
+  await assert.rejects(
+    () => store.importFile(workspaceA, fileLink),
+    error => error.code === 'invalid_argument',
+  );
+  await assert.rejects(
+    () => store.export(workspaceA, record.descriptor.id, join(directoryLink, 'export.png')),
+    error => error.code === 'invalid_argument',
+  );
 });
 
 test('Artifact Store enforces atomic quotas under concurrent creation', async t => {
@@ -141,7 +179,7 @@ test('Artifact IDs are validated independently from filesystem paths', async t =
 });
 
 test('Broker Artifact methods require an owning Workspace and active Lease', async t => {
-  const { store } = await fixture(t);
+  const { root, store } = await fixture(t);
   const runtime = new MemoryBrokerRuntime({
     serviceVersion: '1.0.0',
     brokerProcessIdentity: 'broker:artifact-test',
@@ -168,6 +206,16 @@ test('Broker Artifact methods require an owning Workspace and active Lease', asy
   const { workspace } = await runtime.call('bridge:owner', 'workspaces/create', {});
   const { lease } = await runtime.call('bridge:owner', 'leases/create', { workspaceId: workspace.id });
   const record = await store.create(screenshot(workspace.id));
+  const uploadSource = join(root, 'attachment.txt');
+  await writeFile(uploadSource, 'attachment');
+  const imported = await runtime.call('bridge:owner', 'artifacts/import', {
+    workspaceId: workspace.id,
+    leaseId: lease.id,
+    path: uploadSource,
+  });
+  assert.equal(imported.artifact.kind, 'upload_input');
+  assert.equal(imported.artifact.fileName, 'attachment.txt');
+  assert.equal(imported.artifact.sensitivity, 'user_file');
 
   const accessed = await runtime.call('bridge:owner', 'artifacts/get', {
     workspaceId: workspace.id,

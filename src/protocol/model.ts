@@ -16,6 +16,9 @@ export type CommandId = OpaqueId<'CommandId'>;
 export type ArtifactId = OpaqueId<'ArtifactId'>;
 export type BrowserEventId = OpaqueId<'BrowserEventId'>;
 export type EventCursor = OpaqueId<'EventCursor'>;
+export type NetworkRequestId = OpaqueId<'NetworkRequestId'>;
+export type NetworkRuleId = OpaqueId<'NetworkRuleId'>;
+export type FrameId = OpaqueId<'FrameId'>;
 
 export interface ProtocolVersion {
   major: number;
@@ -197,6 +200,13 @@ export interface ArtifactExportParams extends ArtifactAccessParams {
   overwrite?: boolean;
 }
 
+export interface ArtifactImportParams {
+  workspaceId: BrowserWorkspaceId;
+  leaseId: ControlLeaseId;
+  path: string;
+  mimeType?: string;
+}
+
 export interface JsonRpcRequest {
   jsonrpc: '2.0';
   id: string | number;
@@ -328,6 +338,7 @@ export interface ObservationRef {
 export type ObservationInvalidationReason =
   | 'navigation'
   | 'loader_replaced'
+  | 'frame_changed'
   | 'frame_detached'
   | 'session_replaced'
   | 'target_detached'
@@ -384,9 +395,10 @@ export type Sensitivity = 'public' | 'browser_data' | 'credential' | 'user_file'
 export interface ArtifactDescriptor {
   id: ArtifactId;
   workspaceId: BrowserWorkspaceId;
-  kind: 'screenshot' | 'screenshot_preview' | 'pdf' | 'download' | 'upload_receipt';
+  kind: 'screenshot' | 'screenshot_preview' | 'pdf' | 'download' | 'upload_input';
   mimeType: string;
   byteSize: number;
+  fileName?: string;
   width?: number;
   height?: number;
   sensitivity: Sensitivity;

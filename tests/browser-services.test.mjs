@@ -426,11 +426,11 @@ test('FrameService lists nested frames and creates a selected context', async ()
 
   assert.deepEqual(await service.list(), [
     { id: 'top', url: 'https://app.test', name: '' },
-    { id: 'child', url: 'https://frame.test', name: 'details' },
+    { id: 'child', parentId: 'top', url: 'https://frame.test', name: 'details' },
   ]);
   assert.deepEqual(await service.select(1), {
     index: 1,
-    frame: { id: 'child', url: 'https://frame.test', name: 'details' },
+    frame: { id: 'child', parentId: 'top', url: 'https://frame.test', name: 'details' },
     executionContextId: 77,
   });
 });

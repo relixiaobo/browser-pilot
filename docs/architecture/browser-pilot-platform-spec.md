@@ -332,7 +332,7 @@ workspaces/create|get|release
 leases/create|heartbeat|release
 commands/cancel|get
 events/poll
-artifacts/get|export|retain|release
+artifacts/import|get|export|retain|release
 shutdown
 ```
 
@@ -519,10 +519,10 @@ Browser Pilot never auto-accepts them.
 
 ## Artifacts
 
-Artifact descriptors contain an opaque ID, kind, MIME type, byte size,
-dimensions when applicable, sensitivity, creation time, expiry, and optional
-preview relationship. They do not expose internal storage paths as the primary
-identity.
+Artifact descriptors contain an opaque ID, kind, MIME type, byte size, original
+filename or dimensions when applicable, sensitivity, creation time, expiry, and
+optional preview relationship. They do not expose internal storage paths as the
+primary identity.
 
 - **BR-17:** Broker storage directories are mode `0700`; files are mode `0600`
   on platforms that support POSIX permissions.
@@ -533,6 +533,25 @@ identity.
   converts it to the Agent runtime's image/file content type.
 - **BR-20:** Large or full-page screenshots return a model-sized preview plus
   an optional original Artifact.
+
+An adapter authorizes a local upload by calling `artifacts/import` with an
+absolute path, Workspace, and active Lease. The Broker copies the file into
+protected storage as a `user_file` / `upload_input` Artifact while preserving
+its basename. `browser.upload` accepts only that Artifact kind and never treats
+a screenshot, PDF, download, or arbitrary Broker-internal path as upload
+authorization.
+
+Downloads are event-produced Artifacts rather than a separate path-returning
+tool. The implementation must configure download behavior on the controlled
+target session only, stage bytes in a mode-`0700` per-session directory, keep
+the CDP download GUID and staging path private, and ingest a completed file as a
+Workspace-owned `download` Artifact before publishing the completed `download`
+event. Lease/session/Workspace release removes partial staging files; failed,
+cancelled, oversized, or detached downloads publish bounded metadata without a
+local path. Browser-wide `Browser.setDownloadBehavior` on the user's default
+context is forbidden because it would redirect downloads from unrelated user
+tabs. If target-session isolation is unavailable in a Chrome version, Browser
+Pilot reports download capture as unavailable and does not fall back globally.
 
 ## Browser Discovery and Setup
 

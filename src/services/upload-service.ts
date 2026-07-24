@@ -1,7 +1,6 @@
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import type { SnapshotResult } from '../snapshot.js';
 import type { Transport } from '../transport.js';
-import { ObservationService } from './observation-service.js';
 
 export interface UploadInputInfo {
   index: number;
@@ -12,6 +11,12 @@ export interface UploadInputInfo {
 export interface UploadOptions {
   inputIndex?: number;
   observationLimit?: number;
+  backendNodeId?: number;
+  executionContextId?: number;
+}
+
+export interface UploadObservationService {
+  observeAfterAction(limit?: number): Promise<SnapshotResult>;
 }
 
 function parseInputs(value: unknown): UploadInputInfo[] {
@@ -39,7 +44,7 @@ export class UploadService {
   constructor(
     private readonly transport: Transport,
     private readonly sessionId: string,
-    private readonly observations: ObservationService,
+    private readonly observations: UploadObservationService,
   ) {}
 
   async upload(filePath: string, options: UploadOptions = {}): Promise<SnapshotResult> {
@@ -49,10 +54,21 @@ export class UploadService {
       throw invalidArgument('inputIndex must be a positive integer', 'inputIndex');
     }
 
-    const { result } = await this.transport.send('Runtime.evaluate', {
+    if (options.backendNodeId !== undefined) {
+      if (!Number.isSafeInteger(options.backendNodeId) || options.backendNodeId < 1) {
+        throw invalidArgument('backendNodeId must be a positive integer', 'backendNodeId');
+      }
+      await this.assertFileInput(options.backendNodeId);
+      await this.setFiles(filePath, options.backendNodeId);
+      return this.observations.observeAfterAction(options.observationLimit);
+    }
+
+    const evaluationParams: Record<string, unknown> = {
       expression: `JSON.stringify(Array.from(document.querySelectorAll('input[type=file]')).map((el,i) => ({index:i+1, name:el.name||el.id||'unnamed', accept:el.accept||'*'})))`,
       returnByValue: true,
-    }, this.sessionId);
+    };
+    if (options.executionContextId) evaluationParams.contextId = options.executionContextId;
+    const { result } = await this.transport.send('Runtime.evaluate', evaluationParams, this.sessionId);
     const inputs = parseInputs(result.value);
     if (inputs.length === 0) throw invalidArgument('No <input type="file"> found on this page');
     if (inputIndex > inputs.length) {
@@ -63,9 +79,11 @@ export class UploadService {
       );
     }
 
-    const { result: element } = await this.transport.send('Runtime.evaluate', {
+    const elementParams: Record<string, unknown> = {
       expression: `document.querySelectorAll('input[type=file]')[${inputIndex - 1}]`,
-    }, this.sessionId);
+    };
+    if (options.executionContextId) elementParams.contextId = options.executionContextId;
+    const { result: element } = await this.transport.send('Runtime.evaluate', elementParams, this.sessionId);
     if (!element.objectId) {
       throw new BrowserPilotError('internal_error', 'Chrome could not resolve the selected file input');
     }
@@ -76,10 +94,7 @@ export class UploadService {
       if (!Number.isSafeInteger(node?.backendNodeId)) {
         throw new BrowserPilotError('internal_error', 'Chrome returned an invalid file input node');
       }
-      await this.transport.send('DOM.setFileInputFiles', {
-        files: [filePath],
-        backendNodeId: node.backendNodeId,
-      }, this.sessionId);
+      await this.setFiles(filePath, node.backendNodeId);
     } finally {
       await this.transport.send('Runtime.releaseObject', {
         objectId: element.objectId,
@@ -87,5 +102,24 @@ export class UploadService {
     }
 
     return this.observations.observeAfterAction(options.observationLimit);
+  }
+
+  private async assertFileInput(backendNodeId: number): Promise<void> {
+    const { node } = await this.transport.send('DOM.describeNode', { backendNodeId }, this.sessionId);
+    const attributes = Array.isArray(node?.attributes) ? node.attributes : [];
+    const typeIndex = attributes.findIndex((value: unknown, index: number) => (
+      index % 2 === 0 && String(value).toLowerCase() === 'type'
+    ));
+    const inputType = typeIndex >= 0 ? String(attributes[typeIndex + 1]).toLowerCase() : '';
+    if (String(node?.nodeName).toUpperCase() !== 'INPUT' || inputType !== 'file') {
+      throw invalidArgument('Observation ref does not identify a file input', 'ref');
+    }
+  }
+
+  private async setFiles(filePath: string, backendNodeId: number): Promise<void> {
+    await this.transport.send('DOM.setFileInputFiles', {
+      files: [filePath],
+      backendNodeId,
+    }, this.sessionId);
   }
 }

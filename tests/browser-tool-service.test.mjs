@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -30,6 +30,8 @@ class BrowserFixtureTransport {
   nextTarget = 1;
   nextSession = 1;
   screenshotDimensions;
+  responseBodies = new Map();
+  childFrames = [];
 
   async send(method, params = {}, sessionId) {
     this.calls.push({ method, params, sessionId });
@@ -59,6 +61,18 @@ class BrowserFixtureTransport {
         this.loaders.delete(params.targetId);
         return { success: true };
       case 'Page.enable': return {};
+      case 'Page.createIsolatedWorld': return { executionContextId: 77 };
+      case 'Network.enable': return {};
+      case 'Network.getResponseBody': return this.responseBodies.get(`${sessionId}\u0000${params.requestId}`) ?? {
+        body: 'response-body',
+        base64Encoded: false,
+      };
+      case 'Fetch.enable': return {};
+      case 'Fetch.disable': return {};
+      case 'Fetch.continueWithAuth': return {};
+      case 'Fetch.continueRequest': return {};
+      case 'Fetch.failRequest': return {};
+      case 'Fetch.fulfillRequest': return {};
       case 'Page.handleJavaScriptDialog':
         this.emit('Page.javascriptDialogClosed', { result: params.accept }, sessionId);
         return {};
@@ -76,6 +90,7 @@ class BrowserFixtureTransport {
               url: target.url,
               name: '',
             },
+            ...(this.childFrames.length > 0 ? { childFrames: this.childFrames.map(frame => ({ frame })) } : {}),
           },
         };
       case 'Runtime.evaluate': {
@@ -83,6 +98,12 @@ class BrowserFixtureTransport {
         if (params.expression === 'document.readyState') return { result: { value: 'complete' } };
         if (params.expression === '6 * 7') return { result: { value: 42 } };
         if (params.expression === 'location.href') return { result: { value: target.url } };
+        if (String(params.expression).startsWith("JSON.stringify(Array.from(document.querySelectorAll('input[type=file]'))")) {
+          return { result: { value: JSON.stringify([{ index: 1, name: 'attachment', accept: '*/*' }]) } };
+        }
+        if (String(params.expression).startsWith("document.querySelectorAll('input[type=file]')")) {
+          return { result: { objectId: 'object:file-input' } };
+        }
         if (String(params.expression).startsWith('JSON.stringify({title:document.title')) {
           return { result: { value: JSON.stringify({ title: target.title, url: target.url }) } };
         }
@@ -110,6 +131,10 @@ class BrowserFixtureTransport {
           ],
         };
       case 'DOM.resolveNode': return { object: { objectId: `object:${params.backendNodeId}` } };
+      case 'DOM.describeNode': return {
+        node: { backendNodeId: 72, nodeName: 'INPUT', attributes: ['type', 'file'] },
+      };
+      case 'DOM.setFileInputFiles': return {};
       case 'Runtime.releaseObject': return {};
       case 'Runtime.callFunctionOn':
         if (String(params.functionDeclaration).includes('getBoundingClientRect')) {
@@ -202,6 +227,9 @@ function initialize(runtime, bridge, clientId, instanceId) {
       'observation.read',
       'action.input',
       'cookies.read',
+      'network.observe',
+      'network.modify',
+      'auth.manage',
       'artifact.read',
       'event.read',
       'developer.eval',
@@ -244,8 +272,8 @@ test('production tools/list exposes only fully wired Browser tools', async () =>
   const names = manifest.tools.map(definition => definition.name);
   assert.deepEqual(names, [...browserTools.supportedTools]);
   assert.equal(names.includes('browser.capture'), false);
-  assert.equal(names.includes('browser.network.requests'), false);
-  assert.equal(names.includes('browser.auth.set'), false);
+  assert.equal(names.includes('browser.network.requests'), true);
+  assert.equal(names.includes('browser.auth.set'), true);
 });
 
 test('tools/call lists user tabs, creates a managed target, and preserves user tabs on release', async () => {
@@ -332,6 +360,316 @@ test('dialogs remain pending, emit ordered events, and require an explicit respo
   assert.deepEqual(dialogEvents.map(event => event.payload.state), ['opened', 'closed']);
   assert.equal(dialogEvents[0].payload.dialogId, dialogId);
   assert.equal(dialogEvents[1].payload.action, 'dismiss');
+});
+
+test('Workspace auth and network rules are active before first navigation and use explicit Fetch handling', async () => {
+  const transport = new BrowserFixtureTransport();
+  const browserTools = new BrowserToolService(transport, binding);
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: browserTools,
+  });
+  const client = await createClient(runtime, 'bridge:network-config', 'com.example.agent', 'instance:network-config');
+
+  const configured = await tool(runtime, client, 'browser.auth.set', {
+    username: 'workspace-user',
+    password: 'workspace-password',
+  });
+  assert.equal(configured.configured, true);
+  const added = await tool(runtime, client, 'browser.network.rules.add', {
+    type: 'block',
+    pattern: 'https://blocked.test/*',
+  });
+  assert.match(added.ruleId, /^rule:/);
+  assert.deepEqual((await tool(runtime, client, 'browser.network.rules.list', {})).rules, [{
+    ruleId: added.ruleId,
+    type: 'block',
+    pattern: 'https://blocked.test/*',
+  }]);
+
+  await tool(runtime, client, 'browser.open', {
+    url: 'https://managed.test/network',
+    newTarget: true,
+  });
+  const sessionId = [...transport.sessions.entries()]
+    .find(([, targetId]) => targetId === 'managed-1')[0];
+  const networkEnableIndex = transport.calls.findIndex(call => (
+    call.method === 'Network.enable' && call.sessionId === sessionId
+  ));
+  const fetchEnableIndex = transport.calls.findIndex(call => (
+    call.method === 'Fetch.enable' && call.sessionId === sessionId
+  ));
+  const navigateIndex = transport.calls.findIndex(call => (
+    call.method === 'Page.navigate' && call.sessionId === sessionId
+  ));
+  assert.ok(networkEnableIndex >= 0 && networkEnableIndex < navigateIndex);
+  assert.ok(fetchEnableIndex >= 0 && fetchEnableIndex < navigateIndex);
+  assert.deepEqual(transport.calls[fetchEnableIndex].params, {
+    patterns: [{ urlPattern: '*' }],
+    handleAuthRequests: true,
+  });
+
+  transport.emit('Fetch.authRequired', { requestId: 'auth-1' }, sessionId);
+  transport.emit('Fetch.requestPaused', {
+    requestId: 'paused-1',
+    request: { url: 'https://blocked.test/private', headers: {} },
+  }, sessionId);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(
+    transport.calls.find(call => call.method === 'Fetch.continueWithAuth' && call.sessionId === sessionId)?.params,
+    {
+      requestId: 'auth-1',
+      authChallengeResponse: {
+        response: 'ProvideCredentials',
+        username: 'workspace-user',
+        password: 'workspace-password',
+      },
+    },
+  );
+  assert.deepEqual(
+    transport.calls.find(call => call.method === 'Fetch.failRequest' && call.sessionId === sessionId)?.params,
+    { requestId: 'paused-1', reason: 'BlockedByClient' },
+  );
+
+  await tool(runtime, client, 'browser.auth.clear', {});
+  await tool(runtime, client, 'browser.network.rules.remove', { all: true });
+  assert.equal(transport.calls.some(call => call.method === 'Fetch.disable' && call.sessionId === sessionId), true);
+});
+
+test('network journals, bodies, rules, auth, and events remain isolated across Agent Workspaces', async () => {
+  const transport = new BrowserFixtureTransport();
+  const browserTools = new BrowserToolService(transport, binding);
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: browserTools,
+  });
+  const first = await createClient(runtime, 'bridge:network-a', 'com.first.agent', 'instance:network-a');
+  const second = await createClient(runtime, 'bridge:network-b', 'com.second.agent', 'instance:network-b');
+  await tool(runtime, first, 'browser.open', { url: 'https://first.test/', newTarget: true });
+  await tool(runtime, second, 'browser.open', { url: 'https://second.test/', newTarget: true });
+  const firstSession = [...transport.sessions.entries()].find(([, targetId]) => targetId === 'managed-1')[0];
+  const secondSession = [...transport.sessions.entries()].find(([, targetId]) => targetId === 'managed-2')[0];
+
+  const emitRequest = (sessionId, url, status, secret) => {
+    transport.emit('Network.requestWillBeSent', {
+      requestId: 'shared-cdp-request-id',
+      type: 'XHR',
+      request: {
+        method: 'POST',
+        url,
+        headers: { Authorization: `Bearer ${secret}` },
+        postData: `secret-post-${secret}`,
+      },
+    }, sessionId);
+    transport.emit('Network.responseReceived', {
+      requestId: 'shared-cdp-request-id',
+      response: {
+        status,
+        statusText: 'OK',
+        headers: { 'Set-Cookie': `session=${secret}` },
+        mimeType: 'application/json',
+      },
+    }, sessionId);
+    transport.emit('Network.loadingFinished', {
+      requestId: 'shared-cdp-request-id',
+      encodedDataLength: 123,
+    }, sessionId);
+    transport.responseBodies.set(`${sessionId}\u0000shared-cdp-request-id`, {
+      body: `secret-body-${secret}`,
+      base64Encoded: false,
+    });
+  };
+  emitRequest(firstSession, 'https://first.test/api?token=first', 201, 'first');
+  emitRequest(secondSession, 'https://second.test/api', 202, 'second');
+
+  const firstRequests = await tool(runtime, first, 'browser.network.requests', {});
+  const secondRequests = await tool(runtime, second, 'browser.network.requests', {});
+  assert.deepEqual(firstRequests.requests.map(request => request.url), ['https://first.test/api?token=first']);
+  assert.deepEqual(secondRequests.requests.map(request => request.url), ['https://second.test/api']);
+  assert.notEqual(firstRequests.requests[0].requestId, secondRequests.requests[0].requestId);
+  const firstDetail = await tool(runtime, first, 'browser.network.request', {
+    requestId: firstRequests.requests[0].requestId,
+    includeBody: true,
+  });
+  assert.equal(firstDetail.body, 'secret-body-first');
+  assert.equal(firstDetail.bodyEncoding, 'utf8');
+  assert.equal(firstDetail.request.requestHeaders[0].value, 'Bearer first');
+  await assert.rejects(
+    () => tool(runtime, second, 'browser.network.request', {
+      requestId: firstRequests.requests[0].requestId,
+      includeBody: true,
+    }),
+    error => error.code === 'invalid_argument',
+  );
+
+  const events = await runtime.call(first.bridge, 'events/poll', {
+    workspaceId: first.workspace.id,
+    cursor: first.eventCursor,
+  });
+  const networkEvents = events.events.filter(event => event.type.startsWith('network.'));
+  assert.deepEqual(networkEvents.map(event => event.type), ['network.request', 'network.response']);
+  const serializedEvents = JSON.stringify(networkEvents);
+  assert.equal(serializedEvents.includes('Bearer first'), false);
+  assert.equal(serializedEvents.includes('secret-post-first'), false);
+  assert.equal(serializedEvents.includes('secret-body-first'), false);
+  assert.equal(serializedEvents.includes('Set-Cookie'), false);
+  assert.equal(serializedEvents.includes('token=first'), false);
+
+  await runtime.call(first.bridge, 'workspaces/release', { workspaceId: first.workspace.id });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(browserTools.ownsSession(firstSession), false);
+  assert.equal(browserTools.ownsSession(secondSession), true);
+  const callsBeforeRetiredEvent = transport.calls.length;
+  transport.emit('Fetch.requestPaused', {
+    requestId: 'after-release',
+    request: { url: 'https://first.test/after-release', headers: {} },
+  }, firstSession);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(transport.calls.length, callsBeforeRetiredEvent);
+  assert.deepEqual(
+    (await tool(runtime, second, 'browser.network.requests', {})).requests.map(request => request.url),
+    ['https://second.test/api'],
+  );
+});
+
+test('Workspace network configuration survives Lease replacement and journals are bounded and clearable', async () => {
+  const transport = new BrowserFixtureTransport();
+  const browserTools = new BrowserToolService(transport, binding);
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: browserTools,
+  });
+  const client = await createClient(runtime, 'bridge:network-lease', 'com.example.agent', 'instance:network-lease');
+  await tool(runtime, client, 'browser.network.rules.add', {
+    type: 'headers',
+    pattern: 'https://api.test/*',
+    headers: [{ name: 'X-Agent', value: 'replacement-lease' }],
+  });
+  await runtime.call(client.bridge, 'leases/release', { leaseId: client.lease.id });
+  const replacement = await runtime.call(client.bridge, 'leases/create', { workspaceId: client.workspace.id });
+  client.lease = replacement.lease;
+  await tool(runtime, client, 'browser.open', { url: 'https://api.test/start', newTarget: true });
+  const sessionId = [...transport.sessions.entries()].find(([, targetId]) => targetId === 'managed-1')[0];
+  assert.equal(
+    transport.calls.some(call => call.method === 'Fetch.enable' && call.sessionId === sessionId),
+    true,
+  );
+
+  for (let index = 0; index < 1001; index += 1) {
+    transport.emit('Network.requestWillBeSent', {
+      requestId: `request-${index}`,
+      type: 'Fetch',
+      request: { method: 'GET', url: `https://api.test/${index}`, headers: {} },
+    }, sessionId);
+  }
+  const bounded = await tool(runtime, client, 'browser.network.requests', { limit: 1000, after: 0 });
+  assert.equal(bounded.requests.length, 1000);
+  assert.equal(bounded.requests[0].url, 'https://api.test/1');
+  assert.equal(bounded.truncated, true);
+  assert.equal(bounded.nextCursor, 1001);
+
+  await tool(runtime, client, 'browser.network.clear', {});
+  assert.deepEqual(await tool(runtime, client, 'browser.network.requests', {}), {
+    workspaceId: client.workspace.id,
+    leaseId: client.lease.id,
+    requests: [],
+    nextCursor: 0,
+    truncated: false,
+  });
+});
+
+test('frame tools expose session-scoped opaque IDs and apply the selected execution context', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.childFrames = [{
+    id: 'cdp-child-frame',
+    loaderId: 'loader:child:1',
+    url: 'https://frame.test/details',
+    name: 'details',
+  }];
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:frames', 'com.example.agent', 'instance:frames');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+
+  const listed = await tool(runtime, client, 'browser.frames.list', {}, targetId);
+  assert.equal(listed.frames.length, 2);
+  assert.match(listed.frames[0].frameId, /^frame:/);
+  assert.notEqual(listed.frames[0].frameId, 'frame:user-form');
+  assert.notEqual(listed.frames[1].frameId, 'cdp-child-frame');
+  assert.equal(listed.frames[1].parentFrameId, listed.frames[0].frameId);
+  const childFrameId = listed.frames[1].frameId;
+
+  const selected = await tool(runtime, client, 'browser.frames.switch', { frameId: childFrameId }, targetId);
+  assert.equal(selected.frameId, childFrameId);
+  const evaluated = await tool(runtime, client, 'browser.eval', { expression: '6 * 7' }, targetId);
+  assert.equal(evaluated.value, 42);
+  const framedEvaluation = transport.calls.filter(call => (
+    call.method === 'Runtime.evaluate' && call.params.expression === '6 * 7'
+  )).at(-1);
+  assert.equal(framedEvaluation.params.contextId, 77);
+
+  const top = await tool(runtime, client, 'browser.frames.switch', { top: true }, targetId);
+  assert.equal(top.frameId, listed.frames[0].frameId);
+  await tool(runtime, client, 'browser.eval', { expression: '6 * 7' }, targetId);
+  const topEvaluation = transport.calls.filter(call => (
+    call.method === 'Runtime.evaluate' && call.params.expression === '6 * 7'
+  )).at(-1);
+  assert.equal('contextId' in topEvaluation.params, false);
+});
+
+test('browser.upload consumes only imported upload_input Artifacts and preserves the source filename', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'browser-pilot-upload-artifacts-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, 'resume.txt');
+  await writeFile(source, 'resume contents');
+  const artifactStore = new ArtifactStore({ directory: join(root, 'store') });
+  await artifactStore.initialize();
+  const transport = new BrowserFixtureTransport();
+  const browserTools = new BrowserToolService(transport, binding, { artifactStore });
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: browserTools,
+    artifactStore,
+  });
+  const client = await createClient(runtime, 'bridge:upload', 'com.example.agent', 'instance:upload');
+  const imported = await runtime.call(client.bridge, 'artifacts/import', {
+    workspaceId: client.workspace.id,
+    leaseId: client.lease.id,
+    path: source,
+  });
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+
+  const uploaded = await tool(runtime, client, 'browser.upload', {
+    artifactId: imported.artifact.id,
+  }, targetId);
+  assert.match(uploaded.observationId, /^observation:/);
+  const dispatch = transport.calls.find(call => call.method === 'DOM.setFileInputFiles');
+  assert.equal(dispatch.params.files[0] === source, false);
+  assert.equal(dispatch.params.files[0].endsWith('/resume.txt'), true);
+  assert.deepEqual(await readFile(dispatch.params.files[0]), Buffer.from('resume contents'));
+
+  const screenshot = await artifactStore.create({
+    workspaceId: client.workspace.id,
+    kind: 'screenshot',
+    mimeType: 'image/png',
+    bytes: Buffer.from('not-an-upload-input'),
+  });
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.upload', { artifactId: screenshot.descriptor.id }, targetId),
+    error => error.code === 'invalid_argument',
+  );
 });
 
 test('Observation refs are Lease-scoped, stale after navigation, and actions return a new Observation', async () => {
