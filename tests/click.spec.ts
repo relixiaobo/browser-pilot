@@ -88,6 +88,20 @@ test.describe('click shadow DOM', () => {
 // ── Overlay / Modal ─────────────────────────────────
 
 test.describe('click overlay', () => {
+  test('should reject a button fully covered by an overlay', async () => {
+    const snap = open(`${BASE}/click/overlay`);
+    expect(snap.ok).toBe(true);
+    const behindRef = findRef(snap, 'Behind Button');
+    expect(behindRef).toBeDefined();
+
+    const result = click(behindRef!);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('not currently pointer-interactable');
+    const val = evaluate('window.behindClicked');
+    expect(val.value).toBe(false);
+  });
+
   test('should click modal button on top of overlay', async () => {
     const snap = open(`${BASE}/click/overlay`);
     expect(snap.ok).toBe(true);
@@ -114,6 +128,22 @@ test.describe('click overlay', () => {
     expect(result.ok).toBe(true);
     const val = evaluate('window.behindClicked');
     expect(val.value).toBe(true);
+  });
+});
+
+test.describe('click enabled state', () => {
+  test('should reject an element disabled after it was observed', async () => {
+    const snap = open(`${BASE}/click/fixed`);
+    expect(snap.ok).toBe(true);
+    const ref = findRef(snap, 'Fixed Button');
+    expect(ref).toBeDefined();
+    expect(evaluate('document.getElementById("fixed-btn").disabled = true').value).toBe(true);
+
+    const result = click(ref!);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('not currently pointer-interactable');
+    expect(evaluate('window.fixedClicked').value).toBe(false);
   });
 });
 

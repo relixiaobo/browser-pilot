@@ -110,7 +110,7 @@ test('ActionService resolves a ref, clicks its current coordinates, and releases
   refs.save('target-4', [{ backendNodeId: 99, role: 'link', name: 'Details' }]);
   const transport = new FakeTransport(method => {
     if (method === 'DOM.resolveNode') return { object: { objectId: 'object-1' } };
-    if (method === 'Runtime.callFunctionOn') return { result: { value: JSON.stringify({ x: 44, y: 55 }) } };
+    if (method === 'Runtime.callFunctionOn') return { result: { value: { status: 'ready', x: 44, y: 55 } } };
     return {};
   });
   const service = new ActionService(transport, 'session-4', 'target-4', {
@@ -127,6 +127,112 @@ test('ActionService resolves a ref, clicks its current coordinates, and releases
     transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').map(call => [call.params.x, call.params.y]),
     [[44, 55], [44, 55], [44, 55]],
   );
+});
+
+for (const blocked of [
+  { reason: 'disabled', retryable: false },
+  { reason: 'obscured', retryable: true, obstruction: { tagName: 'div', role: 'dialog' } },
+]) {
+  test(`ActionService rejects ${blocked.reason === 'obscured' ? 'an' : 'a'} ${blocked.reason} ref before pointer dispatch`, async () => {
+    const refs = new MemoryRefStore();
+    refs.save('target-blocked', [{ backendNodeId: 101, role: 'button', name: 'Save' }]);
+    const transport = new FakeTransport(method => {
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'object-blocked' } };
+      if (method === 'Runtime.callFunctionOn') {
+        return { result: { value: { status: 'blocked', ...blocked } } };
+      }
+      return {};
+    });
+    const service = new ActionService(transport, 'session-blocked', 'target-blocked', {
+      refStore: refs,
+      observationService: { async observeAfterAction() { return snapshot; } },
+    });
+
+    await assert.rejects(
+      () => service.click({ kind: 'ref', ref: '1' }),
+      error => {
+        assert.equal(error.code, 'action_not_verified');
+        assert.equal(error.retryable, blocked.retryable);
+        assert.equal(error.context.reason, blocked.reason);
+        if (blocked.obstruction) assert.deepEqual(error.context.obstruction, blocked.obstruction);
+        return true;
+      },
+    );
+    assert.equal(transport.calls.some(call => call.method === 'Input.dispatchMouseEvent'), false);
+    assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
+  });
+}
+
+test('ActionService reports a detached pointer target as a stale ref', async () => {
+  const refs = new MemoryRefStore();
+  refs.save('target-detached', [{ backendNodeId: 102, role: 'link', name: 'Next' }]);
+  const transport = new FakeTransport(method => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'object-detached' } };
+    if (method === 'Runtime.callFunctionOn') {
+      return { result: { value: { status: 'blocked', reason: 'detached' } } };
+    }
+    return {};
+  });
+  const service = new ActionService(transport, 'session-detached', 'target-detached', {
+    refStore: refs,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  await assert.rejects(
+    () => service.click({ kind: 'ref', ref: '1' }),
+    error => error.code === 'stale_ref' && error.context?.reason === 'detached',
+  );
+  assert.equal(transport.calls.some(call => call.method === 'Input.dispatchMouseEvent'), false);
+  assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
+});
+
+test('ActionService dispatches a page-validated descendant or label hit point', async () => {
+  const refs = new MemoryRefStore();
+  refs.save('target-label', [{ backendNodeId: 103, role: 'checkbox', name: 'Remember me' }]);
+  const transport = new FakeTransport(method => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'object-label' } };
+    if (method === 'Runtime.callFunctionOn') {
+      return { result: { value: { status: 'ready', x: 12.5, y: 18.75 } } };
+    }
+    return {};
+  });
+  const service = new ActionService(transport, 'session-label', 'target-label', {
+    refStore: refs,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  await service.click({ kind: 'ref', ref: '1' });
+
+  assert.deepEqual(
+    transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').map(call => [call.params.x, call.params.y]),
+    [[12.5, 18.75], [12.5, 18.75], [12.5, 18.75]],
+  );
+  const validationCall = transport.calls.find(call => call.method === 'Runtime.callFunctionOn');
+  assert.match(validationCall.params.functionDeclaration, /elementsFromPoint/);
+  assert.match(validationCall.params.functionDeclaration, /labels/);
+});
+
+test('ActionService fails closed when Chrome returns an invalid pointer target state', async () => {
+  const refs = new MemoryRefStore();
+  refs.save('target-invalid', [{ backendNodeId: 104, role: 'button', name: 'Continue' }]);
+  const transport = new FakeTransport(method => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'object-invalid' } };
+    if (method === 'Runtime.callFunctionOn') {
+      return { result: { value: { status: 'ready', x: 'not-a-coordinate', y: 20 } } };
+    }
+    return {};
+  });
+  const service = new ActionService(transport, 'session-invalid', 'target-invalid', {
+    refStore: refs,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  await assert.rejects(
+    () => service.click({ kind: 'ref', ref: '1' }),
+    error => error.code === 'internal_error',
+  );
+  assert.equal(transport.calls.some(call => call.method === 'Input.dispatchMouseEvent'), false);
+  assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
 });
 
 test('ActionService rejects double right-click before dispatch', async () => {

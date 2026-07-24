@@ -1,10 +1,117 @@
 // JavaScript injected into the page via Runtime.callFunctionOn / Runtime.evaluate.
 
-/** Return {x, y} center of `this` element after scrolling it into view. */
-export const GET_CLICK_COORDS = `function() {
-  this.scrollIntoView({block:'center',inline:'center'});
-  const r = this.getBoundingClientRect();
-  return JSON.stringify({x: r.x + r.width/2, y: r.y + r.height/2});
+/** Validate `this` as a pointer target and return a safe in-viewport point. */
+export const GET_POINTER_TARGET_STATE = `function() {
+  const blocked = (reason, obstruction) => ({
+    status: 'blocked',
+    reason,
+    ...(obstruction ? {obstruction} : {}),
+  });
+  const composedParent = node => {
+    if (node && node.parentElement) return node.parentElement;
+    const root = node && typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    return root && root.host ? root.host : null;
+  };
+  const composedContains = (container, node) => {
+    for (let current = node; current; current = composedParent(current)) {
+      if (current === container) return true;
+    }
+    return false;
+  };
+  const isShadowHostOf = (node, possibleHost) => {
+    let root = node && typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    while (root && root.host) {
+      if (root.host === possibleHost) return true;
+      root = typeof root.host.getRootNode === 'function' ? root.host.getRootNode() : null;
+    }
+    return false;
+  };
+  const describes = node => {
+    if (!node || typeof node.tagName !== 'string') return undefined;
+    const tagName = node.tagName.toLowerCase().slice(0, 40);
+    const rawRole = typeof node.getAttribute === 'function' ? node.getAttribute('role') : null;
+    const role = typeof rawRole === 'string' ? rawRole.trim().slice(0, 40) : '';
+    return role ? {tagName, role} : {tagName};
+  };
+
+  const target = this;
+  if (!target || target.nodeType !== 1 || !target.isConnected) return blocked('detached');
+  target.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
+  if (!target.isConnected) return blocked('detached');
+
+  const style = getComputedStyle(target);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') {
+    return blocked('no_layout');
+  }
+
+  for (let current = target; current; current = composedParent(current)) {
+    const ariaDisabled = typeof current.getAttribute === 'function'
+      ? current.getAttribute('aria-disabled') : null;
+    const nativeDisabled = typeof current.matches === 'function' && current.matches(':disabled');
+    if (nativeDisabled || current.inert === true || String(ariaDisabled).trim().toLowerCase() === 'true') {
+      return blocked('disabled');
+    }
+  }
+
+  const viewportWidth = Math.max(0, window.innerWidth || document.documentElement.clientWidth || 0);
+  const viewportHeight = Math.max(0, window.innerHeight || document.documentElement.clientHeight || 0);
+  const rectList = target.getClientRects();
+  const rects = [];
+  for (let index = 0; index < Math.min(rectList.length, 64); index += 1) {
+    const rect = rectList[index];
+    if (
+      Number.isFinite(rect.left) && Number.isFinite(rect.top) &&
+      Number.isFinite(rect.right) && Number.isFinite(rect.bottom) &&
+      rect.width > 0 && rect.height > 0
+    ) rects.push(rect);
+  }
+  if (rects.length === 0) return blocked('no_layout');
+
+  const visibleRects = rects.map(rect => ({
+    left: Math.max(0, rect.left),
+    top: Math.max(0, rect.top),
+    right: Math.min(viewportWidth, rect.right),
+    bottom: Math.min(viewportHeight, rect.bottom),
+  })).filter(rect => rect.right > rect.left && rect.bottom > rect.top)
+    .sort((a, b) => ((b.right - b.left) * (b.bottom - b.top)) - ((a.right - a.left) * (a.bottom - a.top)))
+    .slice(0, 4);
+  if (visibleRects.length === 0) return blocked('outside_viewport');
+
+  const labels = [];
+  if (target.labels && typeof target.labels.length === 'number') {
+    for (let index = 0; index < Math.min(target.labels.length, 32); index += 1) {
+      labels.push(target.labels[index]);
+    }
+  }
+  for (let current = target; current; current = composedParent(current)) {
+    if (String(current.tagName).toLowerCase() === 'label') labels.push(current);
+  }
+  const accepts = hit => {
+    if (!hit) return false;
+    if (hit === target || composedContains(target, hit) || isShadowHostOf(target, hit)) return true;
+    return labels.some(label => (
+      hit === label || composedContains(label, hit) || isShadowHostOf(label, hit)
+    ));
+  };
+
+  let firstObstruction;
+  for (const rect of visibleRects) {
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    const points = [
+      [rect.left + width * 0.5, rect.top + height * 0.5],
+      [rect.left + width * 0.25, rect.top + height * 0.25],
+      [rect.left + width * 0.75, rect.top + height * 0.25],
+      [rect.left + width * 0.25, rect.top + height * 0.75],
+      [rect.left + width * 0.75, rect.top + height * 0.75],
+    ];
+    for (const [x, y] of points) {
+      const hit = document.elementsFromPoint(x, y)[0];
+      if (accepts(hit)) return {status:'ready', x, y};
+      if (!firstObstruction && hit) firstObstruction = describes(hit);
+    }
+  }
+  return blocked('obscured', firstObstruction);
 }`;
 
 /** Focus `this`, set its value (React-compatible), dispatch input+change. */

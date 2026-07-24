@@ -97,9 +97,15 @@ Preserve Browser Pilot advantages:
 
 ### B3. Make actions verifiable
 
-- [ ] **B3.1** Before pointer actions, verify current bounds, viewport
+- [x] **B3.1** Before pointer actions, verify current bounds, viewport
   intersection, hit-test target, enabled state, and obstruction.
   - Covers: AC-8.
+  - Complete: ref clicks now scroll and revalidate connected layout, viewport
+    intersection, native/ARIA disabled state, and multiple hit-test points
+    across visible client rects. Descendant, associated-label, and shadow-host
+    hits are accepted; detached refs return `stale_ref`, while non-interactable
+    refs return bounded `action_not_verified` reasons before any pointer event.
+    Explicit coordinate clicks remain the low-level escape hatch.
 - [ ] **B3.2** After click, verify expected checkbox, radio, selection, focus,
   dialog, navigation, popup, or document effects where observable.
   - Covers: AC-8.

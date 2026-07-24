@@ -32,6 +32,7 @@ class BrowserFixtureTransport {
   screenshotDimensions;
   responseBodies = new Map();
   childFrames = [];
+  pointerTargetState = { status: 'ready', x: 100, y: 80 };
 
   async send(method, params = {}, sessionId) {
     this.calls.push({ method, params, sessionId });
@@ -137,8 +138,8 @@ class BrowserFixtureTransport {
       case 'DOM.setFileInputFiles': return {};
       case 'Runtime.releaseObject': return {};
       case 'Runtime.callFunctionOn':
-        if (String(params.functionDeclaration).includes('getBoundingClientRect')) {
-          return { result: { value: JSON.stringify({ x: 100, y: 80 }) } };
+        if (String(params.functionDeclaration).includes('elementsFromPoint')) {
+          return { result: { value: this.pointerTargetState } };
         }
         return { result: { value: { kind: 'input', value: '', sensitive: false } } };
       case 'Input.dispatchMouseEvent': return {};
@@ -700,6 +701,37 @@ test('Observation refs are Lease-scoped, stale after navigation, and actions ret
     }, targetId),
     error => error.code === 'stale_ref',
   );
+});
+
+test('browser.click returns a typed obstruction error without dispatching pointer events', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:blocked-click', 'com.example.agent', 'instance:blocked-click');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  transport.pointerTargetState = {
+    status: 'blocked',
+    reason: 'obscured',
+    obstruction: { tagName: 'div', role: 'dialog' },
+  };
+
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.click', {
+      target: { observationId: observed.observationId, ref: 1 },
+    }, targetId),
+    error => (
+      error.code === 'action_not_verified' &&
+      error.retryable === true &&
+      error.context?.reason === 'obscured' &&
+      error.context?.obstruction?.role === 'dialog'
+    ),
+  );
+  assert.equal(transport.calls.some(call => call.method === 'Input.dispatchMouseEvent'), false);
 });
 
 test('the same physical user tab is exclusive across unrelated Agent Leases', async () => {

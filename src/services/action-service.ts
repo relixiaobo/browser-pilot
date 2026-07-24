@@ -2,7 +2,7 @@ import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import {
   CONTENTEDITABLE_CLEAR,
   CONTENTEDITABLE_FOCUS_END,
-  GET_CLICK_COORDS,
+  GET_POINTER_TARGET_STATE,
   READ_ACTIVE_EDITABLE_STATE,
   READ_EDITABLE_STATE,
   SET_VALUE,
@@ -71,24 +71,65 @@ interface EditableState {
   sensitive: boolean;
 }
 
-function parseClickCoordinates(value: unknown): { x: number; y: number } {
-  if (typeof value !== 'string') {
-    throw new BrowserPilotError('internal_error', 'Chrome returned invalid click coordinates');
+type PointerTargetFailureReason =
+  | 'detached'
+  | 'no_layout'
+  | 'outside_viewport'
+  | 'disabled'
+  | 'obscured';
+
+type PointerObstruction = Record<string, string> & { tagName: string };
+
+type PointerTargetState =
+  | { status: 'ready'; x: number; y: number }
+  | { status: 'blocked'; reason: PointerTargetFailureReason; obstruction?: PointerObstruction };
+
+const POINTER_FAILURE_REASONS = new Set<PointerTargetFailureReason>([
+  'detached',
+  'no_layout',
+  'outside_viewport',
+  'disabled',
+  'obscured',
+]);
+
+function parsePointerTargetState(value: unknown): PointerTargetState {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid pointer target state');
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch (cause) {
-    throw new BrowserPilotError('internal_error', 'Chrome returned invalid click coordinates', { cause });
+  const record = value as Record<string, unknown>;
+  if (record.status === 'ready' && Number.isFinite(record.x) && Number.isFinite(record.y)) {
+    return { status: 'ready', x: Number(record.x), y: Number(record.y) };
   }
-  if (
-    typeof parsed !== 'object' || parsed === null ||
-    !Number.isFinite((parsed as Record<string, unknown>).x) ||
-    !Number.isFinite((parsed as Record<string, unknown>).y)
-  ) {
-    throw new BrowserPilotError('internal_error', 'Chrome returned invalid click coordinates');
+  if (record.status !== 'blocked' || !POINTER_FAILURE_REASONS.has(record.reason as PointerTargetFailureReason)) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid pointer target state');
   }
-  return parsed as { x: number; y: number };
+
+  let obstruction: PointerObstruction | undefined;
+  if (record.obstruction !== undefined) {
+    if (
+      typeof record.obstruction !== 'object' || record.obstruction === null ||
+      Array.isArray(record.obstruction)
+    ) {
+      throw new BrowserPilotError('internal_error', 'Chrome returned invalid pointer target state');
+    }
+    const candidate = record.obstruction as Record<string, unknown>;
+    if (
+      typeof candidate.tagName !== 'string' || candidate.tagName.length > 40 ||
+      (candidate.role !== undefined && (typeof candidate.role !== 'string' || candidate.role.length > 40))
+    ) {
+      throw new BrowserPilotError('internal_error', 'Chrome returned invalid pointer target state');
+    }
+    obstruction = {
+      tagName: candidate.tagName,
+      ...(candidate.role ? { role: candidate.role } : {}),
+    };
+  }
+
+  return {
+    status: 'blocked',
+    reason: record.reason as PointerTargetFailureReason,
+    ...(obstruction ? { obstruction } : {}),
+  };
 }
 
 function parseEditableState(value: unknown): EditableState {
@@ -172,11 +213,28 @@ export class ActionService {
       try {
         const { result } = await this.transport.send('Runtime.callFunctionOn', {
           objectId,
-          functionDeclaration: GET_CLICK_COORDS,
+          functionDeclaration: GET_POINTER_TARGET_STATE,
           returnByValue: true,
         }, this.sessionId);
-        const coordinates = parseClickCoordinates(result.value);
-        await this.input.click(coordinates.x, coordinates.y, { button, clickCount });
+        const state = parsePointerTargetState(result.value);
+        if (state.status === 'blocked') {
+          const context = {
+            targetId: this.targetId,
+            ref: target.ref,
+            reason: state.reason,
+            ...(state.obstruction ? { obstruction: state.obstruction } : {}),
+          };
+          if (state.reason === 'detached') {
+            throw new BrowserPilotError('stale_ref', 'Ref no longer resolves to a connected element', {
+              context,
+            });
+          }
+          throw new BrowserPilotError('action_not_verified', 'Ref is not currently pointer-interactable', {
+            retryable: state.reason === 'outside_viewport' || state.reason === 'obscured',
+            context,
+          });
+        }
+        await this.input.click(state.x, state.y, { button, clickCount });
       } finally {
         await this.transport.send('Runtime.releaseObject', { objectId }, this.sessionId).catch(() => {});
       }
