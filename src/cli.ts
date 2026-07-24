@@ -5,9 +5,20 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
 import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
-import { takeSnapshot, resolveTarget, formatTarget, type SnapshotResult } from './snapshot.js';
-import { GET_CLICK_COORDS, SET_VALUE, PAGE_DIMENSIONS, elementRect, IS_CONTENTEDITABLE, CONTENTEDITABLE_CLEAR, readContent } from './page-scripts.js';
-import type { Transport } from './transport.js';
+import { type SnapshotResult } from './snapshot.js';
+import { CaptureService } from './services/capture-service.js';
+import { ActionService, type ClickTarget } from './services/action-service.js';
+import { ObservationService } from './services/observation-service.js';
+import { UploadService } from './services/upload-service.js';
+import { PageContentService } from './services/page-content-service.js';
+import { TargetService } from './services/target-service.js';
+import { FrameService } from './services/frame-service.js';
+import { CookieService } from './services/cookie-service.js';
+import { AuthService } from './services/auth-service.js';
+import { NetworkService } from './services/network-service.js';
+import { BrowserPilotError } from './protocol/errors.js';
+import { DaemonBridgeBackend } from './bridge/daemon-bridge-backend.js';
+import { runStdioBridge } from './bridge/stdio-bridge.js';
 
 const program = new Command();
 program
@@ -119,98 +130,6 @@ function readStdin(): Promise<string> {
   });
 }
 
-async function snap(t: Transport, sid: string, tid: string, limit?: number): Promise<SnapshotResult> {
-  // Brief pause for DOM to settle after click/press, then wait for load
-  await new Promise(r => setTimeout(r, 300));
-  await waitForLoad(t, sid, 10_000);
-  return takeSnapshot(t, sid, tid, limit);
-}
-
-async function dispatchClick(t: Transport, sid: string, x: number, y: number): Promise<void> {
-  await t.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sid);
-  await t.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, sid);
-  await t.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, sid);
-}
-
-// ── Key dispatch ────────────────────────────────────
-
-const KEY_DEFS: Record<string, { key: string; code: string; keyCode: number }> = {
-  enter: { key: 'Enter', code: 'Enter', keyCode: 13 },
-  tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
-  escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
-  esc: { key: 'Escape', code: 'Escape', keyCode: 27 },
-  backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
-  delete: { key: 'Delete', code: 'Delete', keyCode: 46 },
-  space: { key: ' ', code: 'Space', keyCode: 32 },
-  arrowup: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
-  arrowdown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-  arrowleft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
-  arrowright: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
-  home: { key: 'Home', code: 'Home', keyCode: 36 },
-  end: { key: 'End', code: 'End', keyCode: 35 },
-  pageup: { key: 'PageUp', code: 'PageUp', keyCode: 33 },
-  pagedown: { key: 'PageDown', code: 'PageDown', keyCode: 34 },
-  // Digits
-  '0': { key: '0', code: 'Digit0', keyCode: 48 },
-  '1': { key: '1', code: 'Digit1', keyCode: 49 },
-  '2': { key: '2', code: 'Digit2', keyCode: 50 },
-  '3': { key: '3', code: 'Digit3', keyCode: 51 },
-  '4': { key: '4', code: 'Digit4', keyCode: 52 },
-  '5': { key: '5', code: 'Digit5', keyCode: 53 },
-  '6': { key: '6', code: 'Digit6', keyCode: 54 },
-  '7': { key: '7', code: 'Digit7', keyCode: 55 },
-  '8': { key: '8', code: 'Digit8', keyCode: 56 },
-  '9': { key: '9', code: 'Digit9', keyCode: 57 },
-  // Punctuation
-  '-': { key: '-', code: 'Minus', keyCode: 189 },
-  '=': { key: '=', code: 'Equal', keyCode: 187 },
-  '[': { key: '[', code: 'BracketLeft', keyCode: 219 },
-  ']': { key: ']', code: 'BracketRight', keyCode: 221 },
-  '\\': { key: '\\', code: 'Backslash', keyCode: 220 },
-  ';': { key: ';', code: 'Semicolon', keyCode: 186 },
-  "'": { key: "'", code: 'Quote', keyCode: 222 },
-  ',': { key: ',', code: 'Comma', keyCode: 188 },
-  '.': { key: '.', code: 'Period', keyCode: 190 },
-  '/': { key: '/', code: 'Slash', keyCode: 191 },
-  '`': { key: '`', code: 'Backquote', keyCode: 192 },
-};
-
-const MOD_DEFS: Record<string, { key: string; code: string; keyCode: number; mask: number }> = {
-  control: { key: 'Control', code: 'ControlLeft', keyCode: 17, mask: 2 },
-  ctrl: { key: 'Control', code: 'ControlLeft', keyCode: 17, mask: 2 },
-  shift: { key: 'Shift', code: 'ShiftLeft', keyCode: 16, mask: 8 },
-  alt: { key: 'Alt', code: 'AltLeft', keyCode: 18, mask: 1 },
-  meta: { key: 'Meta', code: 'MetaLeft', keyCode: 91, mask: 4 },
-  cmd: { key: 'Meta', code: 'MetaLeft', keyCode: 91, mask: 4 },
-  command: { key: 'Meta', code: 'MetaLeft', keyCode: 91, mask: 4 },
-};
-
-async function dispatchKey(t: Transport, sid: string, combo: string): Promise<void> {
-  const parts = combo.split('+');
-  const mainKey = parts.pop()!;
-  const mods = parts.map(p => {
-    const m = MOD_DEFS[p.toLowerCase()];
-    if (!m) throw new Error(`Unknown modifier: ${p}`);
-    return m;
-  });
-  const modifierFlags = mods.reduce((n, m) => n | m.mask, 0);
-
-  const kd = KEY_DEFS[mainKey.toLowerCase()];
-  const key = kd?.key ?? mainKey;
-  const code = kd?.code ?? (mainKey.length === 1 ? `Key${mainKey.toUpperCase()}` : mainKey);
-  const keyCode = kd?.keyCode ?? mainKey.toUpperCase().charCodeAt(0);
-
-  for (const m of mods) {
-    await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key: m.key, code: m.code, windowsVirtualKeyCode: m.keyCode, modifiers: modifierFlags }, sid);
-  }
-  const text = key === 'Enter' ? '\r' : (kd ? '' : mainKey);
-  await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text, modifiers: modifierFlags }, sid);
-  await t.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, modifiers: modifierFlags }, sid);
-  for (const m of mods.reverse()) {
-    await t.send('Input.dispatchKeyEvent', { type: 'keyUp', key: m.key, code: m.code, windowsVirtualKeyCode: m.keyCode }, sid);
-  }
-}
-
 // ═══════════════════════════════════════════════════════
 //  COMMANDS
 // ═══════════════════════════════════════════════════════
@@ -232,6 +151,30 @@ program.command('connect')
       `\u2713 Connected to ${state.browser}\n\u2713 Pilot window created (daemon running in background)\n\nReady! Try: bp open https://example.com`,
     );
   }));
+
+// ─── embedded stdio bridge ─────────────────────────
+
+program.command('bridge')
+  .description('Run the Agent-neutral JSON-RPC bridge')
+  .option('--stdio', 'use newline-delimited JSON-RPC over stdin/stdout')
+  .action((opts) => {
+    if (!opts.stdio) {
+      process.stderr.write('bridge currently requires --stdio\n');
+      process.exitCode = 2;
+      return;
+    }
+    void runStdioBridge({
+      input: process.stdin,
+      output: process.stdout,
+      backend: new DaemonBridgeBackend(),
+    }).then(result => {
+      process.exitCode = result.exitCode;
+    }).catch(error => {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`Bridge error: ${message}\n`);
+      process.exitCode = 1;
+    });
+  });
 
 // ─── disconnect ─────────────────────────────────────
 
@@ -280,7 +223,7 @@ program.command('open <url>')
       }
 
       await waitForLoad(transport, sid);
-      emitSnapshot(await takeSnapshot(transport, sid, tid, limit));
+      emitSnapshot(await new ObservationService(transport, sid, tid).observe(limit));
     });
   }));
 
@@ -293,7 +236,11 @@ program.command('snapshot')
   .action(action(async (opts) => {
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
-      emitSnapshot(await takeSnapshot(transport, sessionId, state.activeTargetId, limit));
+      emitSnapshot(await new ObservationService(
+        transport,
+        sessionId,
+        state.activeTargetId,
+      ).observe(limit));
     });
   }));
 
@@ -317,45 +264,21 @@ Examples:
     if (!ref && !opts.xy) throw new Error('Provide a ref number or --xy coordinates');
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
+      let target: ClickTarget;
       if (opts.xy) {
-        // Coordinate-based click
         const [xStr, yStr] = opts.xy.split(',');
         const x = parseFloat(xStr), y = parseFloat(yStr);
         if (isNaN(x) || isNaN(y)) throw new Error('--xy must be x,y (e.g. --xy 400,300)');
-        if (opts.right) {
-          await transport.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
-          await transport.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', clickCount: 1 }, sessionId);
-          await transport.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'right', clickCount: 1 }, sessionId);
-        } else {
-          const clickCount = opts.double ? 2 : 1;
-          await transport.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
-          await transport.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount }, sessionId);
-          await transport.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount }, sessionId);
-        }
+        target = { kind: 'coordinates', x, y };
       } else {
-        // Ref-based click
-        const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
-        try {
-          const { result } = await transport.send('Runtime.callFunctionOn', {
-            objectId, functionDeclaration: GET_CLICK_COORDS, returnByValue: true,
-          }, sessionId);
-          const { x, y } = JSON.parse(result.value);
-          if (opts.double) {
-            await transport.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
-            await transport.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 }, sessionId);
-            await transport.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 }, sessionId);
-          } else if (opts.right) {
-            await transport.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
-            await transport.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', clickCount: 1 }, sessionId);
-            await transport.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'right', clickCount: 1 }, sessionId);
-          } else {
-            await dispatchClick(transport, sessionId, x, y);
-          }
-        } finally {
-          await transport.send('Runtime.releaseObject', { objectId }, sessionId).catch(() => {});
-        }
+        target = { kind: 'ref', ref };
       }
-      emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
+      const service = new ActionService(transport, sessionId, state.activeTargetId);
+      emitSnapshot(await service.click(target, {
+        button: opts.right ? 'right' : 'left',
+        clickCount: opts.double ? 2 : 1,
+        observationLimit: limit,
+      }));
     });
   }));
 
@@ -372,13 +295,12 @@ Examples:
   bp locate "canvas"                 # canvas element
   bp locate "#map"                   # map container`)
   .action(action(async (selector) => {
-    await withPilot(async ({ transport, sessionId }) => {
-      const { result } = await transport.send('Runtime.evaluate', {
-        expression: `JSON.stringify((function(){var el=document.querySelector(${JSON.stringify(selector)});if(!el)return null;el.scrollIntoView({block:'center',inline:'center'});var r=el.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2),top:Math.round(r.top),left:Math.round(r.left),width:Math.round(r.width),height:Math.round(r.height)}})())`,
-        returnByValue: true,
-      }, sessionId);
-      const coords = result.value ? JSON.parse(result.value) : null;
-      if (!coords) throw new Error(`Element not found: ${selector}`);
+    await withPilot(async ({ transport, sessionId, state }) => {
+      const coords = await new ObservationService(
+        transport,
+        sessionId,
+        state.activeTargetId,
+      ).locate(selector);
       if (useJson()) {
         console.log(JSON.stringify({ ok: true, ...coords }));
       } else {
@@ -398,76 +320,20 @@ program.command('type <ref> <text>')
   .action(action(async (ref, text, opts) => {
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
-      const objectId = await resolveTarget(transport, sessionId, ref, state.activeTargetId);
-      try {
-        // Check if target is a contenteditable element (Draft.js, ProseMirror, etc.)
-        const { result: ceResult } = await transport.send('Runtime.callFunctionOn', {
-          objectId, functionDeclaration: IS_CONTENTEDITABLE, returnByValue: true,
-        }, sessionId);
-
-        if (ceResult.value) {
-          // Contenteditable path: use Input.insertText (same approach as Playwright)
-          if (opts.clear) {
-            // Clear contenteditable directly — more reliable than selectAll + delete
-            await transport.send('Runtime.callFunctionOn', {
-              objectId, functionDeclaration: CONTENTEDITABLE_CLEAR,
-            }, sessionId);
-          } else {
-            // Focus and move cursor to end
-            await transport.send('Runtime.callFunctionOn', {
-              objectId, functionDeclaration: `function() {
-                this.focus();
-                const sel = window.getSelection();
-                sel.selectAllChildren(this);
-                sel.collapseToEnd();
-              }`,
-            }, sessionId);
-          }
-          await transport.send('Input.insertText', { text }, sessionId);
-        } else {
-          // Standard input/textarea path
-          await transport.send('Runtime.callFunctionOn', {
-            objectId, functionDeclaration: SET_VALUE, arguments: [{ value: text }, { value: !!opts.clear }],
-          }, sessionId);
-        }
-        if (opts.submit) await dispatchKey(transport, sessionId, 'Enter');
-      } finally {
-        await transport.send('Runtime.releaseObject', { objectId }, sessionId).catch(() => {});
-      }
-      emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
+      const result = await new ActionService(
+        transport,
+        sessionId,
+        state.activeTargetId,
+      ).type(ref, text, {
+        clear: opts.clear,
+        submit: opts.submit,
+        observationLimit: limit,
+      });
+      emitSnapshot(result.observation);
     });
   }));
 
 // ─── keyboard ──────────────────────────────────────
-
-function charToCode(char: string): { key: string; code: string; keyCode: number } {
-  // Check KEY_DEFS first (handles digits, punctuation, special keys)
-  const kd = KEY_DEFS[char];
-  if (kd) return kd;
-  // Letters
-  if (/^[a-zA-Z]$/.test(char)) return { key: char, code: `Key${char.toUpperCase()}`, keyCode: char.toUpperCase().charCodeAt(0) };
-  // Space
-  if (char === ' ') return { key: ' ', code: 'Space', keyCode: 32 };
-  // Fallback for other printable ASCII
-  return { key: char, code: '', keyCode: char.charCodeAt(0) };
-}
-
-async function typeViaKeyboard(t: Transport, sid: string, text: string): Promise<void> {
-  for (const char of text) {
-    if (char === '\n') {
-      await dispatchKey(t, sid, 'Enter');
-    } else if (char === '\t') {
-      await dispatchKey(t, sid, 'Tab');
-    } else if (char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126) {
-      const { key, code, keyCode } = charToCode(char);
-      await t.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text: char }, sid);
-      await t.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode }, sid);
-    } else {
-      // Non-ASCII (CJK, emoji, etc.): use insertText per character
-      await t.send('Input.insertText', { text: char }, sid);
-    }
-  }
-}
 
 program.command('keyboard <text>')
   .description('Type text via keyboard events (for canvas editors like Google Docs)')
@@ -491,50 +357,27 @@ Examples:
   bp keyboard "slow typing" --delay 50`)
   .action(action(async (text, opts) => {
     const limit = parseLimit(opts.limit);
+    let delay = 0;
+    if (opts.delay) {
+      delay = parseInt(opts.delay, 10);
+      if (isNaN(delay) || delay < 0) throw new Error('--delay must be a non-negative number');
+    }
     await withPilot(async ({ transport, sessionId, state }) => {
-      // Click to focus if selector provided
-      if (opts.click) {
-        const { result } = await transport.send('Runtime.evaluate', {
-          expression: `JSON.stringify((function(){var el=document.querySelector(${JSON.stringify(opts.click)});if(!el)return null;el.scrollIntoView({block:'center'});var r=el.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})())`,
-          returnByValue: true,
-        }, sessionId);
-        const coords = result.value ? JSON.parse(result.value) : null;
-        if (!coords) throw new Error(`Element not found: ${opts.click}`);
-        await dispatchClick(transport, sessionId, coords.x, coords.y);
-        await new Promise(r => setTimeout(r, 300)); // let focus settle
-      }
-
-      if (opts.clear) {
-        const selectAllMod = process.platform === 'darwin' ? 'Meta' : 'Control';
-        await dispatchKey(transport, sessionId, `${selectAllMod}+a`);
-        await dispatchKey(transport, sessionId, 'Delete');
-      }
-      if (opts.delay) {
-        const delay = parseInt(opts.delay, 10);
-        if (isNaN(delay) || delay < 0) throw new Error('--delay must be a non-negative number');
-        for (const char of text) {
-          if (char === '\n') {
-            await dispatchKey(transport, sessionId, 'Enter');
-          } else if (char === '\t') {
-            await dispatchKey(transport, sessionId, 'Tab');
-          } else if (char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126) {
-            const { key, code, keyCode } = charToCode(char);
-            await transport.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text: char }, sessionId);
-            await transport.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode }, sessionId);
-          } else {
-            await transport.send('Input.insertText', { text: char }, sessionId);
-          }
-          await new Promise(r => setTimeout(r, delay));
-        }
-      } else {
-        await typeViaKeyboard(transport, sessionId, text);
-      }
-      if (opts.submit) await dispatchKey(transport, sessionId, 'Enter');
-      const snapResult = await snap(transport, sessionId, state.activeTargetId, limit);
+      const result = await new ActionService(
+        transport,
+        sessionId,
+        state.activeTargetId,
+      ).keyboard(text, {
+        clear: opts.clear,
+        submit: opts.submit,
+        delayMs: delay,
+        focusSelector: opts.click,
+        observationLimit: limit,
+      });
       if (useJson()) {
-        console.log(JSON.stringify({ ok: true, typed: text, ...snapResult.data }));
+        console.log(JSON.stringify({ ok: true, typed: text, ...result.observation.data }));
       } else {
-        console.log(snapResult.text);
+        console.log(result.observation.text);
       }
     });
   }));
@@ -548,8 +391,11 @@ program.command('press <key>')
   .action(action(async (key, opts) => {
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
-      await dispatchKey(transport, sessionId, key);
-      emitSnapshot(await snap(transport, sessionId, state.activeTargetId, limit));
+      emitSnapshot(await new ActionService(
+        transport,
+        sessionId,
+        state.activeTargetId,
+      ).press(key, limit));
     });
   }));
 
@@ -564,16 +410,13 @@ program.command('eval [expression]')
       if (!expression) throw new Error('No expression. Pass as argument or pipe via stdin.');
     }
     await withPilot(async ({ transport, sessionId, state }) => {
-      const evalParams: Record<string, any> = { expression, returnByValue: true, awaitPromise: true };
-      if (state.frameContextId) evalParams.contextId = state.frameContextId;
-      const { result, exceptionDetails } = await transport.send('Runtime.evaluate', evalParams, sessionId);
-      if (exceptionDetails) {
-        throw new Error(exceptionDetails.exception?.description || exceptionDetails.text || 'Evaluation error');
-      }
+      const value = await new PageContentService(transport, sessionId).evaluate(expression, {
+        executionContextId: state.frameContextId,
+      });
       if (useJson()) {
-        console.log(JSON.stringify({ ok: true, value: result.value }));
-      } else if (result.value !== undefined) {
-        console.log(typeof result.value === 'object' ? JSON.stringify(result.value, null, 2) : String(result.value));
+        console.log(JSON.stringify({ ok: true, value }));
+      } else if (value !== undefined) {
+        console.log(typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value));
       }
     });
   }));
@@ -604,18 +447,16 @@ When to use which command:
     const limit = parseInt(opts.limit, 10);
     if (isNaN(limit) || limit < 1) throw new Error('--limit must be a positive integer');
     await withPilot(async ({ transport, sessionId, state }) => {
-      const evalParams: Record<string, any> = {
-        expression: readContent(selector || null, limit),
-        returnByValue: true,
-      };
-      if (state.frameContextId) evalParams.contextId = state.frameContextId;
-      const { result, exceptionDetails } = await transport.send('Runtime.evaluate', evalParams, sessionId);
-      if (exceptionDetails) {
-        throw new Error(exceptionDetails.exception?.description || exceptionDetails.text || 'Read error');
-      }
-      const data = JSON.parse(result.value);
-      if (!data.ok) {
-        fail(data.error || 'Failed to read content', selector ? `Selector "${selector}" did not match.` : undefined);
+      let data;
+      try {
+        data = await new PageContentService(transport, sessionId).read(selector, limit, {
+          executionContextId: state.frameContextId,
+        });
+      } catch (error) {
+        if (selector && error instanceof BrowserPilotError && error.context?.field === 'selector') {
+          fail(error.message, `Selector "${selector}" did not match.`);
+        }
+        throw error;
       }
       if (useJson()) {
         console.log(JSON.stringify({ ok: true, title: data.title, url: data.url, text: data.text, length: data.length, truncated: data.truncated }));
@@ -634,39 +475,13 @@ program.command('upload <filepath>')
   .action(action(async (filepath, opts) => {
     const absPath = resolvePath(filepath);
     if (!existsSync(absPath)) throw new Error(`File not found: ${absPath}`);
+    const inputIndex = parseInt(opts.nth, 10);
+    if (isNaN(inputIndex) || inputIndex < 1) throw new Error('--nth must be a positive integer');
     await withPilot(async ({ transport, sessionId, state }) => {
-      // Auto-find all <input type="file"> elements
-      const { result } = await transport.send('Runtime.evaluate', {
-        expression: `JSON.stringify(Array.from(document.querySelectorAll('input[type=file]')).map((el,i) => ({index:i+1, name:el.name||el.id||'unnamed', accept:el.accept||'*'})))`,
-        returnByValue: true,
-      }, sessionId);
-      const inputs: Array<{ index: number; name: string; accept: string }> = JSON.parse(result.value);
-
-      if (inputs.length === 0) throw new Error('No <input type="file"> found on this page.');
-
-      const nth = parseInt(opts.nth, 10);
-      if (nth < 1 || nth > inputs.length) {
-        const list = inputs.map(i => `  ${i.index}. ${i.name} (${i.accept})`).join('\n');
-        throw new Error(`${inputs.length} file input(s) found. Use --nth to choose:\n${list}`);
-      }
-
-      // Resolve the nth file input
-      const { result: elResult } = await transport.send('Runtime.evaluate', {
-        expression: `document.querySelectorAll('input[type=file]')[${nth - 1}]`,
-      }, sessionId);
-      try {
-        const { node } = await transport.send('DOM.describeNode', { objectId: elResult.objectId }, sessionId);
-        await transport.send('DOM.setFileInputFiles', {
-          files: [absPath],
-          backendNodeId: node.backendNodeId,
-        }, sessionId);
-      } finally {
-        if (elResult.objectId) {
-          await transport.send('Runtime.releaseObject', { objectId: elResult.objectId }, sessionId).catch(() => {});
-        }
-      }
-
-      emitSnapshot(await snap(transport, sessionId, state.activeTargetId));
+      const observations = new ObservationService(transport, sessionId, state.activeTargetId);
+      emitSnapshot(await new UploadService(transport, sessionId, observations).upload(absPath, {
+        inputIndex,
+      }));
     });
   }));
 
@@ -679,26 +494,12 @@ program.command('screenshot [filename]')
   .addHelpText('after', '\nExamples:\n  bp screenshot\n  bp screenshot page.png\n  bp screenshot --full\n  bp screenshot --selector ".chart"')
   .action(action(async (filename, opts) => {
     await withPilot(async ({ transport, sessionId }) => {
-      const params: Record<string, any> = { format: 'png' };
-      if (opts.full) {
-        const { result } = await transport.send('Runtime.evaluate', {
-          expression: PAGE_DIMENSIONS, returnByValue: true,
-        }, sessionId);
-        const dims = JSON.parse(result.value);
-        params.captureBeyondViewport = true;
-        params.clip = { x: 0, y: 0, ...dims, scale: 1 };
-      }
-      if (opts.selector) {
-        const { result } = await transport.send('Runtime.evaluate', {
-          expression: elementRect(opts.selector), returnByValue: true,
-        }, sessionId);
-        const rect = result.value ? JSON.parse(result.value) : null;
-        if (!rect) throw new Error(`Element not found: ${opts.selector}`);
-        params.clip = { ...rect, scale: 1 };
-      }
-      const { data } = await transport.send('Page.captureScreenshot', params, sessionId);
+      const media = await new CaptureService(transport, sessionId).screenshot({
+        fullPage: opts.full,
+        selector: opts.selector,
+      });
       const file = filename ?? `screenshot-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.png`;
-      writeFileSync(file, Buffer.from(data, 'base64'));
+      writeFileSync(file, media.bytes);
       emit({ ok: true, file }, `\u2713 Screenshot saved to ${file}`);
     });
   }));
@@ -711,11 +512,9 @@ program.command('pdf [filename]')
   .addHelpText('after', '\nExamples:\n  bp pdf\n  bp pdf report.pdf\n  bp pdf report.pdf --landscape')
   .action(action(async (filename, opts) => {
     await withPilot(async ({ transport, sessionId }) => {
-      const params: Record<string, any> = {};
-      if (opts.landscape) params.landscape = true;
-      const { data } = await transport.send('Page.printToPDF', params, sessionId);
+      const media = await new CaptureService(transport, sessionId).pdf({ landscape: opts.landscape });
       const file = filename ?? `page-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.pdf`;
-      writeFileSync(file, Buffer.from(data, 'base64'));
+      writeFileSync(file, media.bytes);
       emit({ ok: true, file }, `\u2713 PDF saved to ${file}`);
     });
   }));
@@ -727,11 +526,7 @@ program.command('cookies [domain]')
   .addHelpText('after', '\nExamples:\n  bp cookies\n  bp cookies github.com')
   .action(action(async (domain) => {
     await withPilot(async ({ transport, sessionId }) => {
-      const { result: info } = await transport.send('Runtime.evaluate', {
-        expression: 'location.href', returnByValue: true,
-      }, sessionId);
-      const urls = domain ? [`https://${domain}`, `http://${domain}`] : [info.value];
-      const { cookies } = await transport.send('Network.getCookies', { urls }, sessionId);
+      const cookies = await new CookieService(transport, sessionId).list(domain);
       if (useJson()) {
         console.log(JSON.stringify({ ok: true, cookies }));
       } else if (cookies.length === 0) {
@@ -752,16 +547,10 @@ program.command('frame [target]')
   .addHelpText('after', '\nExamples:\n  bp frame          # list all frames\n  bp frame 1        # switch eval context to frame 1\n  bp frame 0        # switch back to top frame')
   .action(action(async (target) => {
     await withPilot(async ({ transport, sessionId, state }) => {
-      const { frameTree } = await transport.send('Page.getFrameTree', {}, sessionId);
-      const frames: Array<{ id: string; url: string; name: string }> = [];
-      function collect(node: any) {
-        frames.push({ id: node.frame.id, url: node.frame.url, name: node.frame.name || '' });
-        for (const child of node.childFrames || []) collect(child);
-      }
-      collect(frameTree);
+      const service = new FrameService(transport, sessionId);
 
       if (target === undefined) {
-        // List frames
+        const frames = await service.list();
         const list = frames.map((f, i) => ({ index: i, ...f }));
         if (useJson()) {
           console.log(JSON.stringify({ ok: true, frames: list }));
@@ -771,23 +560,13 @@ program.command('frame [target]')
           }
         }
       } else {
-        // Switch to frame by index (0 = top frame)
         const idx = parseInt(target, 10);
-        if (isNaN(idx) || idx < 0 || idx >= frames.length) {
-          throw new Error(`Frame index out of range (0-${frames.length - 1})`);
-        }
-        if (idx === 0) {
-          state.frameContextId = undefined;
-        } else {
-          const { executionContextId } = await transport.send('Page.createIsolatedWorld', {
-            frameId: frames[idx].id,
-          }, sessionId);
-          state.frameContextId = executionContextId;
-        }
+        const selection = await service.select(idx);
+        state.frameContextId = selection.executionContextId;
         saveState(state);
         emit(
-          { ok: true, frame: idx, url: frames[idx].url },
-          `\u2713 Switched to frame ${idx}: ${frames[idx].url}`,
+          { ok: true, frame: idx, url: selection.frame.url },
+          `\u2713 Switched to frame ${idx}: ${selection.frame.url}`,
         );
       }
     });
@@ -802,50 +581,42 @@ program.command('auth [username] [password]')
   .action(action(async (username, password, opts) => {
     const existing = await resumeExisting();
     if (!existing) throw new Error('Not connected');
-    const { client, state } = existing;
+    const service = new AuthService(existing.client);
     if (opts.clear || !username) {
-      await client.clearAuth();
+      await service.clear();
       emit({ ok: true }, '\u2713 Auth credentials cleared');
       return;
     }
     if (!password) throw new Error('Usage: bp auth <username> <password>');
-    await client.setAuth(username, password);
+    await service.set(username, password);
     emit({ ok: true }, '\u2713 Auth credentials set (scoped to HTTP 401 challenges)');
   }));
 
 // ─── tabs ───────────────────────────────────────────
 
 program.command('tabs')
-  .description('List pilot tabs (auto-adopts discovered popups)')
+  .description('List all controllable browser tabs')
   .action(action(async () => {
     const existing = await resumeExisting();
     if (!existing) throw new Error('Not connected');
     const { client, state } = existing;
-    const { targetInfos } = await client.send('Target.getTargets');
-
-    // Auto-adopt discovered popups
-    const discovered = await client.discoveredTargets();
-    const knownIds = new Set(state.pilotTargetIds);
-    const existingIds = new Set(targetInfos.map((t: any) => t.targetId));
-    let adopted = 0;
-    for (const d of discovered) {
-      if (!knownIds.has(d.targetId) && existingIds.has(d.targetId)) {
-        state.pilotTargetIds.push(d.targetId);
-        knownIds.add(d.targetId);
-        adopted++;
-      }
+    const result = await new TargetService(client, client).list(
+      state.pilotTargetIds,
+      state.activeTargetId,
+    );
+    if (
+      result.managedTargetIds.length !== state.pilotTargetIds.length ||
+      result.managedTargetIds.some((targetId, index) => targetId !== state.pilotTargetIds[index])
+    ) {
+      state.pilotTargetIds = result.managedTargetIds;
+      saveState(state);
     }
-    if (adopted > 0) saveState(state);
-
-    const tabs = state.pilotTargetIds.map((id, i) => {
-      const t = targetInfos.find((t: any) => t.targetId === id);
-      return t ? { index: i, url: t.url || 'about:blank', title: t.title || '', active: id === state.activeTargetId } : null;
-    }).filter(Boolean) as { index: number; url: string; title: string; active: boolean }[];
+    const tabs = result.tabs.map(({ targetId: _targetId, ...tab }) => tab);
 
     if (useJson()) {
       console.log(JSON.stringify({ ok: true, tabs }));
     } else if (tabs.length === 0) {
-      console.log('No pilot tabs open.');
+      console.log('No controllable tabs open.');
     } else {
       for (const t of tabs) console.log(`${t.active ? '*' : ' '} ${t.index}  ${t.url}  ${t.title}`);
     }
@@ -860,44 +631,75 @@ program.command('tab <index>')
     if (!existing) throw new Error('Not connected');
     const { client, state } = existing;
     const index = parseInt(indexStr, 10);
-    if (index < 0 || index >= state.pilotTargetIds.length) {
-      throw new Error(`Tab index out of range (0-${state.pilotTargetIds.length - 1})`);
-    }
-    state.activeTargetId = state.pilotTargetIds[index];
+    const service = new TargetService(client, client);
+    const inventory = await service.list(state.pilotTargetIds, state.activeTargetId);
+    state.pilotTargetIds = inventory.managedTargetIds;
+    state.activeTargetId = await service.activateByIndex(
+      inventory.tabs.map(tab => tab.targetId),
+      index,
+    );
     state.activeSessionId = undefined;
     state.frameContextId = undefined;
     saveState(state);
-    await client.send('Target.activateTarget', { targetId: state.activeTargetId });
     emit({ ok: true, index }, `\u2713 Switched to tab ${index}`);
   }));
 
 // ─── close ──────────────────────────────────────────
 
 program.command('close')
-  .description('Close current pilot tab')
-  .option('-a, --all', 'close all tabs')
+  .description('Close current browser tab')
+  .option('-a, --all', 'close all tabs in the current Pilot window')
   .action(action(async (opts) => {
     const existing = await resumeExisting();
     if (!existing) throw new Error('Not connected');
     const { client, state } = existing;
+    const service = new TargetService(client, client);
     if (opts.all) {
-      for (const id of [...state.pilotTargetIds]) {
-        try { await client.send('Target.closeTarget', { targetId: id }); } catch { /* ignore */ }
-      }
-      clearState();
-      emit({ ok: true }, '\u2713 All tabs closed');
-    } else {
-      await client.send('Target.closeTarget', { targetId: state.activeTargetId });
-      state.pilotTargetIds = state.pilotTargetIds.filter(id => id !== state.activeTargetId);
-      if (state.pilotTargetIds.length > 0) {
-        state.activeTargetId = state.pilotTargetIds[0];
+      const inventory = await service.list(state.pilotTargetIds, state.activeTargetId);
+      const result = await service.closeManaged(inventory.managedTargetIds);
+      const remainingTabs = inventory.tabs.filter(tab => !result.closed.includes(tab.targetId));
+      if (result.failed.length > 0) {
+        state.pilotTargetIds = result.failed;
+        if (!remainingTabs.some(tab => tab.targetId === state.activeTargetId)) {
+          state.activeTargetId = remainingTabs[0].targetId;
+        }
         state.activeSessionId = undefined;
         state.frameContextId = undefined;
         saveState(state);
-        emit({ ok: true, remaining: state.pilotTargetIds.length }, '\u2713 Tab closed');
+        throw new BrowserPilotError('internal_error', `Failed to close ${result.failed.length} Pilot tab(s)`, {
+          retryable: true,
+          context: { failedTargetIds: result.failed },
+        });
+      }
+      state.pilotTargetIds = [];
+      if (remainingTabs.length > 0) {
+        if (!remainingTabs.some(tab => tab.targetId === state.activeTargetId)) {
+          state.activeTargetId = remainingTabs[0].targetId;
+        }
+        state.activeSessionId = undefined;
+        state.frameContextId = undefined;
+        saveState(state);
       } else {
         clearState();
-        emit({ ok: true }, '\u2713 Last tab closed');
+      }
+      emit(
+        { ok: true, closed: result.closed.length, remaining: remainingTabs.length },
+        `\u2713 Closed ${result.closed.length} Pilot tab(s)`,
+      );
+    } else {
+      const inventory = await service.list(state.pilotTargetIds, state.activeTargetId);
+      await service.close(inventory.tabs.map(tab => tab.targetId), state.activeTargetId);
+      const remainingTabs = inventory.tabs.filter(tab => tab.targetId !== state.activeTargetId);
+      state.pilotTargetIds = inventory.managedTargetIds.filter(id => id !== state.activeTargetId);
+      if (remainingTabs.length > 0) {
+        state.activeTargetId = state.pilotTargetIds[0] ?? remainingTabs[0].targetId;
+        state.activeSessionId = undefined;
+        state.frameContextId = undefined;
+        saveState(state);
+        emit({ ok: true, remaining: remainingTabs.length }, '\u2713 Tab closed');
+      } else {
+        clearState();
+        emit({ ok: true, remaining: 0 }, '\u2713 Last tab closed');
       }
     }
   }));
@@ -909,8 +711,9 @@ async function ensureNet() {
   const existing = await resumeExisting();
   if (!existing) throw new Error('Not connected');
   const { client, state } = existing;
-  if (state.activeSessionId) await client.enableNetwork(state.activeSessionId);
-  return { client, state };
+  const service = new NetworkService(client, state.activeSessionId);
+  await service.enable();
+  return service;
 }
 
 const netCmd = program.command('net')
@@ -923,9 +726,9 @@ const netCmd = program.command('net')
   .option('--after <id>', 'show requests after this ID')
   .addHelpText('after', '\nExamples:\n  bp net                              # list recent requests\n  bp net --url "*api*" --method POST  # filter\n  bp net show 3                       # full details + body\n  bp net block "*tracking*"           # block URLs\n  bp net mock "*api/data*" --body \'{"ok":true}\'\n  bp net rules                        # list active rules\n  bp net remove --all                 # clear rules')
   .action(action(async (opts) => {
-    const { client } = await ensureNet();
+    const service = await ensureNet();
 
-    const { requests, total } = await client.netRequests({
+    const { requests, total } = await service.requests({
       limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
       url: opts.url, method: opts.method, status: opts.status, type: opts.type,
       after: opts.after ? parseInt(opts.after, 10) : undefined,
@@ -949,19 +752,18 @@ netCmd.command('show <id>')
   .description('Show full request/response details')
   .option('--save <file>', 'save response body to file')
   .action(action(async (idStr, opts) => {
-    const { client } = await ensureNet();
+    const service = await ensureNet();
     const id = parseInt(idStr, 10);
 
     if (opts.save) {
-      const { body } = await client.netBody(id);
+      const { body } = await service.body(id);
       writeFileSync(opts.save, body);
       emit({ ok: true, file: opts.save }, `Saved to ${opts.save}`);
       return;
     }
 
-    const detail = await client.netRequestDetail(id);
-    let responseBody: string | undefined;
-    try { responseBody = (await client.netBody(id)).body; } catch { /* not available */ }
+    const detail = await service.request(id);
+    const responseBody = detail.responseBody;
 
     if (useJson()) {
       console.log(JSON.stringify({ ok: true, ...detail, responseBody }));
@@ -979,8 +781,8 @@ netCmd.command('show <id>')
 netCmd.command('block <pattern>')
   .description('Block requests matching URL pattern')
   .action(action(async (pattern) => {
-    const { client } = await ensureNet();
-    const { rule } = await client.netAddRule({ type: 'block', pattern });
+    const service = await ensureNet();
+    const { rule } = await service.addBlock(pattern);
     emit({ ok: true, rule }, `Rule #${rule.id}: blocking "${pattern}"`);
   }));
 
@@ -990,36 +792,33 @@ netCmd.command('mock <pattern>')
   .option('--file <path>', 'read body from file')
   .option('--status <code>', 'HTTP status', '200')
   .action(action(async (pattern, opts) => {
-    const { client } = await ensureNet();
+    const service = await ensureNet();
     let body = opts.body || '';
     if (opts.file) {
       const filePath = resolvePath(opts.file);
       if (!existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
       body = readFileSync(filePath, 'utf-8');
     }
-    const { rule } = await client.netAddRule({
-      type: 'mock', pattern, status: parseInt(opts.status, 10), body,
-    });
+    const { rule } = await service.addMock(pattern, parseInt(opts.status, 10), body);
     emit({ ok: true, rule }, `Rule #${rule.id}: mocking "${pattern}" -> ${opts.status}`);
   }));
 
 netCmd.command('headers <pattern> <header...>')
   .description('Add/override request headers for matching URLs')
   .action(action(async (pattern, headerStrs) => {
-    const { client } = await ensureNet();
+    const service = await ensureNet();
     const headers = headerStrs.map((h: string) => {
       const [name, ...rest] = h.split(':');
       return { name: name.trim(), value: rest.join(':').trim() };
     });
-    const { rule } = await client.netAddRule({ type: 'headers', pattern, headers });
+    const { rule } = await service.addHeaders(pattern, headers);
     emit({ ok: true, rule }, `Rule #${rule.id}: headers for "${pattern}"`);
   }));
 
 netCmd.command('rules')
   .description('List active interception rules')
   .action(action(async () => {
-    const { client } = await ensureNet();
-    const { rules } = await client.netRules();
+    const rules = await (await ensureNet()).rules();
     if (useJson()) { console.log(JSON.stringify({ ok: true, rules })); }
     else if (rules.length === 0) { console.log('No active rules.'); }
     else { for (const r of rules) console.log(`  #${r.id}  ${r.type.toUpperCase()} "${r.pattern}"`); }
@@ -1029,17 +828,16 @@ netCmd.command('remove [ruleId]')
   .description('Remove interception rule(s)')
   .option('-a, --all', 'remove all rules')
   .action(action(async (ruleId, opts) => {
-    const { client } = await ensureNet();
-    if (opts.all) { await client.netRemoveRule(); emit({ ok: true }, 'All rules removed'); }
-    else if (ruleId) { await client.netRemoveRule(parseInt(ruleId, 10)); emit({ ok: true }, `Rule #${ruleId} removed`); }
+    const service = await ensureNet();
+    if (opts.all) { await service.remove(); emit({ ok: true }, 'All rules removed'); }
+    else if (ruleId) { await service.remove(parseInt(ruleId, 10)); emit({ ok: true }, `Rule #${ruleId} removed`); }
     else throw new Error('Specify a rule ID or use --all');
   }));
 
 netCmd.command('clear')
   .description('Clear captured request log')
   .action(action(async () => {
-    const { client } = await ensureNet();
-    await client.netClear();
+    await (await ensureNet()).clear();
     emit({ ok: true }, 'Request log cleared');
   }));
 

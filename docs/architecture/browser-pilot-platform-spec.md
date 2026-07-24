@@ -1,0 +1,662 @@
+# Browser Pilot Platform Specification
+
+Status: **Authoritative, approved for implementation**  
+Baseline: `0c5661ccb133b2c9feda15732892f66ce947f232`  
+Last updated: 2026-07-24
+
+This document is the source of truth for turning Browser Pilot from a
+single-agent CLI with global state into a user-level browser control runtime
+that any local Agent can install or embed. The two execution plans in
+`docs/plans/` derive from this specification.
+
+## Purpose and Reader
+
+This specification is for Browser Pilot maintainers, Agent-product integrators,
+security reviewers, and test authors. It defines observable behavior and
+compatibility boundaries before implementation. Internal component names near
+the end are implementation boundaries required to preserve those behaviors;
+they are not third-party APIs.
+
+## Evidence and Assumptions
+
+Evidence from the baseline repository:
+
+- The npm package currently publishes CLI binaries but no library exports.
+- High-level actions, output formatting, file writes, and process exits are
+  combined in `src/cli.ts`.
+- `src/state.ts` persists one active target, CDP session, and frame context.
+- `src/snapshot.ts` persists one target's refs in a global file.
+- `src/daemon.ts` exposes arbitrary CDP and keeps auth, network, dialog, and
+  popup state globally.
+- Existing fixtures prove the current browser operations are worth preserving.
+
+Evidence from the browser-use comparison is recorded in
+`docs/plans/browser-capability-evolution.md` at the pinned research commit.
+
+Assumptions used by this specification:
+
+- Supported Agent runtimes can spawn a local child process and read protected
+  local Artifact files.
+- Browser Pilot and embedded Agents execute under the same OS user account.
+- Chrome continues to require an explicit user action to enable or authorize
+  remote debugging.
+- An Agent product can map its own active lifecycle to Workspace and Lease
+  without Broker knowledge of that product's domain nouns.
+
+## Decision Summary
+
+- **DEC-1:** Browser Pilot is an Agent-neutral, per-OS-user Browser Broker. It
+  is not a Tenon component and does not model conversations, runs, tasks, or
+  workers.
+- **DEC-2:** Root Chrome DevTools Protocol (CDP) is the only browser connector.
+  Browser extensions are never required or supported.
+- **DEC-3:** The public product surface is one official CLI executable. It
+  supports human one-shot commands and a persistent `bridge --stdio` machine
+  mode. Native SDK and MCP surfaces are out of scope.
+- **DEC-4:** Existing one-shot `bp` commands remain a first-class integration
+  path. Embedded products bundle the same executable and use the stdio bridge.
+- **DEC-5:** The production machine interface exposes controlled browser tools,
+  not arbitrary CDP forwarding. Raw CDP is internal. JavaScript evaluation is
+  an explicit developer capability.
+- **DEC-6:** Invoking Browser Pilot grants the Agent full control of all
+  eligible current and future tabs in the selected BrowserInstance. Browser
+  Pilot does not implement task-intent approval, selected-tab grants, or
+  per-action confirmation. An Agent host may remove operations when launching
+  the Broker, and owns any higher-level approval UX it wants.
+- **DEC-7:** Browser profile state is shared because controlled targets run in
+  the user's browser profile. Target assignments, commands, refs, rules, and
+  artifacts are isolated by Broker objects.
+
+## Objective, Constraints, and Selected Target
+
+- **OBJ-1:** Any local Agent that can execute a process must be able to control
+  the user's real browser reliably, while preserving the user's profiles,
+  logins, cookies, and installed extensions.
+- **OBJ-2:** Multiple unrelated Agent products must be able to use Browser Pilot
+  concurrently without overwriting each other's target, frame, ref, auth, or
+  network state.
+- **OBJ-3:** Agents that already install and call `bp` themselves must continue
+  to work after the platform migration.
+- **Minimum acceptable outcome:** The compatibility requirements in this spec
+  all pass. A partial SDK, Tenon-only adapter, or globally shared target state
+  does not count.
+- **Clean-slate answer:** A signed, self-contained executable with a local
+  Broker, versioned stdio protocol, complete browser control, strong runtime
+  isolation, and a conformance kit.
+- **Selected brownfield target:** Evolve the current TypeScript/npm CLI into
+  that architecture without replacing proven CDP capabilities or breaking the
+  current command workflow.
+
+### Constraints
+
+- **CON-1 hard:** No browser extension may be used.
+- **CON-2 hard:** All eligible ordinary Chrome tabs in the selected
+  BrowserInstance are visible and controllable. DevTools, unsupported internal
+  pages, and Browser Pilot's own internal targets remain excluded.
+- **CON-3 hard:** Browser Pilot must not depend on Agent-specific lifecycle
+  concepts or model-provider APIs.
+- **CON-4 hard:** Production clients cannot invoke arbitrary root CDP methods.
+- **CON-5 hard:** Sensitive browser data and media must not be emitted to logs
+  or world-readable files.
+- **CON-6 legacy:** Existing `bp` commands, JSON output, npm installation, and
+  the current Agent skill must remain usable during migration.
+- **CON-7 platform:** Without an extension, root CDP exposes the browser to any
+  process that can independently reach its debugging endpoint. Broker
+  isolation protects Broker clients from each other; it is not an OS sandbox.
+- **CON-8 scope:** The universal integration target is local Agents that can
+  spawn a process and access local files. Hosted Agents without a local
+  execution bridge are not supported by CLI-only distribution.
+
+### Rejected Alternatives
+
+- **OPT-1 MCP as the canonical interface:** Rejected because it creates a
+  second public product surface and runtime dependency. An Agent adapter may
+  translate the stdio bridge to MCP outside Browser Pilot.
+- **OPT-2 Native SDKs:** Rejected because every language binding would create a
+  versioned compatibility obligation. The executable protocol is the SDK.
+- **OPT-3 One-shot CLI only:** Rejected because it cannot efficiently deliver
+  events, cancellation, leases, or repeated tool calls to an embedded Agent.
+- **OPT-4 Agent-specific embedding:** Rejected because Tenon and OpenClaw are
+  clients and conformance fixtures, not Broker domain concepts.
+
+### Revisit Triggers
+
+Reconsider MCP or a remote protocol only if Browser Pilot must support Agents
+that cannot spawn a local process. Reconsider SDKs only if the stdio protocol
+cannot provide required performance or type safety after measured use.
+
+## Preserved and Changed Behavior
+
+### Preserved
+
+- Agent-managed installation via npm and direct `bp` invocation.
+- Chrome remote-debugging discovery and connection.
+- A distinct visible Pilot window using the user's browser profile.
+- AX snapshots and numbered refs.
+- Navigation, click, type, keyboard, upload, tabs, frames, dialogs, HTTP auth,
+  screenshots, PDF, cookies, and network tooling.
+- Human-readable terminal output and JSON output for scripts.
+- The existing skill and Playwright fixture coverage.
+
+### Changed
+
+- CLI handlers become presentation adapters over reusable Broker services.
+- Global active target/session/frame state becomes isolated Workspace and Lease
+  state.
+- The single refs file becomes observation-scoped Broker state.
+- The daemon's arbitrary `/cdp` endpoint becomes private implementation wiring.
+- Dialogs become explicit events and decisions; they are not auto-accepted.
+- Popup adoption requires a verified owned opener chain.
+- Existing user tabs and newly opened tabs are included automatically in the
+  Workspace inventory; invoking the tool is the authorization boundary.
+- Auth, network rules, request journals, and artifacts are scoped and cleaned up
+  by the owning Workspace or Lease.
+- Screenshots and PDFs become mode-restricted, owner-scoped Artifact results
+  with quotas and expiry. The human CLI may export an Artifact to a
+  caller-selected path.
+
+## Product Model
+
+### ClientPrincipal
+
+A stable identity for an installed Agent product or direct CLI user. It owns
+Workspaces and their transient resources. It is used for correlation and
+isolation, not as proof that an Agent's semantic decision is correct. A
+Principal is not a conversation or task.
+
+### ClientConnection
+
+One live `bridge --stdio` process connection. It is authenticated by the local
+Broker and associated with exactly one ClientPrincipal after initialization.
+
+### BrowserInstance
+
+One running, discoverable Chromium-family browser process identified by a
+process-stable identity, product, profile path, debugging endpoint, and
+connection generation.
+
+### BrowserWorkspace
+
+A logical browser working set owned by one ClientPrincipal. It owns one or more
+ManagedTabSets and transient scoped state. Workspaces live in Broker memory by
+default and are recreated after Broker restart; Agent adapters map their own
+active lifecycle to this object.
+
+### ManagedTabSet
+
+The logical collection of Broker-created tabs used for isolated Agent work. It
+is normally backed by a dedicated visible Pilot window because Browser Pilot
+does not use extension-only native tab-group APIs. New task navigation and
+owned popups stay in this set by default. Workspace cleanup may close this set,
+but never user-owned tabs outside it.
+
+### ControlLease
+
+A time-bounded command session in a Workspace. It carries negotiated
+capabilities, heartbeat expiry, and explicit target control assignments. Agent
+adapters map their own active work lifecycle to this object.
+
+### BrowserControlPolicy
+
+An optional launch-time reduction of Browser Pilot operations configured by
+the Agent host, for example disabling `network.modify` or `tabs.close`. The
+default policy allows every supported operation. This is tool exposure, not a
+Browser Pilot approval lifecycle, and it cannot be expanded through a tool call
+inside the running bridge.
+
+### ControlledTarget
+
+A target addressable by a Workspace. Its origin is `managed`, `managed_popup`,
+or `user_tab`, and it records an optional ManagedTabSet. A user tab retains user
+ownership: releasing a Workspace removes Broker mappings without closing the
+tab. Every result identifies its Workspace, Lease, opaque controlled-target ID,
+URL, origin, and browser connection generation. Raw CDP target IDs are not a
+public identifier.
+
+### Observation
+
+An immutable, bounded view of a ControlledTarget at a point in time. Public element
+handles are `observationId + ref`. Observations are never shared between
+Workspaces.
+
+### Command
+
+A requested operation with a unique command ID, idempotency key, deadline,
+capability requirement, and target assignment. Each target serializes its
+commands through one actor.
+
+### Artifact
+
+A Broker-managed binary result such as a screenshot, preview, PDF, or download.
+Artifacts have metadata, sensitivity, ownership, size limits, retention state,
+and expiry.
+
+### BrowserEvent
+
+A typed, ordered event in a bounded per-Workspace journal. Events can be pushed
+over stdio and replayed with a cursor.
+
+## Public Executable Surface
+
+The official distribution exposes one executable under both `browser-pilot`
+and the compatible `bp` alias.
+
+```text
+browser-pilot
+  broker serve
+  bridge --stdio
+  tool list
+  tool call
+  artifact export|release
+  connect|disconnect|open|snapshot|click|type|keyboard|press
+  read|eval|upload|screenshot|pdf|cookies|frame|auth|tabs|tab|close|net
+```
+
+Three distribution modes are equivalent:
+
+1. User or Agent global installation.
+2. Project-local installation and `npx browser-pilot` invocation.
+3. Product-bundled official executable launched by an Agent adapter.
+
+Embedded products must not import `src/*`, depend on daemon socket details, or
+parse human-readable output.
+
+## Primary Flows
+
+### FLOW-1 Agent-managed one-shot use
+
+An Agent installs Browser Pilot globally or in its project, runs `bp connect`
+or a browser command, and the CLI starts or reuses the compatible per-user
+Broker. The compatibility Workspace and Lease select controlled targets.
+Existing and future eligible user tabs are available immediately. The command
+returns the existing JSON shape during migration. Failures include a stable
+machine code in addition to compatible human guidance. Normal process exit
+releases the short-lived Lease and does not close user tabs.
+
+### FLOW-2 Product-embedded use
+
+An Agent product bundles or resolves the official executable and starts
+`browser-pilot bridge --stdio`. It initializes, negotiates protocol and
+capabilities, creates or resumes a Workspace, acquires a Lease, discovers tools,
+and maps those tools into its own runtime. It calls tools, consumes ordered
+events, converts Artifact files into native media content, heartbeats while
+active, then releases the Lease. A process crash is recovered by Lease expiry.
+
+### FLOW-3 Browser disconnect and recovery
+
+The Broker emits connection loss, stops dispatching target commands, and marks
+commands whose effects are uncertain as `unknown_outcome`. After reconnect it
+creates a new browser connection generation, reconciles controlled-target metadata,
+invalidates old Observations, and emits structured recovery state. It never
+replays a mutating command automatically.
+
+### FLOW-4 Concurrent clients
+
+Two unrelated Principals create separate Workspaces and Pilot targets. Their
+actions may execute concurrently on different target actors. Any attempt to use
+the other Principal's target, ref, rule, Artifact, or Workspace fails closed.
+Releasing or crashing one client does not close or mutate the other's targets.
+
+### FLOW-5 Existing and future user tabs
+
+When a Host exposes Browser Pilot to an Agent, that invocation authorizes the
+Agent to use the selected BrowserInstance. `tabs.list` immediately returns the
+Workspace's ManagedTabSets plus all eligible user tabs, tagged by origin. Tabs
+opened later appear on the next inventory refresh. The Agent may switch to and
+operate any listed tab, including a form the user opened before invoking it.
+
+Browser Pilot does not ask the Agent to request access and does not display a
+grant UI. If a product needs confirmation or restricted tool exposure, the
+Agent host implements that policy before launching the bridge or maps it to a
+launch-time BrowserControlPolicy. Releasing a Lease or Workspace removes
+transient mappings and rules but leaves user tabs open. Closing a user tab
+always requires an explicit target-specific command; bulk cleanup applies only
+to ManagedTabSets.
+
+## Machine Protocol
+
+`bridge --stdio` uses JSON-RPC 2.0 over newline-delimited UTF-8 JSON. Each line
+contains one complete message. Stdout is protocol-only. Logs go to stderr and
+must redact secrets. The bridge terminates on malformed framing after returning
+a protocol error when possible.
+
+Required methods:
+
+```text
+initialize
+tools/list
+tools/call
+workspaces/create|get|release
+leases/create|heartbeat|release
+commands/cancel|get
+events/poll
+artifacts/get|export|retain|release
+shutdown
+```
+
+Asynchronous events use JSON-RPC notifications. Polling with a cursor is the
+recovery path after reconnect or backpressure.
+
+### Initialization
+
+The client sends its product identity, instance identity, supported protocol
+range, requested capabilities, and launch mode. The response includes:
+
+- service and executable versions;
+- selected protocol version;
+- supported and granted capabilities;
+- Broker process identity and connection ID;
+- browser discovery and authorization state;
+- transport and result size limits.
+
+Initialization must fail with a structured incompatibility error when no
+protocol overlap exists. A newer executable must not silently replace an
+incompatible Broker that has live clients.
+
+### Tool Contract
+
+`tools/list` is the canonical machine-readable manifest. Every tool declares:
+
+- stable name and description;
+- JSON input schema;
+- output schema and possible Artifact kinds;
+- required capabilities;
+- whether it may mutate browser state;
+- cancellation and idempotency semantics;
+- sensitivity classification.
+
+The initial controlled tool families are browser discovery/status, Workspace
+and Lease lifecycle, open/observe/read, click/type/keyboard/press,
+capture/upload, tabs/frames, dialogs, auth/cookies, network, events, and
+Artifacts. Raw CDP is never listed. `eval` requires `developer.eval`.
+
+## Access and Isolation Rules
+
+- **BR-1:** A public command can address a ControlledTarget only through its
+  Workspace and a valid ControlLease.
+- **BR-2:** Managed targets enter a Workspace through Broker creation and a
+  verified managed-popup opener chain. Eligible user tabs enter through target
+  inventory. Public commands use opaque ControlledTarget IDs; Agent-supplied
+  raw CDP identifiers are never accepted as public handles.
+- **BR-3:** Closing or releasing a Workspace may close its ManagedTabSets, but
+  must not close user tabs merely because they were visible or controlled. It
+  affects only its own mappings, rules, credentials, journals, and Artifacts.
+- **BR-4:** Network and auth configuration is not global. Precedence and cleanup
+  are deterministic within the owning Workspace.
+- **BR-5:** Each ControlledTarget serializes state-changing commands. Reads that
+  depend on document state join the same ordering boundary.
+- **BR-6:** A physical target has at most one controlling Lease at a time.
+  Multiple Workspaces may inventory it under different opaque IDs, but a
+  conflicting acquisition reports `target_busy` and never silently steals
+  control.
+- **BR-7:** The Pilot window visibly identifies the controlling client without
+  injecting mutable content into the page DOM.
+- **BR-21:** Invoking the CLI or bridge is the browser-control authorization
+  boundary. Browser Pilot does not infer task intent, ask for per-tab grants,
+  or perform per-action confirmation.
+- **BR-22:** The default BrowserControlPolicy permits all supported operations.
+  A Host may remove operations at launch; a running Agent cannot expand that
+  fixed policy through the browser tool protocol.
+- **BR-23:** Every Workspace can inventory the same eligible user tab under a
+  distinct opaque ID. The single controlling-Lease rule in **BR-6** resolves
+  concurrent mutation.
+- **BR-24:** Releasing a Lease or Workspace removes its user-target mappings and
+  invalidates their Observations without closing those tabs.
+- **BR-25:** Eligible popups created from user tabs appear as ordinary user tabs.
+  Managed popup inheritance remains restricted to a complete verified opener
+  chain rooted in the same ManagedTabSet.
+- **BR-26:** `tabs.list` returns eligible current and future tabs, tagging each
+  with origin and ManagedTabSet membership. Browser Pilot internal targets,
+  DevTools, and unsupported browser-internal targets remain excluded.
+- **BR-27:** Bulk cleanup and `close --all` default to the ManagedTabSet. No
+  bulk operation closes user tabs outside it. Each user tab requires an
+  explicit target-specific close command.
+
+## Command Reliability
+
+Mutating commands follow this runtime state model:
+
+```text
+accepted -> dispatched -> completed
+                    \-> unknown_outcome
+accepted -> cancelled
+accepted -> expired
+```
+
+- **BR-8:** Every command has a caller-provided or Broker-generated idempotency
+  key scoped to Principal and Workspace.
+- **BR-9:** A duplicate completed command returns its recorded result. A
+  duplicate dispatched command returns its status and is not dispatched again.
+- **BR-10:** If the Broker loses certainty after dispatch, it reports
+  `unknown_outcome`. Mutating commands are never automatically replayed.
+- **BR-11:** Cancellation before dispatch prevents execution. Cancellation
+  after dispatch is best-effort and must not claim rollback.
+- **BR-12:** Browser disconnect and reconnect change the BrowserInstance
+  connection generation and invalidate sessions and observations.
+
+Workspaces, Leases, target mappings, refs, command status, idempotency records,
+and bounded event journals live in Broker memory by default. Broker restart
+invalidates them; clients initialize again, list tabs again, and observe again.
+Only installation identity, browser preference, Broker locator/version data,
+and explicit user configuration may persist. DOM snapshots, refs, cookies,
+passwords, network bodies, and transient control state never persist.
+
+## Observation and Ref Semantics
+
+The public identity of an element is:
+
+```text
+workspaceId + observationId + ref
+```
+
+Internal resolution includes at least:
+
+```text
+browserProcessIdentity
+browserConnectionGeneration
+targetId
+CDPSessionId
+frameId
+loaderId
+backendNodeId
+documentGeneration
+```
+
+- **BR-13:** Cross-Workspace, cross-target, cross-observation, and expired refs
+  return `stale_ref`; they never fall back to another target.
+- **BR-14:** Navigation, loader replacement, target detach, frame detach, CDP
+  session replacement, and browser reconnect hard-invalidate affected refs.
+- **BR-15:** Same-document DOM changes require live node revalidation. They do
+  not force blanket invalidation when the node remains resolvable and valid.
+- **BR-16:** Observations are immutable and bounded by element count, text size,
+  depth, and byte limits, with explicit truncation metadata.
+
+## Events
+
+The event taxonomy includes navigation, document changed, target attached,
+target detached, control acquired/released, popup, dialog, download, connection
+lost, connection restored, network request, network response, command status,
+observation invalidated, and Lease expiry.
+
+Every event contains an event ID, monotonic Workspace sequence, timestamp,
+Workspace ID, relevant Lease and target IDs, type, payload version, and
+sensitivity. Consumers can resume from the last acknowledged cursor. The Broker
+may compact old events and must return `cursor_expired` rather than silently
+skip them.
+
+## Artifacts
+
+Artifact descriptors contain an opaque ID, kind, MIME type, byte size,
+dimensions when applicable, sensitivity, creation time, expiry, and optional
+preview relationship. They do not expose internal storage paths as the primary
+identity.
+
+- **BR-17:** Broker storage directories are mode `0700`; files are mode `0600`
+  on platforms that support POSIX permissions.
+- **BR-18:** Artifacts have per-item, per-Workspace, and global capacity limits,
+  TTL cleanup, retain/release, and explicit export to a client-owned path.
+- **BR-19:** Binary bytes are not written as base64 to the stdio stream. The
+  local adapter reads an authorized Artifact or asks the CLI to export it, then
+  converts it to the Agent runtime's image/file content type.
+- **BR-20:** Large or full-page screenshots return a model-sized preview plus
+  an optional original Artifact.
+
+## Browser Discovery and Setup
+
+Discovery returns every supported local browser candidate with product,
+channel, profile, process state, remote-debugging state, authorization state,
+and structured remediation. It does not silently select the first filesystem
+match when several viable instances exist.
+
+The client may select an instance explicitly or use a deterministic persisted
+preference. Setup that requires Chrome UI remains a user-visible action. Browser
+Pilot cannot bypass Chrome authorization and must not simulate consent.
+
+Browser Pilot does not add an access-approval page. Products that want an
+approval UX own it in the Agent host before exposing the tool. Browser Pilot
+still excludes its own setup/status pages and other internal targets from
+Agent inventory; the same-user CDP limitation in **CON-7** remains.
+
+## Security and Sensitive Data
+
+- Password inputs, cookies, auth credentials, network bodies, uploads,
+  downloads, and page captures carry sensitivity metadata.
+- Secrets are accepted through protected stdin or structured machine input, not
+  command-line arguments in recommended workflows.
+- Audit records store metadata and hashes where possible, not secret values.
+- Public errors do not include cookies, credentials, network bodies, DOM dumps,
+  or raw CDP payloads.
+- The Broker socket/pipe, configuration, and Artifact storage are restricted to
+  the OS user.
+- Browser Pilot documents that another same-user process may bypass it and use
+  Chrome's debugging endpoint directly.
+
+## Stable Error Model
+
+Errors contain a stable code, human message, retryability, affected object IDs,
+and optional structured remediation. Required codes include:
+
+```text
+protocol_incompatible   not_initialized       capability_denied
+browser_not_found       browser_not_authorized browser_disconnected
+workspace_not_found     lease_expired          target_not_owned
+target_busy             stale_ref               command_cancelled
+action_not_verified     command_expired         unknown_outcome
+artifact_not_found
+artifact_expired        cursor_expired         result_too_large
+invalid_argument        internal_error
+```
+
+Human CLI output may add prose. Machine clients branch only on codes and typed
+fields, never on message text.
+
+## Compatibility and Versioning
+
+- Protocol versions are independent of executable versions.
+- Additive tool and field changes use capability negotiation and schema
+  evolution. Breaking semantics require a protocol-major change.
+- Unknown response fields are ignored; unknown request fields are rejected only
+  when they change safety or semantics.
+- The current CLI JSON shapes remain supported until a documented major CLI
+  release and migration period.
+- A conformance suite validates any embedded adapter against the same executable
+  used by direct CLI users.
+
+## Functional Requirements and Acceptance
+
+- **FR-1 Universal installation:** An Agent can install Browser Pilot globally
+  or locally and use existing one-shot commands.
+  - **AC-1:** Existing documented CLI workflows and fixture tests pass after
+    Broker migration without requiring an SDK, MCP server, or extension.
+- **FR-2 Embedded integration:** A product can bundle the official executable,
+  initialize `bridge --stdio`, discover tools, execute them, receive events,
+  and release resources.
+  - **AC-2:** A reference adapter integrates using only executable invocation,
+    the published protocol, and Artifact files; it imports no Browser Pilot
+    source module.
+- **FR-3 Multi-client isolation:** Concurrent clients have isolated control and
+  transient state.
+  - **AC-3:** Two clients can operate separate Pilot windows concurrently, and
+    refs, active targets, frames, auth, rules, and close operations cannot cross
+    Workspace boundaries.
+- **FR-4 User-browser control:** An Agent can list and control all eligible
+  current and future tabs in the selected BrowserInstance, including tabs the
+  user opened before invoking it.
+  - **AC-4:** No access-request or grant step is required. Inventory combines
+    ManagedTabSets and user tabs behind Workspace-scoped opaque IDs. A Host may
+    remove operations at launch. Concurrent control reports `target_busy`,
+    release leaves user tabs open, and bulk cleanup closes only managed tabs.
+- **FR-5 Crash behavior:** Client and Broker failures have deterministic
+  outcomes.
+  - **AC-5:** Expired Leases are reclaimed; commands lost after dispatch report
+    `unknown_outcome`; reconnect invalidates prior observations.
+- **FR-6 Media delivery:** Agent products can deliver Browser Pilot screenshots
+  to multimodal models.
+  - **AC-6:** Capture returns a protected Artifact and preview metadata; a
+    reference adapter converts it to native image content without base64 on
+    stdout.
+- **FR-7 Version safety:** User-installed and product-bundled clients coexist.
+  - **AC-7:** Compatible clients reuse the Broker; incompatible clients receive
+    `protocol_incompatible` or use a deliberately isolated Broker without
+    terminating live clients.
+- **FR-8 Browser reliability:** Browser capability improvements do not alter the
+  public lifecycle and isolation contract.
+  - **AC-8:** Observation and action conformance tests pass against the public
+    tool interface, including frame, navigation, stale-ref, obstruction, and
+    input readback cases.
+
+## Non-Functional Requirements
+
+- **NFR-1:** No protocol message or normal tool result exceeds negotiated size
+  limits; truncation is explicit.
+- **NFR-2:** Broker restart invalidates transient Workspaces, Leases, target
+  assignments, refs, and commands. Clients rebuild state explicitly without
+  guessing or replaying mutations.
+- **NFR-3:** Every command and security-sensitive lifecycle transition emits an
+  auditable event without storing secret payloads.
+- **NFR-4:** Target command ordering is deterministic under concurrent clients.
+- **NFR-5:** Resource cleanup is idempotent and bounded after normal release,
+  client crash, browser exit, and Broker restart.
+
+## Non-Goals
+
+- Hosting browsers in the cloud or providing captcha-solving infrastructure.
+- Controlling Firefox or WebKit in the current architecture.
+- Providing OS-level isolation between processes owned by the same user.
+- Defining whether an Agent's requested browser action matches user intent;
+  Agent hosts own semantic approval and confirmation policy.
+- Modeling an Agent's conversation, run, task, worker, or model provider.
+- Replacing URL Preview features inside embedding products.
+- Making Browser Pilot an MCP server or publishing language SDKs.
+
+## Verification Strategy
+
+1. Protocol unit tests validate framing, negotiation, errors, schemas,
+   idempotency, cancellation, and cursor behavior.
+2. Broker integration tests create concurrent fake clients and assert complete
+   tab inventory, target assignment, Lease cleanup, crash recovery, and version
+   coexistence.
+3. Existing Playwright fixtures remain regression tests for human CLI behavior.
+4. Capability tests cover DOM/AX fusion, frames/OOPIF, stale refs, obstruction,
+   action verification, input readback, and document changes.
+5. Adapter conformance tests run against a language-neutral reference adapter
+   and at least two example Agent runtimes. No example-specific behavior enters
+   Broker production code.
+6. Browser-control tests prove that all eligible existing and future tabs are
+   included without grants, launch-time denied operations fail before CDP
+   dispatch, opaque IDs cannot cross Workspaces, and bulk cleanup never closes
+   user tabs.
+
+## Implementation Boundary
+
+The target internal boundary is:
+
+```text
+CLI formatter -----------\
+stdio bridge -------------+--> BrowserPilotService --> Broker domain actors
+conformance harness ------/          |                 --> CDP connector
+                                      +--> Artifact/Event stores
+```
+
+`BrowserPilotService` is an internal architectural boundary, not a promised
+Native SDK. CLI and bridge code may depend on it. Third-party products may not.

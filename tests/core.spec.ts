@@ -4,6 +4,8 @@
 import { test, expect } from '@playwright/test';
 import { open, click, type as bpType, press, evaluate, snapshot, findRef, findRefByRole, bp } from './bp.js';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { DaemonClient } from '../src/client.js';
 
 const BASE = 'http://127.0.0.1:18274';
 
@@ -272,13 +274,40 @@ test.describe('tabs', () => {
     open(`${BASE}/input/types`);
     const result = bp('tabs');
     expect(result.ok).toBe(true);
-    expect(result.tabs?.length).toBe(1);
+    expect(result.tabs?.length).toBeGreaterThanOrEqual(1);
+    expect(result.tabs?.some(tab => tab.url === `${BASE}/input/types`)).toBe(true);
   });
 
   test('tab switch', async () => {
     bp(`open "${BASE}/input/number" --new`);
     const result = bp('tab 0');
     expect(result.ok).toBe(true);
+  });
+
+  test('user tab is controllable and survives managed bulk close', async () => {
+    const daemon = new DaemonClient();
+    const marker = `user-tab-${Date.now()}`;
+    const url = `${BASE}/input/types?marker=${marker}`;
+    const { targetId } = await daemon.send('Target.createTarget', { url });
+
+    try {
+      let userTab: any;
+      for (let attempt = 0; attempt < 20 && !userTab; attempt += 1) {
+        await delay(50);
+        userTab = bp('tabs').tabs?.find((tab: any) => tab.url.includes(marker));
+      }
+      expect(userTab?.origin).toBe('user_tab');
+      expect(bp(`tab ${userTab.index}`).ok).toBe(true);
+
+      const bulkClose = bp('close --all');
+      expect(bulkClose.ok).toBe(true);
+      expect(evaluate('location.href').value).toContain(marker);
+
+      expect(bp('close').ok).toBe(true);
+      expect(bp('connect').ok).toBe(true);
+    } finally {
+      await daemon.send('Target.closeTarget', { targetId }).catch(() => {});
+    }
   });
 
   test('tab invalid index fails', async () => {
@@ -289,6 +318,7 @@ test.describe('tabs', () => {
   test('close tab', async () => {
     const result = bp('close');
     expect(result.ok).toBe(true);
+    expect(bp('connect').ok).toBe(true);
   });
 });
 

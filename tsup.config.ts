@@ -10,4 +10,16 @@ export default defineConfig([
     entry: ['src/daemon.ts'],
     format: ['esm'],
   },
+  {
+    entry: { protocol: 'src/protocol/index.ts' },
+    format: ['esm'],
+  },
+  {
+    entry: { services: 'src/services/index.ts' },
+    format: ['esm'],
+  },
+  {
+    entry: { bridge: 'src/bridge/index.ts' },
+    format: ['esm'],
+  },
 ]);

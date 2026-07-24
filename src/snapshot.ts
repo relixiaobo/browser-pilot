@@ -28,6 +28,48 @@ interface StoredRefs {
   entries: RefEntry[];
 }
 
+export interface RefStore {
+  save(targetId: string, entries: RefEntry[]): void;
+  load(expectedTargetId?: string): RefEntry[];
+}
+
+export class FileRefStore implements RefStore {
+  constructor(private readonly file: string = REFS_FILE) {}
+
+  save(targetId: string, entries: RefEntry[]): void {
+    writeFileSync(this.file, JSON.stringify({ targetId, entries } satisfies StoredRefs), { mode: 0o600 });
+  }
+
+  load(expectedTargetId?: string): RefEntry[] {
+    if (!existsSync(this.file)) return [];
+    try {
+      const stored: StoredRefs = JSON.parse(readFileSync(this.file, 'utf-8'));
+      if (expectedTargetId && stored.targetId !== expectedTargetId) return [];
+      return stored.entries;
+    } catch { return []; }
+  }
+}
+
+export class MemoryRefStore implements RefStore {
+  private readonly entriesByTarget = new Map<string, RefEntry[]>();
+
+  save(targetId: string, entries: RefEntry[]): void {
+    this.entriesByTarget.set(targetId, entries.map(entry => ({ ...entry })));
+  }
+
+  load(expectedTargetId?: string): RefEntry[] {
+    if (!expectedTargetId) return [];
+    return (this.entriesByTarget.get(expectedTargetId) ?? []).map(entry => ({ ...entry }));
+  }
+
+  clear(targetId?: string): void {
+    if (targetId) this.entriesByTarget.delete(targetId);
+    else this.entriesByTarget.clear();
+  }
+}
+
+export const legacyRefStore: RefStore = new FileRefStore();
+
 export interface SnapshotData {
   title: string;
   url: string;
@@ -43,22 +85,19 @@ export interface SnapshotResult {
 
 // ── Ref persistence (scoped to targetId) ────────────
 
-function saveRefs(targetId: string, entries: RefEntry[]): void {
-  writeFileSync(REFS_FILE, JSON.stringify({ targetId, entries } satisfies StoredRefs), { mode: 0o600 });
-}
-
 export function loadRefs(expectedTargetId?: string): RefEntry[] {
-  if (!existsSync(REFS_FILE)) return [];
-  try {
-    const stored: StoredRefs = JSON.parse(readFileSync(REFS_FILE, 'utf-8'));
-    if (expectedTargetId && stored.targetId !== expectedTargetId) return [];
-    return stored.entries;
-  } catch { return []; }
+  return legacyRefStore.load(expectedTargetId);
 }
 
 // ── Snapshot ────────────────────────────────────────
 
-export async function takeSnapshot(transport: Transport, sessionId: string, targetId: string, limit = 50): Promise<SnapshotResult> {
+export async function takeSnapshot(
+  transport: Transport,
+  sessionId: string,
+  targetId: string,
+  limit = 50,
+  refStore: RefStore = legacyRefStore,
+): Promise<SnapshotResult> {
   const { result: info } = await transport.send('Runtime.evaluate', {
     expression: PAGE_INFO, returnByValue: true,
   }, sessionId);
@@ -117,7 +156,7 @@ export async function takeSnapshot(transport: Transport, sessionId: string, targ
   }
 
   if (root) walk(root);
-  saveRefs(targetId, refs);
+  refStore.save(targetId, refs);
 
   // Format text
   const lines = [`[page] ${title} | ${url}`, ''];
@@ -141,18 +180,24 @@ export function isRef(target: string): boolean {
   return /^\d+$/.test(target);
 }
 
-export function formatTarget(target: string, targetId?: string): string {
+export function formatTarget(target: string, targetId?: string, refStore: RefStore = legacyRefStore): string {
   if (isRef(target)) {
-    const refs = loadRefs(targetId);
+    const refs = refStore.load(targetId);
     const entry = refs[parseInt(target, 10) - 1];
     return entry ? `[${target}] ${entry.role} "${entry.name}"` : `[${target}]`;
   }
   return target;
 }
 
-export async function resolveTarget(transport: Transport, sessionId: string, target: string, targetId?: string): Promise<string> {
+export async function resolveTarget(
+  transport: Transport,
+  sessionId: string,
+  target: string,
+  targetId?: string,
+  refStore: RefStore = legacyRefStore,
+): Promise<string> {
   if (isRef(target)) {
-    const refs = loadRefs(targetId);
+    const refs = refStore.load(targetId);
     const ref = parseInt(target, 10);
     if (ref < 1 || ref > refs.length) {
       throw new Error(`Ref [${ref}] not found. Run 'bp snapshot' to refresh.`);

@@ -2,11 +2,12 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { DaemonClient, isDaemonRunning } from './client.js';
-import { discoverChrome } from './chrome.js';
+import { discoverChrome, type ChromeInfo } from './chrome.js';
 import { loadState, saveState, clearState, type PilotState } from './state.js';
 import { SOCKET_PATH } from './paths.js';
 import { INJECT_BORDER } from './page-scripts.js';
 import type { Transport } from './transport.js';
+import { BrowserPilotError } from './protocol/errors.js';
 
 export { saveState, clearState, type PilotState } from './state.js';
 
@@ -18,9 +19,12 @@ export interface PilotContext {
 
 // ── Daemon lifecycle ────────────────────────────────
 
-async function startDaemon(wsUrl: string): Promise<DaemonClient> {
+async function startDaemon(chrome: ChromeInfo): Promise<DaemonClient> {
   const script = fileURLToPath(new URL('daemon.js', import.meta.url));
-  const child = spawn(process.execPath, [script, wsUrl], { detached: true, stdio: 'ignore' });
+  const child = spawn(process.execPath, [script, chrome.wsUrl, chrome.browser, chrome.dataDir], {
+    detached: true,
+    stdio: 'ignore',
+  });
   child.unref();
 
   const client = new DaemonClient();
@@ -32,13 +36,13 @@ async function startDaemon(wsUrl: string): Promise<DaemonClient> {
   throw new Error('Connection timeout. Make sure to click "Allow" in Chrome\'s authorization dialog.');
 }
 
-async function getDaemon(wsUrl: string): Promise<DaemonClient> {
+async function getDaemon(chrome: ChromeInfo): Promise<DaemonClient> {
   if (isDaemonRunning()) {
     const client = new DaemonClient();
     const info = await client.healthInfo();
     if (info.ok) {
       // Verify daemon controls the expected Chrome instance
-      if (info.wsUrl === wsUrl) return client;
+      if (info.wsUrl === chrome.wsUrl) return client;
       // Wrong Chrome — restart daemon; wait for old socket to disappear
       await client.shutdown();
       const deadline = Date.now() + 5_000;
@@ -47,7 +51,7 @@ async function getDaemon(wsUrl: string): Promise<DaemonClient> {
       }
     }
   }
-  return startDaemon(wsUrl);
+  return startDaemon(chrome);
 }
 
 // ── Pilot window helpers ────────────────────────────
@@ -57,12 +61,11 @@ async function verifyPilotTargets(client: DaemonClient, state: PilotState): Prom
   const existing = new Set(targetInfos.map((t: any) => t.targetId));
   state.pilotTargetIds = state.pilotTargetIds.filter((id: string) => existing.has(id));
 
-  if (state.pilotTargetIds.length === 0) return false;
-
-  if (!state.pilotTargetIds.includes(state.activeTargetId)) {
+  if (!existing.has(state.activeTargetId) && state.pilotTargetIds.length > 0) {
     state.activeTargetId = state.pilotTargetIds[0];
     state.activeSessionId = undefined;
   }
+  if (!existing.has(state.activeTargetId)) return false;
   saveState(state);
   return true;
 }
@@ -92,16 +95,42 @@ async function ensureSession(client: DaemonClient, state: PilotState): Promise<s
 // ── Public API ──────────────────────────────────────
 
 /** Connect fresh: discover Chrome, start daemon, create pilot window. */
+export async function connectDaemon(browserFilter?: string): Promise<DaemonClient> {
+  const chrome = discoverChrome(browserFilter);
+  if (!chrome) {
+    throw new BrowserPilotError('browser_not_found',
+      'Cannot find Chrome DevTools port.\n' +
+      'Open chrome://inspect/#remote-debugging in Chrome and toggle ON.',
+      {
+        remediation: {
+          code: 'enable_remote_debugging',
+          message: 'Open chrome://inspect/#remote-debugging in Chrome and toggle remote debugging on.',
+          actionRequired: true,
+        },
+      },
+    );
+  }
+  return getDaemon(chrome);
+}
+
+/** Connect fresh: discover Chrome, start daemon, create pilot window. */
 export async function connectFresh(browserFilter?: string): Promise<{ client: DaemonClient; state: PilotState }> {
   const chrome = discoverChrome(browserFilter);
   if (!chrome) {
-    throw new Error(
+    throw new BrowserPilotError('browser_not_found',
       'Cannot find Chrome DevTools port.\n' +
       'Open chrome://inspect/#remote-debugging in Chrome and toggle ON.',
+      {
+        remediation: {
+          code: 'enable_remote_debugging',
+          message: 'Open chrome://inspect/#remote-debugging in Chrome and toggle remote debugging on.',
+          actionRequired: true,
+        },
+      },
     );
   }
 
-  const client = await getDaemon(chrome.wsUrl);
+  const client = await getDaemon(chrome);
 
   const { targetId } = await client.send('Target.createTarget', {
     url: 'about:blank', newWindow: true,

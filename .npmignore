@@ -10,3 +10,7 @@ plugin/
 .claude-plugin/
 playwright.config.ts
 test-results/
+dist/protocol.js
+dist/services.js
+dist/capture-service.js
+dist/bridge.js

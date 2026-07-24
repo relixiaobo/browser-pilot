@@ -88,6 +88,35 @@ CLI Process ──── HTTP/Unix Socket ──── Daemon Process (persisten
 
 The daemon maintains a single CDP WebSocket connection. A pulsing blue glow around the Pilot window indicates the agent is active.
 
+## Platform Evolution
+
+Browser Pilot is evolving from its current single-Agent global state into an
+Agent-neutral, multi-client Browser Broker while preserving direct `bp` use.
+The approved architecture and execution plans are:
+
+- [Platform specification](docs/architecture/browser-pilot-platform-spec.md)
+- [Universal Agent integration plan](docs/plans/universal-agent-integration.md)
+- [Browser capability and reliability plan](docs/plans/browser-capability-evolution.md)
+- [Stdio bridge integration contract](docs/integration/stdio-bridge.md)
+
+The public integration direction remains CLI-only: one-shot commands for direct
+Agent use and a persistent `bridge --stdio` mode for products that embed the
+official executable. Browser Pilot will not require an extension, Native SDK,
+or MCP server.
+
+The dedicated Pilot window remains the default managed tab set for independent
+Agent work. The Broker architecture also includes all eligible user tabs in the
+Agent's inventory without a separate grant step, so an Agent can operate a page
+the user already opened. Invoking or exposing the tool is the authorization
+boundary; products may apply their own approval UX or remove operations when
+launching the bridge. Bulk cleanup remains limited to managed tabs, and user
+tabs remain open when a session ends.
+
+The `browser-pilot bridge --stdio` transport and Broker lifecycle foundation
+are now implemented. Browser tool dispatch, events, and protected Artifacts are
+still tracked as release blockers in the integration plan; embedded products
+should use the documented release gate rather than depend on partial methods.
+
 ## Commands
 
 ### Core Loop
@@ -122,7 +151,9 @@ The daemon maintains a single CDP WebSocket connection. A pulsing blue glow arou
 
 Dialogs (`alert`/`confirm`/`prompt`) are auto-handled by the daemon.
 
-Popup windows (target="_blank", window.open) are auto-detected. Run `bp tabs` to see and switch to them.
+Run `bp tabs` to list Pilot-managed tabs, their popups, and eligible tabs the
+user opened elsewhere in the same browser. `bp tab <n>` switches control to any
+listed tab.
 
 ### Network
 
@@ -143,9 +174,9 @@ Popup windows (target="_blank", window.open) are auto-detected. Run `bp tabs` to
 |---------|-------------|
 | `bp connect` | Connect to Chrome, create pilot window |
 | `bp disconnect` | Close pilot window, stop daemon |
-| `bp tabs` | List pilot tabs (auto-adopts popups) |
-| `bp tab <n>` | Switch tab |
-| `bp close` | Close current tab (`--all`) |
+| `bp tabs` | List all controllable tabs in the current browser |
+| `bp tab <n>` | Switch to any listed managed or user tab |
+| `bp close` | Close the current tab (`--all` closes Pilot-managed tabs only) |
 
 ## Refs
 

@@ -2,6 +2,8 @@ import http from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { SOCKET_PATH, PID_FILE } from './paths.js';
 import type { Transport } from './transport.js';
+import { browserPilotErrorFromJsonRpc } from './protocol/errors.js';
+import type { JsonRpcErrorObject, JsonValue } from './protocol/model.js';
 
 export function isDaemonRunning(): boolean {
   if (!existsSync(PID_FILE)) return false;
@@ -26,7 +28,10 @@ export class DaemonClient implements Transport {
           res.on('end', () => {
             try {
               const parsed = JSON.parse(data);
-              if (parsed.error) reject(new Error(parsed.error));
+              if (typeof parsed.error === 'string') reject(new Error(parsed.error));
+              else if (parsed.error && typeof parsed.error === 'object') {
+                reject(browserPilotErrorFromJsonRpc(parsed.error as JsonRpcErrorObject));
+              }
               else resolve(parsed.result ?? parsed);
             } catch {
               reject(new Error(`Invalid daemon response: ${data}`));
@@ -51,12 +56,33 @@ export class DaemonClient implements Transport {
     try { await this.request('/health'); return true; } catch { return false; }
   }
 
-  async healthInfo(): Promise<{ ok: boolean; wsUrl?: string }> {
+  async healthInfo(): Promise<{
+    ok: boolean;
+    wsUrl?: string;
+    brokerProtocol?: number;
+    browser?: { product: string; profile: string };
+  }> {
     try { return await this.request('/health'); } catch { return { ok: false }; }
   }
 
   async shutdown(): Promise<void> {
     try { await this.request('/shutdown', {}); } catch { /* may already be gone */ }
+  }
+
+  async brokerCall(
+    bridgeSessionId: string,
+    method: string,
+    params?: JsonValue,
+  ): Promise<JsonValue> {
+    return this.request('/broker/rpc', {
+      bridgeSessionId,
+      method,
+      ...(params !== undefined ? { params } : {}),
+    });
+  }
+
+  async brokerDisconnect(bridgeSessionId: string): Promise<void> {
+    await this.request('/broker/disconnect', { bridgeSessionId });
   }
 
   async dialogs(): Promise<any[]> {

@@ -52,6 +52,37 @@ export const CONTENTEDITABLE_CLEAR = `function() {
   document.execCommand('delete');
 }`;
 
+/** Focus a contenteditable element and move the caret to its end. */
+export const CONTENTEDITABLE_FOCUS_END = `function() {
+  this.focus();
+  const sel = window.getSelection();
+  sel.selectAllChildren(this);
+  sel.collapseToEnd();
+}`;
+
+/** Return readable input state for verification without page-side logging. */
+export const READ_EDITABLE_STATE = `function() {
+  if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
+    return {kind:'input', value:String(this.value ?? ''), sensitive:this instanceof HTMLInputElement && this.type === 'password'};
+  }
+  if (this.isContentEditable) {
+    return {kind:'contenteditable', value:String(this.innerText ?? this.textContent ?? ''), sensitive:false};
+  }
+  return {kind:'unsupported', value:'', sensitive:false};
+}`;
+
+/** Return editable state for the active element, used after keyboard input. */
+export const READ_ACTIVE_EDITABLE_STATE = `(() => {
+  const el = document.activeElement;
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    return {kind:'input', value:String(el.value ?? ''), sensitive:el instanceof HTMLInputElement && el.type === 'password'};
+  }
+  if (el && el.isContentEditable) {
+    return {kind:'contenteditable', value:String(el.innerText ?? el.textContent ?? ''), sensitive:false};
+  }
+  return {kind:'unsupported', value:'', sensitive:false};
+})()`;
+
 /** Return {title, url} of the current page. */
 export const PAGE_INFO = `JSON.stringify({title:document.title,url:location.href})`;
 

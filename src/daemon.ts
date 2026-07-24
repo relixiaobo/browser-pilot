@@ -1,10 +1,20 @@
 import http from 'node:http';
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { STATE_DIR, SOCKET_PATH, PID_FILE } from './paths.js';
 import { CDPClient } from './cdp.js';
+import { asBrowserPilotError, invalidArgument } from './protocol/errors.js';
+import type { BrowserInstanceId, JsonValue } from './protocol/model.js';
+import { DEFAULT_PROTOCOL_LIMITS, MemoryBrokerRuntime } from './services/broker-runtime.js';
+
+const require = createRequire(import.meta.url);
+const PKG_VERSION: string = require('../package.json').version;
 
 const wsUrl = process.argv[2];
 if (!wsUrl) { process.stderr.write('Usage: daemon <wsUrl>\n'); process.exit(1); }
+const browserProduct = process.argv[3] || 'Chromium';
+const browserProfile = process.argv[4] || '';
 if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
 else try { chmodSync(STATE_DIR, 0o700); } catch { /* ignore */ }
 try { unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
@@ -14,13 +24,27 @@ function cleanup() {
   try { unlinkSync(PID_FILE); } catch { /* ignore */ }
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
+function readBody(req: http.IncomingMessage, maxBytes = 5 * 1024 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
-    req.on('end', () => resolve(body));
+    const chunks: Buffer[] = [];
+    let byteLength = 0;
+    req.on('data', (value: Buffer | string) => {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      byteLength += chunk.length;
+      if (byteLength > maxBytes) {
+        reject(new Error(`Request body exceeds ${maxBytes} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // ── Stateful event tracking ─────────────────────────
@@ -112,6 +136,32 @@ async function main() {
   const cdp = new CDPClient();
   await cdp.connect(wsUrl);
   let activeSessionId: string | undefined;
+  const startedAt = Date.now();
+  const browserId = `browser:${randomUUID()}`;
+  const browserInstanceId = `browser-instance:${randomUUID()}` as BrowserInstanceId;
+  const broker = new MemoryBrokerRuntime({
+    serviceVersion: PKG_VERSION,
+    executableVersion: PKG_VERSION,
+    brokerProcessIdentity: `${process.pid}:${startedAt}`,
+    browsers: [{
+      candidate: {
+        id: browserId,
+        product: browserProduct,
+        profile: browserProfile,
+        state: 'ready',
+      },
+      instance: {
+        id: browserInstanceId,
+        product: browserProduct,
+        profilePath: browserProfile,
+        processIdentity: wsUrl,
+        connectionGeneration: 1,
+        state: 'connected',
+      },
+    }],
+  });
+  const leaseSweepTimer = setInterval(() => broker.sweepExpiredLeases(), 1_000);
+  leaseSweepTimer.unref();
 
   // ── Dialog auto-handling ──────────────────────────
   cdp.on('Page.javascriptDialogOpening', (params: any, sessionId?: string) => {
@@ -212,7 +262,44 @@ async function main() {
     try {
       // ── Core endpoints ────────────────────────────
       if (req.method === 'GET' && url.pathname === '/health') {
-        res.writeHead(200); res.end(JSON.stringify({ ok: true, wsUrl })); return;
+        res.writeHead(200); res.end(JSON.stringify({
+          ok: true,
+          wsUrl,
+          brokerProtocol: 1,
+          browser: { product: browserProduct, profile: browserProfile },
+        })); return;
+      }
+      if (req.method === 'POST' && url.pathname === '/broker/rpc') {
+        try {
+          const body: unknown = JSON.parse(await readBody(req, DEFAULT_PROTOCOL_LIMITS.maxMessageBytes + 4096));
+          if (!isRecord(body)) throw invalidArgument('Broker RPC body must be an object', 'body');
+          if (typeof body.bridgeSessionId !== 'string') {
+            throw invalidArgument('bridgeSessionId is required', 'bridgeSessionId');
+          }
+          if (typeof body.method !== 'string' || body.method.length === 0 || body.method.length > 256) {
+            throw invalidArgument('method is required', 'method');
+          }
+          const result = await broker.call(
+            body.bridgeSessionId,
+            body.method,
+            body.params as JsonValue | undefined,
+          );
+          res.writeHead(200); res.end(JSON.stringify({ result })); return;
+        } catch (error) {
+          res.writeHead(200); res.end(JSON.stringify({ error: asBrowserPilotError(error).toJsonRpcError() })); return;
+        }
+      }
+      if (req.method === 'POST' && url.pathname === '/broker/disconnect') {
+        try {
+          const body: unknown = JSON.parse(await readBody(req, 4096));
+          if (!isRecord(body) || typeof body.bridgeSessionId !== 'string') {
+            throw invalidArgument('bridgeSessionId is required', 'bridgeSessionId');
+          }
+          broker.disconnect(body.bridgeSessionId);
+          res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
+        } catch (error) {
+          res.writeHead(200); res.end(JSON.stringify({ error: asBrowserPilotError(error).toJsonRpcError() })); return;
+        }
       }
       if (req.method === 'POST' && url.pathname === '/cdp') {
         const body = await readBody(req);
@@ -236,7 +323,14 @@ async function main() {
       }
       if (req.method === 'POST' && url.pathname === '/shutdown') {
         res.writeHead(200); res.end(JSON.stringify({ ok: true }));
-        setTimeout(() => { server.close(); cdp.close(); cleanup(); process.exit(0); }, 50); return;
+        setTimeout(() => {
+          clearInterval(leaseSweepTimer);
+          broker.close();
+          server.close();
+          cdp.close();
+          cleanup();
+          process.exit(0);
+        }, 50); return;
       }
 
       // ── Network: enable ───────────────────────────
@@ -346,8 +440,15 @@ async function main() {
     try { chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
     writeFileSync(PID_FILE, String(process.pid), { mode: 0o600 });
   });
-  process.on('SIGTERM', () => { cdp.close(); cleanup(); process.exit(0); });
-  process.on('SIGINT', () => { cdp.close(); cleanup(); process.exit(0); });
+  const terminate = () => {
+    clearInterval(leaseSweepTimer);
+    broker.close();
+    cdp.close();
+    cleanup();
+    process.exit(0);
+  };
+  process.on('SIGTERM', terminate);
+  process.on('SIGINT', terminate);
 }
 
 main().catch((err) => { process.stderr.write(`Daemon error: ${err.message}\n`); process.exit(1); });
