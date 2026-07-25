@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { STATE_DIR, SOCKET_PATH, PID_FILE } from './paths.js';
@@ -13,17 +13,21 @@ import {
   type BrokerBrowserBinding,
 } from './services/broker-runtime.js';
 import { BrowserToolService } from './services/browser-tool-service.js';
+import { BrowserToolRouter } from './services/browser-tool-router.js';
 import { ArtifactStore } from './services/artifact-store.js';
 import { CompatibilityDialogService } from './services/compatibility-dialog-service.js';
-import { discoverChromeAtDataDir } from './chrome.js';
+import {
+  discoverBrowserCandidates,
+  discoverChromeAtDataDir,
+  type DiscoveredBrowser,
+} from './chrome.js';
 import { ManagedTargetJanitorClient } from './managed-target-janitor-client.js';
 
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
 
-const initialWsUrl = process.argv[2];
-if (!initialWsUrl) { process.stderr.write('Usage: daemon <wsUrl>\n'); process.exit(1); }
-const browserProduct = process.argv[3] || 'Chromium';
+const initialWsUrl = process.argv[2] || undefined;
+const browserProduct = process.argv[3] || '';
 const browserProfile = process.argv[4] || '';
 if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
 else try { chmodSync(STATE_DIR, 0o700); } catch { /* ignore */ }
@@ -149,27 +153,74 @@ async function syncFetchAll(cdp: CDPClient, currentSessionId?: string) {
 
 async function main() {
   const cdp = new CDPClient();
-  await cdp.connect(initialWsUrl);
+  if (initialWsUrl) await cdp.connect(initialWsUrl);
   let activeSessionId: string | undefined;
   let currentWsUrl = initialWsUrl;
   let terminating = false;
   const startedAt = Date.now();
-  const browserId = `browser:${randomUUID()}`;
-  const browserInstanceId = `browser-instance:${randomUUID()}` as BrowserInstanceId;
+  const discoveredBrowsers = await discoverBrowserCandidates();
+  const knownSelection = discoveredBrowsers.find(browser => (
+    browser.dataDir === browserProfile &&
+    browser.candidate.product.toLowerCase() === browserProduct.toLowerCase()
+  ));
+  const customBrowserId = browserProfile
+    ? `browser:custom:${createHash('sha256').update(`${browserProduct}\0${browserProfile}`).digest('base64url').slice(0, 20)}`
+    : undefined;
+  const selectedBrowser: DiscoveredBrowser | undefined = knownSelection ?? (
+    browserProfile && customBrowserId
+      ? {
+        candidate: {
+          id: customBrowserId,
+          product: browserProduct || 'Chromium',
+          profile: browserProfile,
+          processState: initialWsUrl ? 'running' : 'unknown',
+          remoteDebuggingState: initialWsUrl ? 'enabled' : 'disabled',
+          authorizationState: initialWsUrl ? 'authorized' : 'not_applicable',
+          state: initialWsUrl ? 'ready' : 'not_running',
+          ...(!initialWsUrl ? {
+            remediation: {
+              code: 'start_browser',
+              message: 'Start this browser profile, then enable remote debugging from chrome://inspect/#remote-debugging.',
+              actionRequired: true,
+            },
+          } : {}),
+        },
+        dataDir: browserProfile,
+      }
+      : discoveredBrowsers[0]
+  );
+  const selectedProduct = selectedBrowser?.candidate.product ?? browserProduct;
+  const selectedProfile = selectedBrowser?.dataDir ?? browserProfile;
+  const browserId = selectedBrowser?.candidate.id ?? `browser:custom:${randomUUID()}`;
+  const browserInstanceId = `browser-instance:${browserId.slice('browser:'.length)}` as BrowserInstanceId;
   const browserBinding: BrokerBrowserBinding = {
-    candidate: {
-      id: browserId,
-      product: browserProduct,
-      profile: browserProfile,
-      state: 'ready',
-    },
+    candidate: selectedBrowser
+      ? {
+        ...selectedBrowser.candidate,
+        ...(initialWsUrl ? {
+          processState: 'running' as const,
+          remoteDebuggingState: 'enabled' as const,
+          authorizationState: 'authorized' as const,
+          state: 'ready' as const,
+          remediation: undefined,
+        } : {}),
+      }
+      : {
+        id: browserId,
+        product: browserProduct || 'Unavailable browser',
+        profile: browserProfile,
+        processState: initialWsUrl ? 'running' : 'unknown',
+        remoteDebuggingState: initialWsUrl ? 'enabled' : 'disabled',
+        authorizationState: initialWsUrl ? 'authorized' : 'not_applicable',
+        state: initialWsUrl ? 'ready' : 'not_running',
+      },
     instance: {
       id: browserInstanceId,
-      product: browserProduct,
-      profilePath: browserProfile,
-      processIdentity: initialWsUrl,
-      connectionGeneration: 1,
-      state: 'connected',
+      product: selectedProduct || 'Unavailable browser',
+      profilePath: selectedProfile,
+      processIdentity: initialWsUrl ?? '',
+      connectionGeneration: initialWsUrl ? 1 : 0,
+      state: initialWsUrl ? 'connected' : 'disconnected',
     },
   };
   const artifactStore = new ArtifactStore({
@@ -179,7 +230,7 @@ async function main() {
   const janitor = new ManagedTargetJanitorClient({
     onLog: message => process.stderr.write(`Managed target cleanup: ${message}\n`),
   });
-  await janitor.connect(initialWsUrl);
+  if (initialWsUrl) await janitor.connect(initialWsUrl);
   let janitorResetTask = Promise.resolve();
   const browserTools = new BrowserToolService(cdp, browserBinding, {
     artifactStore,
@@ -189,12 +240,81 @@ async function main() {
     cdp,
     sessionId => browserTools.ownsSession(sessionId),
   );
+  const toolRouter = new BrowserToolRouter();
+  if (selectedBrowser) toolRouter.register(browserInstanceId, browserTools);
+  const additionalControllers: Array<{
+    discovered: DiscoveredBrowser;
+    binding: BrokerBrowserBinding;
+    cdp: CDPClient;
+    janitor: ManagedTargetJanitorClient;
+  }> = [];
+  const browserBindings: BrokerBrowserBinding[] = selectedBrowser ? [browserBinding] : [];
+  for (const discovered of discoveredBrowsers) {
+    if (discovered.candidate.id === browserId) continue;
+    const instanceId = `browser-instance:${discovered.candidate.id.slice('browser:'.length)}` as BrowserInstanceId;
+    const binding: BrokerBrowserBinding = {
+      candidate: { ...discovered.candidate },
+      instance: {
+        id: instanceId,
+        product: discovered.candidate.product,
+        profilePath: discovered.dataDir,
+        processIdentity: '',
+        connectionGeneration: 0,
+        state: 'disconnected',
+      },
+    };
+    browserBindings.push(binding);
+    const additionalCdp = new CDPClient();
+    const additionalJanitor = new ManagedTargetJanitorClient({
+      onLog: message => process.stderr.write(
+        `Managed target cleanup (${discovered.candidate.product}): ${message}\n`,
+      ),
+    });
+    const service = new BrowserToolService(additionalCdp, binding, {
+      artifactStore,
+      managedTargets: additionalJanitor,
+    });
+    toolRouter.register(instanceId, service);
+    additionalControllers.push({
+      discovered,
+      binding,
+      cdp: additionalCdp,
+      janitor: additionalJanitor,
+    });
+    if (discovered.candidate.state === 'ready' && discovered.endpoint) {
+      try {
+        await additionalCdp.connect(discovered.endpoint.wsUrl);
+        await additionalCdp.send('Target.setDiscoverTargets', { discover: true });
+        await additionalJanitor.connect(discovered.endpoint.wsUrl);
+        binding.instance = {
+          ...binding.instance,
+          processIdentity: discovered.endpoint.wsUrl,
+          connectionGeneration: 1,
+          state: 'connected',
+        };
+      } catch {
+        additionalCdp.close();
+        await additionalJanitor.browserDisconnected().catch(() => {});
+        binding.candidate = {
+          ...binding.candidate,
+          state: 'disconnected',
+          remoteDebuggingState: 'stale',
+          authorizationState: 'unknown',
+          remediation: {
+            code: 'reconnect_browser',
+            message: 'The browser endpoint changed while Browser Pilot was connecting. Retry discovery.',
+            actionRequired: false,
+          },
+        };
+      }
+    }
+  }
   const broker = new MemoryBrokerRuntime({
     serviceVersion: PKG_VERSION,
     executableVersion: PKG_VERSION,
     brokerProcessIdentity: `${process.pid}:${startedAt}`,
-    browsers: [browserBinding],
-    toolExecutor: browserTools,
+    browsers: browserBindings,
+    toolExecutor: toolRouter,
     artifactStore,
   });
   let reconnectTask: Promise<void> | undefined;
@@ -213,19 +333,9 @@ async function main() {
     timer.unref();
   });
   const reconnectBrowser = async (): Promise<void> => {
-    if (browserBinding.instance.state === 'disconnected') {
-      try {
-        broker.updateBrowserConnection(browserInstanceId, {
-          state: 'reconnecting',
-          connectionGeneration: browserBinding.instance.connectionGeneration,
-        });
-      } catch (error) {
-        process.stderr.write(`Browser reconnect state error: ${error instanceof Error ? error.message : String(error)}\n`);
-      }
-    }
     let retryDelayMs = 250;
     while (!terminating) {
-      const chrome = discoverChromeAtDataDir(browserProfile, browserProduct);
+      const chrome = discoverChromeAtDataDir(selectedProfile, selectedProduct);
       if (!chrome) {
         await wait(retryDelayMs);
         retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
@@ -275,14 +385,116 @@ async function main() {
       void reconnectTask;
     }
   });
+  if (selectedBrowser && browserBinding.instance.state !== 'connected') {
+    reconnectTask = reconnectBrowser()
+      .catch(error => {
+        process.stderr.write(`Browser reconnect error: ${error instanceof Error ? error.message : String(error)}\n`);
+      })
+      .finally(() => { reconnectTask = undefined; });
+    void reconnectTask;
+  }
+  for (const controller of additionalControllers) {
+    let additionalReconnectTask: Promise<void> | undefined;
+    const reconnectAdditional = async (): Promise<void> => {
+      let retryDelayMs = 250;
+      while (!terminating) {
+        const chrome = discoverChromeAtDataDir(
+          controller.discovered.dataDir,
+          controller.discovered.candidate.product,
+        );
+        if (!chrome) {
+          await wait(retryDelayMs);
+          retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
+          continue;
+        }
+        try {
+          await controller.cdp.connect(chrome.wsUrl);
+          await controller.cdp.send('Target.setDiscoverTargets', { discover: true });
+          await controller.janitor.connect(chrome.wsUrl);
+          broker.updateBrowserConnection(controller.binding.instance.id, {
+            state: 'connected',
+            connectionGeneration: controller.binding.instance.connectionGeneration + 1,
+            processIdentity: chrome.wsUrl,
+          });
+          return;
+        } catch {
+          if (controller.cdp.connectionState === 'connected') controller.cdp.close();
+          await wait(retryDelayMs);
+          retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
+        }
+      }
+    };
+    controller.cdp.onConnectionState(event => {
+      if (event.state !== 'disconnected' || terminating) return;
+      void controller.janitor.browserDisconnected().catch(error => {
+        process.stderr.write(
+          `Managed target cleanup reset (${controller.discovered.candidate.product}): ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+      if (controller.binding.instance.state === 'connected') {
+        try {
+          broker.updateBrowserConnection(controller.binding.instance.id, {
+            state: 'disconnected',
+            connectionGeneration: controller.binding.instance.connectionGeneration,
+          });
+        } catch (error) {
+          process.stderr.write(
+            `Browser disconnect state error (${controller.discovered.candidate.product}): ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+      }
+      if (!additionalReconnectTask) {
+        additionalReconnectTask = reconnectAdditional()
+          .catch(error => {
+            process.stderr.write(
+              `Browser reconnect error (${controller.discovered.candidate.product}): ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          })
+          .finally(() => { additionalReconnectTask = undefined; });
+        void additionalReconnectTask;
+      }
+    });
+    if (controller.binding.instance.state !== 'connected') {
+      additionalReconnectTask = reconnectAdditional()
+        .catch(error => {
+          process.stderr.write(
+            `Browser reconnect error (${controller.discovered.candidate.product}): ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        })
+        .finally(() => { additionalReconnectTask = undefined; });
+      void additionalReconnectTask;
+    }
+  }
   const leaseSweepTimer = setInterval(() => {
     broker.sweepExpiredLeases();
     void artifactStore.sweep().catch(() => {});
   }, 1_000);
   leaseSweepTimer.unref();
+  let discoveryRefreshRunning = false;
+  const discoveryRefreshTimer = setInterval(() => {
+    if (discoveryRefreshRunning || terminating) return;
+    discoveryRefreshRunning = true;
+    void discoverBrowserCandidates()
+      .then(latest => {
+        for (const binding of browserBindings) {
+          if (binding.instance.state === 'connected') continue;
+          const discovered = latest.find(browser => browser.candidate.id === binding.candidate.id);
+          if (!discovered) continue;
+          binding.candidate = { ...discovered.candidate };
+          broker.updateBrowserCandidate(binding.instance.id, discovered.candidate);
+        }
+      })
+      .catch(error => {
+        process.stderr.write(`Browser discovery refresh error: ${error instanceof Error ? error.message : String(error)}\n`);
+      })
+      .finally(() => { discoveryRefreshRunning = false; });
+  }, 2_000);
+  discoveryRefreshTimer.unref();
 
   // ── Popup tracking ────────────────────────────────
-  await cdp.send('Target.setDiscoverTargets', { discover: true });
+  if (cdp.connectionState === 'connected') {
+    await cdp.send('Target.setDiscoverTargets', { discover: true });
+  }
   cdp.on('Target.targetCreated', (params: any) => {
     const { targetInfo } = params;
     if (targetInfo.type === 'page' && targetInfo.openerId) {
@@ -384,12 +596,14 @@ async function main() {
           ok: true,
           wsUrl: currentWsUrl,
           brokerProtocol: 1,
-          browser: {
-            product: browserProduct,
-            profile: browserProfile,
+          ...(selectedBrowser ? { browser: {
+            id: browserBinding.candidate.id,
+            product: selectedProduct,
+            ...(browserBinding.candidate.channel ? { channel: browserBinding.candidate.channel } : {}),
+            profile: selectedProfile,
             state: browserBinding.instance.state,
             connectionGeneration: browserBinding.instance.connectionGeneration,
-          },
+          } } : {}),
         })); return;
       }
       if (req.method === 'POST' && url.pathname === '/broker/rpc') {
@@ -494,9 +708,12 @@ async function main() {
         res.writeHead(200); res.end(JSON.stringify({ ok: true }));
         setTimeout(async () => {
           clearInterval(leaseSweepTimer);
+          clearInterval(discoveryRefreshTimer);
           broker.close();
           server.close();
           await janitor.close();
+          await Promise.all(additionalControllers.map(controller => controller.janitor.close()));
+          for (const controller of additionalControllers) controller.cdp.close();
           cdp.close();
           await artifactStore.clear().catch(() => {});
           cleanup();
@@ -615,9 +832,12 @@ async function main() {
     if (terminating) return;
     terminating = true;
     clearInterval(leaseSweepTimer);
+    clearInterval(discoveryRefreshTimer);
     broker.close();
     server.close();
     await janitor.close();
+    await Promise.all(additionalControllers.map(controller => controller.janitor.close()));
+    for (const controller of additionalControllers) controller.cdp.close();
     cdp.close();
     await artifactStore.clear().catch(() => {});
     cleanup();

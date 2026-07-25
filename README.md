@@ -14,6 +14,16 @@ Open `chrome://inspect/#remote-debugging` in Chrome (144+) and click Allow. No c
 
 > Chrome 136 disabled the old `--remote-debugging-port` flag for security. Chrome 144 introduced this new UI toggle as the replacement — browser-pilot uses this.
 
+Check every installed supported browser and its exact setup state with:
+
+```bash
+bp browsers
+```
+
+Use `bp connect --browser <id|product|channel>` for an explicit choice. Product
+embedders can pass the same selector to `browser-pilot bridge --stdio
+--browser <selector>`; otherwise selection follows a stable platform order.
+
 ### 2. Install the plugin for your agent
 
 **Claude Code:**
@@ -122,8 +132,8 @@ browser-observable no-progress actions are also implemented. An internal
 managed-target janitor owns Broker-created tabs through a separate CDP
 connection and closes only those tabs and their managed popup descendants if
 the daemon exits or crashes; it does not persist target IDs or close user tabs.
-Embedded products should still use the documented release gate while multi-browser
-discovery and browser-capability conformance work remain in progress.
+Embedded products should still use the documented release gate while Broker
+lifecycle/versioning and browser-capability conformance work remain in progress.
 
 ## Commands
 

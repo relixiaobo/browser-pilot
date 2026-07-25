@@ -89,11 +89,18 @@ export type BrowserSetupState =
   | 'authorization_required'
   | 'disconnected';
 
+export type BrowserProcessState = 'running' | 'not_running' | 'unknown';
+export type BrowserRemoteDebuggingState = 'enabled' | 'disabled' | 'stale';
+export type BrowserAuthorizationState = 'authorized' | 'required' | 'not_applicable' | 'unknown';
+
 export interface BrowserCandidate {
   id: string;
   product: string;
   channel?: string;
   profile?: string;
+  processState: BrowserProcessState;
+  remoteDebuggingState: BrowserRemoteDebuggingState;
+  authorizationState: BrowserAuthorizationState;
   state: BrowserSetupState;
   remediation?: {
     code: string;

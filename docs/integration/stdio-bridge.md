@@ -23,6 +23,11 @@ Launch it directly, without a shell:
 browser-pilot bridge --stdio
 ```
 
+The host may add `--browser <id|product|channel>` to make its initial browser
+preference explicit. Without it, Browser Pilot deterministically selects the
+first ready candidate in stable platform order. The running Broker retains that
+choice in memory; it does not write target or profile selection state to disk.
+
 Create pipes for stdin, stdout, and stderr. Stdout is protocol-only. Treat each
 stderr line as a diagnostic and never parse it as protocol data.
 
@@ -61,8 +66,14 @@ exception because a browser dialog can pause the command that caused it.
 
 The response returns the selected protocol, supported and granted
 capabilities, executable and service versions, a process-stable Broker
-identity, a Connection ID, browser candidates, and negotiated limits. Branch
-on structured `error.data.code`; never branch on English error messages.
+identity, a Connection ID, browser candidates, and negotiated limits. Each
+candidate has a stable `id`, product/channel/profile identity, aggregate
+`state`, separate `processState`, `remoteDebuggingState`, and
+`authorizationState`, plus structured `remediation` when action is needed.
+Initialization succeeds when no candidate is ready, so a host can present setup
+state and poll `browser.discover`; Workspace creation waits for a ready,
+connected candidate. Branch on structured `error.data.code`; never branch on
+English error messages.
 
 Protocol 1.0 uses the service limits returned by `initialize`. Protocol 1.1 may
 send `limits.maxMessageBytes` and `limits.maxResultBytes`; each must be from
@@ -108,7 +119,7 @@ shutdown
 `workspaces/create` accepts an optional `browserId`. Protocol 1.1 clients may
 also provide `clientKey` to make active Workspace creation idempotent within
 their Principal; reusing a key for another browser fails. Without a browser ID,
-the Broker uses its ready browser binding. It returns a Workspace, its default logical
+the Broker uses its first ready, connected browser binding. It returns a Workspace, its default logical
 ManagedTabSet, and an `eventCursor`. `workspaces/get` returns the current cursor
 as a recovery baseline. Creating a Workspace does not itself create a browser
 window; the first managed navigation creates the dedicated browser window.
@@ -441,8 +452,8 @@ auth, network observation/rules, eval, screenshot, PDF, protected upload import,
 scoped download Artifacts, Artifact access, command recovery, browser reconnect,
 and event replay.
 An embedding adapter should not ship against this work-in-progress bridge until
-multi-browser discovery, remaining browser capability families, and conformance
-coverage meet the release gate.
+the remaining Broker lifecycle/versioning work and conformance coverage meet
+the release gate.
 
 Before shipping an adapter, run the black-box
 [stdio conformance suite](stdio-conformance.md) against the exact bundled launch

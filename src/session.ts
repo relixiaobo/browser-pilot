@@ -1,16 +1,24 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DaemonClient, isDaemonRunning } from './client.js';
-import { discoverChrome, type ChromeInfo } from './chrome.js';
+import {
+  discoverBrowserCandidates,
+  type DiscoveredBrowser,
+} from './chrome.js';
 import { INJECT_BORDER } from './page-scripts.js';
 import type { Transport } from './transport.js';
 import { BrowserPilotError } from './protocol/errors.js';
 
 // ── Daemon lifecycle ────────────────────────────────
 
-async function startDaemon(chrome: ChromeInfo): Promise<DaemonClient> {
+async function startDaemon(browser: DiscoveredBrowser | null): Promise<DaemonClient> {
   const script = fileURLToPath(new URL('daemon.js', import.meta.url));
-  const child = spawn(process.execPath, [script, chrome.wsUrl, chrome.browser, chrome.dataDir], {
+  const child = spawn(process.execPath, [
+    script,
+    browser?.endpoint?.wsUrl ?? '',
+    browser?.candidate.product ?? '',
+    browser?.dataDir ?? '',
+  ], {
     detached: true,
     stdio: 'ignore',
   });
@@ -22,19 +30,27 @@ async function startDaemon(chrome: ChromeInfo): Promise<DaemonClient> {
     if (await client.health()) return client;
     await new Promise(r => setTimeout(r, 200));
   }
-  throw new Error('Connection timeout. Make sure to click "Allow" in Chrome\'s authorization dialog.');
+  throw new BrowserPilotError('browser_disconnected', 'Browser Pilot Broker did not become reachable', {
+    retryable: true,
+    remediation: {
+      code: 'restart_browser_pilot',
+      message: 'Stop any stale Browser Pilot process, then start the command again.',
+      actionRequired: true,
+    },
+  });
 }
 
-async function getDaemon(chrome: ChromeInfo): Promise<DaemonClient> {
+async function getDaemon(browser: DiscoveredBrowser | null): Promise<DaemonClient> {
   if (isDaemonRunning()) {
     const client = new DaemonClient();
     const info = await client.healthInfo();
     if (info.ok) {
       if (
-        info.wsUrl === chrome.wsUrl ||
+        (browser?.endpoint && info.wsUrl === browser.endpoint.wsUrl) ||
         (
-          info.browser?.profile === chrome.dataDir &&
-          info.browser.product.toLowerCase() === chrome.browser.toLowerCase()
+          browser &&
+          info.browser?.profile === browser.dataDir &&
+          info.browser.product.toLowerCase() === browser.candidate.product.toLowerCase()
         )
       ) {
         return client;
@@ -48,7 +64,7 @@ async function getDaemon(chrome: ChromeInfo): Promise<DaemonClient> {
       });
     }
   }
-  return startDaemon(chrome);
+  return startDaemon(browser);
 }
 
 // ── Public API ──────────────────────────────────────
@@ -62,7 +78,8 @@ export async function connectDaemon(browserFilter?: string): Promise<DaemonClien
       info.ok &&
       (
         !browserFilter ||
-        info.browser?.product.toLowerCase().includes(browserFilter.toLowerCase())
+        [info.browser?.id, info.browser?.product, info.browser?.channel]
+          .some(value => value?.toLowerCase().includes(browserFilter.toLowerCase()))
       )
     ) {
       return existing;
@@ -77,21 +94,26 @@ export async function connectDaemon(browserFilter?: string): Promise<DaemonClien
       });
     }
   }
-  const chrome = discoverChrome(browserFilter);
-  if (!chrome) {
+  const candidates = await discoverBrowserCandidates();
+  const filter = browserFilter?.toLowerCase();
+  const matches = candidates.filter(({ candidate }) => (
+    !filter || [candidate.id, candidate.product, candidate.channel]
+      .some(value => value?.toLowerCase().includes(filter))
+  ));
+  if (browserFilter && matches.length === 0) {
     throw new BrowserPilotError('browser_not_found',
-      'Cannot find Chrome DevTools port.\n' +
-      'Open chrome://inspect/#remote-debugging in Chrome and toggle ON.',
+      'No installed supported browser matches the requested selection.',
       {
         remediation: {
-          code: 'enable_remote_debugging',
-          message: 'Open chrome://inspect/#remote-debugging in Chrome and toggle remote debugging on.',
+          code: 'select_supported_browser',
+          message: 'Run browser discovery and select one of the returned browser IDs or product names.',
           actionRequired: true,
         },
       },
     );
   }
-  return getDaemon(chrome);
+  const selected = matches.find(browser => browser.candidate.state === 'ready') ?? matches[0] ?? null;
+  return getDaemon(selected);
 }
 
 export class PageLoadTimeoutError extends Error {

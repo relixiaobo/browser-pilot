@@ -27,6 +27,19 @@ export * from './browser-target-catalog.js';
 export * from './browser-watchdog-service.js';
 export * from './managed-target-lifecycle.js';
 export * from './browser-tool-service.js';
+export * from './browser-tool-router.js';
 export { CompatibilityBrokerClient } from '../compatibility-broker-client.js';
+export {
+  discoverBrowserCandidates,
+  discoverChrome,
+  discoverChromeAtDataDir,
+  probeBrowserEndpoint,
+  supportedBrowserProfiles,
+  type BrowserDiscoveryOptions,
+  type BrowserEndpointProbe,
+  type BrowserProfileDefinition,
+  type ChromeInfo,
+  type DiscoveredBrowser,
+} from '../chrome.js';
 export { PageLoadTimeoutError } from '../session.js';
 export { MemoryRefStore, type RefStore } from '../snapshot.js';

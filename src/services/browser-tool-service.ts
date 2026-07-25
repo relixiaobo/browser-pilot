@@ -82,7 +82,7 @@ import type {
   BrowserToolExecutor,
 } from './broker-runtime.js';
 
-const BASE_SUPPORTED_TOOLS = [
+export const BASE_BROWSER_TOOL_NAMES = [
   'browser.discover',
   'browser.connect',
   'browser.open',
@@ -112,6 +112,17 @@ const BASE_SUPPORTED_TOOLS = [
   'browser.network.rules.add',
   'browser.network.rules.remove',
   'browser.eval',
+] as const;
+
+export const ARTIFACT_BROWSER_TOOL_NAMES = [
+  'browser.capture',
+  'browser.pdf',
+  'browser.upload',
+] as const;
+
+export const ALL_BROWSER_TOOL_NAMES = [
+  ...BASE_BROWSER_TOOL_NAMES,
+  ...ARTIFACT_BROWSER_TOOL_NAMES,
 ] as const;
 
 const PREVIEW_MAX_DIMENSION = 1600;
@@ -310,8 +321,8 @@ export class BrowserToolService implements BrowserToolExecutor {
       publishEvent: event => this.publishEvent(event),
     });
     this.supportedTools = this.artifactStore
-      ? [...BASE_SUPPORTED_TOOLS, 'browser.capture', 'browser.pdf', 'browser.upload']
-      : BASE_SUPPORTED_TOOLS;
+      ? ALL_BROWSER_TOOL_NAMES
+      : BASE_BROWSER_TOOL_NAMES;
     const catalog = new CdpBrowserTargetCatalog(
       transport,
       binding.instance.id,
@@ -568,7 +579,17 @@ export class BrowserToolService implements BrowserToolExecutor {
         product: candidate.product,
         ...(candidate.channel !== undefined ? { channel: candidate.channel } : {}),
         ...(candidate.profile !== undefined ? { profile: candidate.profile } : {}),
+        processState: candidate.processState ?? (candidate.state === 'ready' ? 'running' : 'unknown'),
+        remoteDebuggingState: candidate.remoteDebuggingState ?? (
+          candidate.state === 'ready' ? 'enabled' : candidate.state === 'disconnected' ? 'stale' : 'disabled'
+        ),
+        authorizationState: candidate.authorizationState ?? (
+          candidate.state === 'ready'
+            ? 'authorized'
+            : candidate.state === 'authorization_required' ? 'required' : 'not_applicable'
+        ),
         state: candidate.state,
+        ...(candidate.remediation !== undefined ? { remediation: { ...candidate.remediation } } : {}),
       }],
     });
   }

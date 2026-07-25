@@ -105,6 +105,64 @@ test('Broker initializes one connection and filters the canonical tool manifest'
   });
 });
 
+test('browser discovery is Broker-owned, filterable, and available without a browser connection', async () => {
+  const runtime = createRuntime({
+    browsers: [],
+    toolExecutor: { supportedTools: ['browser.discover'] },
+  });
+  const initialized = await initialize(runtime, 'bridge:discovery-only', {
+    requestedCapabilities: ['browser.discovery'],
+  });
+  assert.deepEqual(initialized.browsers, []);
+  const empty = await runtime.call('bridge:discovery-only', 'tools/call', {
+    name: 'browser.discover',
+    arguments: {},
+  });
+  assert.equal(empty.command.status, 'completed');
+  assert.deepEqual(empty.result, { browsers: [] });
+
+  runtime.registerBrowser({
+    candidate: {
+      id: 'browser:brave',
+      product: 'Brave',
+      channel: 'stable',
+      state: 'remote_debugging_disabled',
+      remediation: {
+        code: 'enable_remote_debugging',
+        message: 'Enable remote debugging.',
+        actionRequired: true,
+      },
+    },
+    instance: {
+      id: 'browser-instance:brave',
+      product: 'Brave',
+      profilePath: '/profiles/brave',
+      processIdentity: '',
+      connectionGeneration: 0,
+      state: 'disconnected',
+    },
+  });
+  const discovered = await runtime.call('bridge:discovery-only', 'tools/call', {
+    name: 'browser.discover',
+    arguments: { browser: 'brave' },
+  });
+  assert.equal(discovered.result.browsers.length, 1);
+  assert.deepEqual(discovered.result.browsers[0], {
+    id: 'browser:brave',
+    product: 'Brave',
+    channel: 'stable',
+    processState: 'unknown',
+    remoteDebuggingState: 'disabled',
+    authorizationState: 'not_applicable',
+    state: 'remote_debugging_disabled',
+    remediation: {
+      code: 'enable_remote_debugging',
+      message: 'Enable remote debugging.',
+      actionRequired: true,
+    },
+  });
+});
+
 test('Broker negotiates protocol 1.1 transport limits per Connection', async () => {
   const runtime = createRuntime();
   const constrained = await initialize(runtime, 'bridge:constrained', {

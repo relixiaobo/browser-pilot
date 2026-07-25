@@ -62,7 +62,9 @@ export class DaemonClient implements Transport {
     wsUrl?: string;
     brokerProtocol?: number;
     browser?: {
+      id?: string;
       product: string;
+      channel?: string;
       profile: string;
       state?: 'connected' | 'disconnected' | 'reconnecting';
       connectionGeneration?: number;

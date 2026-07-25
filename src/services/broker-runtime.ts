@@ -29,6 +29,7 @@ import {
   type ManagedTabSet,
   type ManagedTabSetId,
   type ProtocolLimits,
+  type ToolCallParams,
   type ControlledTargetId,
 } from '../protocol/model.js';
 import {
@@ -79,6 +80,25 @@ export const DEFAULT_PROTOCOL_LIMITS: Readonly<ProtocolLimits> = {
 export interface BrokerBrowserBinding {
   candidate: BrowserCandidate;
   instance: BrowserInstance;
+}
+
+function normalizeBrowserCandidate(candidate: BrowserCandidate): BrowserCandidate {
+  const ready = candidate.state === 'ready';
+  const authorizationRequired = candidate.state === 'authorization_required';
+  return {
+    ...candidate,
+    processState: candidate.processState ?? (ready || authorizationRequired ? 'running' : 'unknown'),
+    remoteDebuggingState: candidate.remoteDebuggingState ?? (
+      ready || authorizationRequired
+        ? 'enabled'
+        : candidate.state === 'disconnected' ? 'stale' : 'disabled'
+    ),
+    authorizationState: candidate.authorizationState ?? (
+      ready
+        ? 'authorized'
+        : authorizationRequired ? 'required' : candidate.state === 'disconnected' ? 'unknown' : 'not_applicable'
+    ),
+  };
 }
 
 export interface BrokerRuntimeOptions {
@@ -245,7 +265,7 @@ export class MemoryBrokerRuntime {
 
   constructor(private readonly options: BrokerRuntimeOptions) {
     this.browserBindings = options.browsers.map(binding => ({
-      candidate: { ...binding.candidate },
+      candidate: normalizeBrowserCandidate(binding.candidate),
       instance: { ...binding.instance },
     }));
     this.allowedCapabilities = [...(options.allowedCapabilities ?? DEFAULT_CAPABILITIES)];
@@ -290,7 +310,6 @@ export class MemoryBrokerRuntime {
     ) {
       throw new Error('Invalid Broker Lease TTL configuration');
     }
-    if (this.browserBindings.length === 0) throw new Error('Broker requires at least one browser binding');
     if (this.allowedCapabilities.some(capability => !(CAPABILITIES as readonly string[]).includes(capability))) {
       throw new Error('Broker allowedCapabilities contains an unknown capability');
     }
@@ -484,6 +503,9 @@ export class MemoryBrokerRuntime {
     if (update.processIdentity !== undefined) binding.instance.processIdentity = update.processIdentity;
     if (update.state === 'connected') {
       binding.candidate.state = 'ready';
+      binding.candidate.processState = 'running';
+      binding.candidate.remoteDebuggingState = 'enabled';
+      binding.candidate.authorizationState = 'authorized';
       delete binding.candidate.remediation;
     } else {
       binding.candidate.state = 'disconnected';
@@ -523,6 +545,37 @@ export class MemoryBrokerRuntime {
     }
     this.options.toolExecutor?.browserConnectionChanged?.(previous, current);
     return current;
+  }
+
+  registerBrowser(binding: BrokerBrowserBinding): BrokerBrowserBinding {
+    if (this.browserBindings.some(candidate => (
+      candidate.candidate.id === binding.candidate.id ||
+      candidate.instance.id === binding.instance.id
+    ))) {
+      throw new Error('Browser candidate or instance is already registered');
+    }
+    const registered = {
+      candidate: normalizeBrowserCandidate(binding.candidate),
+      instance: { ...binding.instance },
+    };
+    this.browserBindings.push(registered);
+    return {
+      candidate: { ...registered.candidate },
+      instance: { ...registered.instance },
+    };
+  }
+
+  updateBrowserCandidate(
+    browserInstanceId: BrowserInstanceId,
+    candidate: BrowserCandidate,
+  ): BrowserCandidate {
+    const binding = this.browserBindings.find(current => current.instance.id === browserInstanceId);
+    if (!binding) throw new BrowserPilotError('browser_not_found', 'Browser instance is not registered');
+    if (candidate.id !== binding.candidate.id) {
+      throw new BrowserPilotError('internal_error', 'Browser candidate identity cannot change');
+    }
+    binding.candidate = normalizeBrowserCandidate(candidate);
+    return { ...binding.candidate };
   }
 
   sweepExpiredLeases(): number {
@@ -702,15 +755,34 @@ export class MemoryBrokerRuntime {
     }
     const binding = params.browserId
       ? this.browserBindings.find(candidate => candidate.candidate.id === params.browserId)
-      : this.browserBindings.find(candidate => candidate.candidate.state === 'ready');
-    if (!binding || binding.candidate.state !== 'ready') {
+      : this.browserBindings.find(candidate => (
+        candidate.candidate.state === 'ready' && candidate.instance.state === 'connected'
+      ));
+    if (
+      !binding ||
+      binding.candidate.state !== 'ready' ||
+      binding.instance.state !== 'connected'
+    ) {
+      const fallbackRemediation = !binding
+        ? {
+          code: 'install_or_select_supported_browser',
+          message: 'Install or select a supported browser returned by browser discovery.',
+          actionRequired: true,
+        }
+        : binding.candidate.state === 'ready'
+          ? {
+            code: 'retry_browser_connection',
+            message: 'The browser endpoint is ready but the Broker connection is still being established.',
+            actionRequired: false,
+          }
+          : {
+            code: 'enable_remote_debugging',
+            message: 'Start a supported browser and enable remote debugging.',
+            actionRequired: true,
+          };
       throw new BrowserPilotError('browser_not_found', 'Selected browser is not ready', {
         context: params.browserId ? { browserId: params.browserId } : undefined,
-        remediation: {
-          code: 'enable_remote_debugging',
-          message: 'Start a supported browser and enable remote debugging.',
-          actionRequired: true,
-        },
+        remediation: binding?.candidate.remediation ?? fallbackRemediation,
       });
     }
     const activeCount = [...this.workspaces.values()].filter(record => (
@@ -1032,6 +1104,9 @@ export class MemoryBrokerRuntime {
     }
     this.assertCapabilities(connection, definition.requiredCapabilities);
     const args = validateToolArguments(definition.name, params.arguments);
+    if (definition.name === 'browser.discover') {
+      return this.callBrowserDiscover(connection, params, args, definition);
+    }
     const principal = this.principals.get(connection.value.principalId)!;
     let workspaceRecord: RuntimeWorkspace | undefined;
     let lease: ControlLease | undefined;
@@ -1056,10 +1131,10 @@ export class MemoryBrokerRuntime {
 
     const binding = workspaceRecord
       ? this.browserBindings.find(candidate => candidate.instance.id === workspaceRecord!.value.browserInstanceId)
-      : definition.name === 'browser.discover'
-        ? this.browserBindings[0]
-        : this.browserBindings.find(candidate => candidate.candidate.state === 'ready');
-    if (!binding || (definition.name !== 'browser.discover' && binding.instance.state !== 'connected')) {
+      : this.browserBindings.find(candidate => (
+        candidate.candidate.state === 'ready' && candidate.instance.state === 'connected'
+      ));
+    if (!binding || binding.instance.state !== 'connected') {
       throw new BrowserPilotError('browser_disconnected', 'Workspace browser is disconnected', {
         retryable: true,
         context: workspaceRecord ? { workspaceId: workspaceRecord.value.id } : undefined,
@@ -1150,6 +1225,35 @@ export class MemoryBrokerRuntime {
       );
       assertCurrentBrowserGeneration();
       return validateToolResult(definition.name, result);
+    }));
+  }
+
+  private async callBrowserDiscover(
+    connection: RuntimeConnection,
+    params: ToolCallParams,
+    args: JsonValue,
+    definition: ToolDefinition,
+  ): Promise<JsonValue> {
+    const record = args as Record<string, JsonValue>;
+    const filter = typeof record.browser === 'string' ? record.browser.toLowerCase() : undefined;
+    const browsers = this.browserBindings
+      .map(binding => ({ ...binding.candidate }))
+      .filter(candidate => !filter || [candidate.id, candidate.product, candidate.channel]
+        .some(value => value?.toLowerCase().includes(filter)));
+    return asJson(await this.commands.run({
+      principalId: connection.value.principalId,
+      connectionId: connection.value.id,
+      ...(params.commandId ? { commandId: params.commandId } : {}),
+      ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
+      ...(params.deadlineMs !== undefined ? { deadlineMs: params.deadlineMs } : {}),
+      method: definition.name,
+      mutating: false,
+      cancellation: definition.cancellation,
+      actorKey: `${connection.value.id}\u0000browser-discovery`,
+      request: asJson({ name: definition.name, arguments: args }),
+    }, async ({ markDispatched }) => {
+      markDispatched();
+      return validateToolResult(definition.name, asJson({ browsers }));
     }));
   }
 

@@ -239,9 +239,16 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 
 ### A6. Browser discovery and multi-version operation
 
-- [ ] **A6.1** Return structured browser candidates and setup remediation;
+- [x] **A6.1** Return structured browser candidates and setup remediation;
   persist only explicit or deterministic selection.
   - Covers: browser discovery contract.
+  - Complete: discovery enumerates installed supported product/profile candidates
+    with stable IDs and separate process, remote-debugging, and authorization
+    state. `initialize`, `browser.discover`, and `bp browsers` return bounded
+    remediation; the Broker can start before any candidate is ready, connect
+    candidates in place after setup, and route ready browser instances by
+    `browserId`. Selection is explicit (`--browser`/`browserId`) or stable-order
+    deterministic and remains daemon-memory state only.
 - [ ] **A6.2** Define the per-user Broker locator, socket/pipe permissions,
   startup locking, stale process recovery, and platform-specific paths.
   - Covers: FR-7, CON-5.

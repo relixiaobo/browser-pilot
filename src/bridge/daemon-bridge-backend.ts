@@ -7,6 +7,8 @@ import type { StdioBridgeBackend } from './stdio-bridge.js';
 export class DaemonBridgeBackend implements StdioBridgeBackend {
   private client?: DaemonClient;
 
+  constructor(private readonly browserFilter?: string) {}
+
   async call(bridgeSessionId: string, method: string, params?: JsonValue): Promise<JsonValue> {
     const client = await this.getClient();
     return client.brokerCall(bridgeSessionId, method, params);
@@ -34,7 +36,7 @@ export class DaemonBridgeBackend implements StdioBridgeBackend {
   }
 
   private async getClient(): Promise<DaemonClient> {
-    if (!this.client) this.client = await connectDaemon();
+    if (!this.client) this.client = await connectDaemon(this.browserFilter);
     const health = await this.client.healthInfo();
     if (health.brokerProtocol !== 1) {
       throw new BrowserPilotError('protocol_incompatible', 'Running Browser Pilot daemon is from an older executable', {

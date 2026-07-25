@@ -153,3 +153,84 @@ test('daemon rediscovers the selected profile and publishes one restored generat
   ]);
   assert.equal(stderr.join(''), '');
 });
+
+test('daemon initializes with structured remediation before remote debugging is enabled', async t => {
+  const root = await mkdtemp('/tmp/bp-daemon-discovery-');
+  const profile = join(root, 'Library', 'Application Support', 'Google', 'Chrome');
+  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
+  await mkdir(profile, { recursive: true });
+  const stderr = [];
+  const child = spawn(process.execPath, [
+    join(process.cwd(), 'dist', 'daemon.js'),
+    '',
+    'Chrome',
+    profile,
+  ], {
+    env: { ...process.env, HOME: root, PATH: '' },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  child.stderr.on('data', bytes => stderr.push(bytes.toString()));
+  let cdp;
+  t.after(async () => {
+    await daemonRequest(socketPath, '/shutdown', {}).catch(() => {});
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await cdp?.close().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const health = await waitFor(
+    () => daemonRequest(socketPath, '/health'),
+    value => value.ok === true,
+  );
+  assert.equal(health.browser.state, 'disconnected');
+
+  const initialized = await daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: 'bridge:discovery-test',
+    method: 'initialize',
+    params: {
+      client: {
+        id: 'com.example.discovery-test',
+        name: 'Discovery Test',
+        version: '1.0.0',
+        instanceId: 'instance:discovery-test',
+      },
+      protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
+      requestedCapabilities: ['browser.discovery', 'workspace.manage'],
+      launchMode: 'embedded',
+    },
+  });
+  const selected = initialized.result.browsers.find(browser => browser.profile === profile);
+  assert.ok(selected);
+  assert.equal(selected.state, 'not_running');
+  assert.equal(selected.remediation.code, 'start_browser');
+  assert.match(selected.id, /^browser:chrome-stable:/);
+
+  const discovered = await daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: 'bridge:discovery-test',
+    method: 'tools/call',
+    params: { name: 'browser.discover', arguments: {} },
+  });
+  assert.equal(discovered.result.command.status, 'completed');
+  assert.equal(
+    discovered.result.result.browsers.find(browser => browser.id === selected.id).remoteDebuggingState,
+    'disabled',
+  );
+
+  cdp = await startCdpFixture();
+  await writeFile(
+    join(profile, 'DevToolsActivePort'),
+    `${cdp.port}\n/devtools/browser/enabled\n`,
+  );
+  await waitFor(
+    () => daemonRequest(socketPath, '/health'),
+    value => value.browser?.state === 'connected' && value.browser.connectionGeneration === 1,
+    10_000,
+  );
+  const created = await daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: 'bridge:discovery-test',
+    method: 'workspaces/create',
+    params: { browserId: selected.id },
+  });
+  assert.equal(created.result.workspace.browserInstanceId, `browser-instance:${selected.id.slice('browser:'.length)}`);
+  assert.equal(stderr.join(''), '');
+});

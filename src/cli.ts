@@ -8,6 +8,7 @@ import { BrowserPilotError } from './protocol/errors.js';
 import type { ArtifactDescriptor, ControlledTargetId, JsonValue } from './protocol/model.js';
 import { DaemonBridgeBackend } from './bridge/daemon-bridge-backend.js';
 import { runStdioBridge } from './bridge/stdio-bridge.js';
+import { discoverBrowserCandidates } from './chrome.js';
 import {
   connectCompatibility,
   resumeCompatibility,
@@ -219,6 +220,35 @@ function readStdin(): Promise<string> {
 
 // ─── connect ────────────────────────────────────────
 
+program.command('browsers')
+  .description('List supported local browsers and their setup state')
+  .option('-b, --browser <name>', 'filter by browser ID, product, or channel')
+  .action(action(async (opts) => {
+    const filter = typeof opts.browser === 'string' ? opts.browser.toLowerCase() : undefined;
+    const browsers = (await discoverBrowserCandidates())
+      .map(discovered => discovered.candidate)
+      .filter(candidate => !filter || [candidate.id, candidate.product, candidate.channel]
+        .some(value => value?.toLowerCase().includes(filter)));
+    if (useJson()) {
+      console.log(JSON.stringify({ ok: true, browsers }));
+      return;
+    }
+    if (browsers.length === 0) {
+      console.log('No installed supported browsers found.');
+      return;
+    }
+    console.log(browsers.map(candidate => {
+      const label = `${candidate.product}${candidate.channel ? ` (${candidate.channel})` : ''}`;
+      const details = [
+        `${label}: ${candidate.state}`,
+        `  id: ${candidate.id}`,
+        `  process: ${candidate.processState}; remote debugging: ${candidate.remoteDebuggingState}; authorization: ${candidate.authorizationState}`,
+      ];
+      if (candidate.remediation) details.push(`  action: ${candidate.remediation.message}`);
+      return details.join('\n');
+    }).join('\n\n'));
+  }));
+
 program.command('connect')
   .description('Connect to Chrome and create pilot window')
   .option('-b, --browser <name>', 'browser to connect to')
@@ -242,6 +272,7 @@ program.command('connect')
 program.command('bridge')
   .description('Run the Agent-neutral JSON-RPC bridge')
   .option('--stdio', 'use newline-delimited JSON-RPC over stdin/stdout')
+  .option('-b, --browser <name>', 'prefer a browser ID, product, or channel when starting the Broker')
   .action((opts) => {
     if (!opts.stdio) {
       process.stderr.write('bridge currently requires --stdio\n');
@@ -251,7 +282,7 @@ program.command('bridge')
     void runStdioBridge({
       input: process.stdin,
       output: process.stdout,
-      backend: new DaemonBridgeBackend(),
+      backend: new DaemonBridgeBackend(opts.browser),
     }).then(result => {
       process.exitCode = result.exitCode;
     }).catch(error => {
