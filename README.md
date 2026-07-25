@@ -112,11 +112,15 @@ The approved architecture and execution plans are:
 - [Browser capability and reliability plan](docs/plans/browser-capability-evolution.md)
 - [Stdio bridge integration contract](docs/integration/stdio-bridge.md)
 - [Stdio black-box conformance suite](docs/integration/stdio-conformance.md)
+- [Reference consumer adapters](https://github.com/relixiaobo/browser-pilot/tree/main/examples/adapters),
+  including Tenon and OpenClaw lifecycle mappings
 
 The public integration direction remains CLI-only: one-shot commands for direct
 Agent use and a persistent `bridge --stdio` mode for products that embed the
 official executable. Browser Pilot will not require an extension, Native SDK,
-or MCP server.
+or MCP server. The repository's consumer adapters are source examples built
+only on the stdio contract; they are intentionally excluded from the npm
+package and do not create a second public library API.
 
 The dedicated Pilot window remains the default managed tab set for independent
 Agent work. The Broker architecture also includes all eligible user tabs in the

@@ -1,6 +1,6 @@
 # Universal Agent Integration Plan
 
-Status: **Approved, in progress**  
+Status: **Complete**
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`  
 Workstream: A
 
@@ -297,9 +297,20 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [x] **A7.2** Build a language-neutral conformance runner that treats the
   executable as a black box.
   - Covers: FR-2 through FR-7.
-- [ ] **A7.3** Add Tenon and OpenClaw adapters as separate examples or consumer
+- [x] **A7.3** Add Tenon and OpenClaw adapters as separate examples or consumer
   changes. Keep their lifecycle mapping out of Browser Pilot production code.
   - Covers: DEC-1, CON-3.
+  - Complete: source-only Tenon and OpenClaw adapters consume only
+    `bridge --stdio`, runtime `tools/list`, and protected Artifact files. They
+    map Thread/Turn and Agent-session/run lifecycles to transient
+    Workspace/Lease contexts, require explicit targets, derive Command identity
+    from host tool-call IDs, convert screenshots to native image content, export
+    files to host-owned absolute paths, explicitly acknowledge processed event
+    cursors, and invalidate local state on failed cleanup. Concurrent begin,
+    initialization/release failure, cursor recovery, media conversion, bounded
+    model text, structured errors, and unknown outcomes are covered by process
+    tests. The examples remain excluded from the npm package and no
+    Agent-specific concept enters production code.
 - [x] **A7.4** Update the Agent skill to teach direct one-shot use and embedded
   stdio use without assuming a particular Agent runtime.
   - Covers: FR-1, AC-1.

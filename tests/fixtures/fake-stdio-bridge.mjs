@@ -172,6 +172,27 @@ async function handle(message) {
     });
     return;
   }
+  if (method === 'workspaces/get') {
+    response(id, {
+      workspace: {
+        id: ids.workspaceId,
+        principalId: 'principal:fake',
+        browserInstanceId: 'browser:fake',
+        createdAt: now(),
+        updatedAt: now(),
+        state: 'active',
+      },
+      managedTabSet: {
+        id: 'tabset:fake',
+        workspaceId: ids.workspaceId,
+        browserInstanceId: 'browser:fake',
+        createdAt: now(),
+        state: 'active',
+      },
+      eventCursor: `cursor:${eventSequence}`,
+    });
+    return;
+  }
   if (method === 'leases/create' || method === 'leases/heartbeat') {
     response(id, { lease: lease() });
     return;

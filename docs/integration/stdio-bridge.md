@@ -499,6 +499,39 @@ per-Principal Workspaces, per-Connection Leases, and retained terminal records.
 It does not persist target mappings, refs, cookies, credentials, network bodies,
 or command state.
 
+## Reference Consumer Adapters
+
+The source repository includes
+[`examples/adapters`](https://github.com/relixiaobo/browser-pilot/tree/main/examples/adapters)
+implementations for a
+Pi-style Tenon tool runtime and an OpenClaw dispatcher tool. They are host-side
+examples, not npm package files, a Native SDK, or an additional supported
+protocol surface. Production consumers should copy or port the small adapter
+pattern into their own integration and continue treating this document plus the
+runtime manifest as authoritative.
+
+The shared example launches an absolute executable path without a shell,
+negotiates protocol 1.1, discovers tools at runtime, and maps a host work scope
+to a Workspace plus its active invocation to a renewable Lease. It never stores
+an active tab, frame, Observation, ref, credential, rule, Artifact, or event
+cursor on disk. Host tool-call IDs become Command and idempotency identities;
+transport loss after dispatch of a mutating operation is returned as
+non-retryable `unknown_outcome`.
+
+For event recovery, call `pollEvents`, completely process the returned ordered
+events, and only then call `acknowledgeEvents(nextCursor)`. A second poll before
+acknowledgement intentionally starts from the same last processed cursor. On
+`cursor_expired`, first rebuild tab and Observation state, then call
+`resetEventCursor` to use `workspaces/get` as the new live baseline. Best-effort
+notifications never advance the cursor.
+
+Image Artifacts are read from their protected path, converted to the host's
+native image content, and released. PDF and other file results require an
+absolute host-owned output directory; they are exported there before the
+protected Artifact is released. Cleanup invalidates local host contexts even if
+the explicit Broker release fails, so Lease expiry remains a bounded fallback
+and stale tools cannot continue issuing calls.
+
 ## Current Release Gate
 
 `tools/list` is generated from the canonical schemas used for argument and
