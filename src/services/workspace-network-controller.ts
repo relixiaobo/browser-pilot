@@ -10,6 +10,7 @@ import type {
 } from '../protocol/model.js';
 import type { Transport } from '../transport.js';
 import type { PublishBrowserEventInput } from './event-journal.js';
+import { accessBlockedAgentHint } from './agent-hint-service.js';
 
 const DEFAULT_MAX_REQUESTS = 1000;
 const DEFAULT_MAX_JOURNAL_BYTES = 16 * 1024 * 1024;
@@ -714,6 +715,7 @@ export class WorkspaceNetworkController {
   }
 
   private publishResponse(record: NetworkRequestRecord): void {
+    const hint = accessBlockedAgentHint(record.type, record.status);
     this.safePublish({
       workspaceId: record.workspaceId,
       leaseId: record.leaseId,
@@ -727,6 +729,7 @@ export class WorkspaceNetworkController {
         url: sanitizedEventUrl(record.url),
         type: record.type,
         ...(record.status !== undefined ? { status: record.status } : {}),
+        ...(hint ? { hints: [hint] } : {}),
       },
     });
   }

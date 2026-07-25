@@ -183,6 +183,82 @@ const artifactSchema = objectSchema({
   previewOf: opaqueIdSchema,
 }, ['id', 'workspaceId', 'kind', 'mimeType', 'byteSize', 'sensitivity', 'createdAt', 'expiresAt', 'retained']);
 
+const hintRefsSchema = arraySchema(integerSchema({ minimum: 1 }), {
+  maxItems: 32,
+  uniqueItems: true,
+});
+const agentHintSchema: JsonSchema = {
+  oneOf: [
+    objectSchema({
+      code: stringSchema({ const: 'autocomplete' }),
+      source: stringSchema({ const: 'observation' }),
+      confidence: stringSchema({ enum: ['strong', 'possible'] }),
+      recommendedAction: stringSchema({ const: 'observe_then_select' }),
+      refs: hintRefsSchema,
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'refs']),
+    objectSchema({
+      code: stringSchema({ const: 'modal_overlay' }),
+      source: stringSchema({ const: 'observation' }),
+      confidence: stringSchema({ enum: ['strong', 'possible'] }),
+      recommendedAction: stringSchema({ const: 'resolve_overlay_first' }),
+      blocking: booleanSchema(),
+      refs: hintRefsSchema,
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'blocking', 'refs']),
+    objectSchema({
+      code: stringSchema({ const: 'filter_controls' }),
+      source: stringSchema({ const: 'observation' }),
+      confidence: stringSchema({ const: 'strong' }),
+      recommendedAction: stringSchema({ const: 'review_refinement_controls' }),
+      refs: hintRefsSchema,
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'refs']),
+    objectSchema({
+      code: stringSchema({ const: 'access_blocked' }),
+      source: stringSchema({ const: 'network' }),
+      confidence: stringSchema({ const: 'strong' }),
+      recommendedAction: stringSchema({ const: 'avoid_same_navigation_retry' }),
+      status: integerSchema({ enum: [403, 429] }),
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'status']),
+    objectSchema({
+      code: stringSchema({ const: 'authentication_surface' }),
+      source: stringSchema({ const: 'observation' }),
+      confidence: stringSchema({ const: 'strong' }),
+      recommendedAction: stringSchema({ const: 'inspect_authentication_state' }),
+      state: stringSchema({ enum: ['present', 'entered', 'left'] }),
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'state']),
+    objectSchema({
+      code: stringSchema({ const: 'download' }),
+      source: stringSchema({ const: 'download' }),
+      confidence: stringSchema({ const: 'strong' }),
+      recommendedAction: stringSchema({ const: 'wait_for_download' }),
+      state: stringSchema({ const: 'started' }),
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'state']),
+    objectSchema({
+      code: stringSchema({ const: 'download' }),
+      source: stringSchema({ const: 'download' }),
+      confidence: stringSchema({ const: 'strong' }),
+      recommendedAction: stringSchema({ const: 'inspect_download_artifact' }),
+      state: stringSchema({ const: 'completed' }),
+      artifactId: opaqueIdSchema,
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'state', 'artifactId']),
+    objectSchema({
+      code: stringSchema({ const: 'download' }),
+      source: stringSchema({ const: 'download' }),
+      confidence: stringSchema({ const: 'strong' }),
+      recommendedAction: stringSchema({ const: 'inspect_download_failure' }),
+      state: stringSchema({ enum: ['failed', 'cancelled'] }),
+      reason: stringSchema({ minLength: 1, maxLength: 128 }),
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'state', 'reason']),
+    objectSchema({
+      code: stringSchema({ const: 'repeated_action' }),
+      source: stringSchema({ const: 'watchdog' }),
+      confidence: stringSchema({ const: 'strong' }),
+      recommendedAction: stringSchema({ const: 'change_strategy' }),
+      streak: integerSchema({ minimum: 1, maximum: 1_000_000 }),
+      reason: stringSchema({ minLength: 1, maxLength: 128 }),
+    }, ['code', 'source', 'confidence', 'recommendedAction', 'streak', 'reason']),
+  ],
+};
+
 function resultSchema(
   context: ToolContext,
   properties: Record<string, JsonSchema> = {},
@@ -211,6 +287,7 @@ const observationOutput = resultSchema('target', {
   truncationReasons: arraySchema(stringSchema({
     enum: ['element_limit', 'text_limit', 'depth_limit', 'byte_limit'],
   }), { uniqueItems: true }),
+  hints: arraySchema(agentHintSchema, { maxItems: 16 }),
   evidence: { oneOf: [inputEvidenceSchema, clickEvidenceSchema, pressEvidenceSchema, uploadEvidenceSchema] },
 }, ['observationId', 'title', 'elements', 'truncated', 'truncationReasons']);
 

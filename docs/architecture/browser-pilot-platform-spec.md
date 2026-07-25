@@ -2,7 +2,7 @@
 
 Status: **Authoritative, approved for implementation**  
 Baseline: `0c5661ccb133b2c9feda15732892f66ce947f232`  
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 
 This document is the source of truth for turning Browser Pilot from a
 single-agent CLI with global state into a user-level browser control runtime
@@ -219,6 +219,14 @@ An immutable, bounded view of a ControlledTarget at a point in time. Public elem
 handles are `observationId + ref`. Observations are never shared between
 Workspaces.
 
+### AgentHint
+
+A bounded, discriminated browser-state signal attached to an Observation or
+event. A hint has a stable `code`, `source`, `confidence`, and
+`recommendedAction`, plus code-specific public data. Hints report browser
+evidence and a useful next inspection strategy; they never approve an action,
+assert that the task succeeded, or replace fresh Observation and event state.
+
 ### Command
 
 A requested operation with a unique command ID, idempotency key, deadline,
@@ -403,6 +411,22 @@ focused backend node plus bounded control-state signatures and Broker-owned
 signals. Upload evidence reads the selected file count and compares its browser
 filename without returning the local source path.
 
+Observation-producing tools also return `hints`. Observation-derived codes
+cover explicit autocomplete surfaces, modal overlays, explicit filter controls,
+and authentication surface transitions; action results may add a repeated
+observable no-progress hint. Hint refs are numbered refs from that Observation
+only. Page collection returns counts and refs, never page text, input values,
+passwords, selectors, raw nodes, or CDP identifiers for this classification.
+Blocked main-document responses and download lifecycle hints are event-derived.
+
+`hints` is an additive schema field under protocol 1.0 and 1.1. The built-in
+Browser tool implementation always returns the array, including an empty array;
+the manifest leaves the field optional so compatible older executors remain
+valid. Existing clients already ignore unknown response fields. No new
+capability is negotiated because hints expose no operation and contain only
+bounded derivatives of browser data already authorized by `observation.read`
+or `event.read`.
+
 Composite input actions pin the ControlledTarget, CDP session, selected frame,
 loader, Document identity, and browser connection generation for the lifetime
 of the action. After focus is established, `type` and `keyboard` also pin the
@@ -538,6 +562,9 @@ documentGeneration
   not force blanket invalidation when the node remains resolvable and valid.
 - **BR-16:** Observations are immutable and bounded by element count, text size,
   depth, and byte limits, with explicit truncation metadata.
+- **BR-28:** Agent hints are advisory, deterministic, bounded, and based only on
+  browser-verifiable signals. They never contain field values, credentials,
+  private file paths, raw CDP identities, or framework-specific prompt state.
 
 ## Events
 
@@ -547,6 +574,11 @@ lost, connection restored, network request, network response, command status,
 observation invalidated, Lease expiry, and watchdog signals for stalled
 navigation, selected-frame detach, unhandled dialogs, and repeated observable
 no-progress actions.
+
+Relevant event payloads carry the same `hints` representation: main-document
+403/429 responses use `access_blocked`; downloads use `download` with the public
+Artifact ID only after completion; and the threshold no-progress event uses
+`repeated_action`. Subresource failures do not produce a page-blocked hint.
 
 Every event contains an event ID, monotonic Workspace sequence, timestamp,
 Workspace ID, relevant Lease and target IDs, type, payload version, and
@@ -675,6 +707,9 @@ fields, never on message text.
   evolution. Breaking semantics require a protocol-major change.
 - Unknown response fields are ignored; unknown request fields are rejected only
   when they change safety or semantics.
+- Optional advisory output such as `hints` does not require a protocol-minor
+  version or capability when it adds no operation and only derives bounded data
+  already covered by an existing granted capability.
 - The current CLI JSON shapes remain supported until a documented major CLI
   release and migration period.
 - A conformance suite validates any embedded adapter against the same executable

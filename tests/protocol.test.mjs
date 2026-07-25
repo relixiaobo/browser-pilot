@@ -301,6 +301,45 @@ test('browser.click result schema accepts bounded typed click evidence', () => {
   );
 });
 
+test('Observation schemas accept only bounded discriminated Agent hints', () => {
+  const base = {
+    workspaceId: 'workspace:123',
+    leaseId: 'lease:123',
+    targetId: 'target:123',
+    url: 'https://example.com/form',
+    observationId: 'observation:123',
+    title: 'Form',
+    elements: [],
+    truncated: false,
+    truncationReasons: [],
+  };
+  const hints = [
+    { code: 'autocomplete', source: 'observation', confidence: 'strong', recommendedAction: 'observe_then_select', refs: [1] },
+    { code: 'modal_overlay', source: 'observation', confidence: 'possible', recommendedAction: 'resolve_overlay_first', blocking: false, refs: [2] },
+    { code: 'filter_controls', source: 'observation', confidence: 'strong', recommendedAction: 'review_refinement_controls', refs: [3] },
+    { code: 'access_blocked', source: 'network', confidence: 'strong', recommendedAction: 'avoid_same_navigation_retry', status: 403 },
+    { code: 'authentication_surface', source: 'observation', confidence: 'strong', recommendedAction: 'inspect_authentication_state', state: 'entered' },
+    { code: 'download', source: 'download', confidence: 'strong', recommendedAction: 'wait_for_download', state: 'started' },
+    { code: 'download', source: 'download', confidence: 'strong', recommendedAction: 'inspect_download_artifact', state: 'completed', artifactId: 'artifact:123' },
+    { code: 'download', source: 'download', confidence: 'strong', recommendedAction: 'inspect_download_failure', state: 'failed', reason: 'size_limit_exceeded' },
+    { code: 'repeated_action', source: 'watchdog', confidence: 'strong', recommendedAction: 'change_strategy', streak: 3, reason: 'no_observable_effect' },
+  ];
+
+  assert.deepEqual(validateToolResult('browser.observe', { ...base, hints }), { ...base, hints });
+  for (const invalid of [
+    [{ ...hints[0], refs: Array.from({ length: 33 }, (_, index) => index + 1) }],
+    [{ ...hints[3], status: 401 }],
+    [{ ...hints[6], artifactId: undefined }],
+    [{ ...hints[8], reason: 'x'.repeat(129) }],
+    [{ ...hints[0], internalSelector: '#secret' }],
+  ]) {
+    assert.throws(
+      () => validateToolResult('browser.observe', { ...base, hints: invalid }),
+      error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+    );
+  }
+});
+
 test('action result schemas require discriminated input, press, and upload evidence', () => {
   const base = {
     workspaceId: 'workspace:123',

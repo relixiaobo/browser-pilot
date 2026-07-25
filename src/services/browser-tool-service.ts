@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import type {
+  AgentHint,
   ArtifactDescriptor,
   ArtifactId,
   BrowserInstance,
@@ -39,6 +40,9 @@ import { ArtifactStore } from './artifact-store.js';
 import { DownloadController } from './download-controller.js';
 import { CdpBrowserTargetCatalog } from './browser-target-catalog.js';
 import { createBrowserControlPolicy } from './browser-control-policy.js';
+import {
+  observationAgentHints,
+} from './agent-hint-service.js';
 import {
   BrowserWatchdogService,
   DEFAULT_NAVIGATION_TIMEOUT_MS,
@@ -130,6 +134,7 @@ interface SessionFrames {
 interface CreatedObservation {
   snapshot: SnapshotResult;
   record: StoredObservation;
+  hints: AgentHint[];
 }
 
 interface ActionServiceHarness {
@@ -227,6 +232,10 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly observations: MemoryObservationStore;
   private readonly inventory: TargetInventoryService;
   private readonly sessions = new Map<string, TargetSession>();
+  private readonly guidanceBySession = new Map<string, {
+    frameId?: string;
+    guidance: SnapshotResult['guidance'];
+  }>();
   private readonly managedWindowIds = new Map<ManagedTabSetId, number>();
   private readonly ownedSessionIds = new Set<string>();
   private readonly framesBySession = new Map<string, SessionFrames>();
@@ -867,9 +876,9 @@ export class BrowserToolService implements BrowserToolExecutor {
         : {}),
     });
     if (!next) throw new BrowserPilotError('internal_error', 'Upload did not produce an Observation');
-    this.recordActionEvidence(context, targetId, result.evidence);
+    const hint = this.recordActionEvidence(context, targetId, result.evidence);
     this.publishDocumentChanged(context, targetId, next);
-    return this.observationResult(context, targetId, next, result.evidence);
+    return this.observationResult(context, targetId, next, result.evidence, hint ? [hint] : []);
   }
 
   private async capture(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
@@ -1264,7 +1273,14 @@ export class BrowserToolService implements BrowserToolExecutor {
       truncated: snapshot.truncated ?? false,
       truncationReasons: snapshot.truncationReasons ?? [],
     });
-    return { snapshot, record };
+    const previous = this.guidanceBySession.get(session.sessionId);
+    const frameId = session.activeFrame?.cdpFrameId;
+    const hints = observationAgentHints(
+      snapshot.guidance,
+      previous && previous.frameId === frameId ? previous.guidance : undefined,
+    );
+    this.guidanceBySession.set(session.sessionId, { frameId, guidance: snapshot.guidance });
+    return { snapshot, record, hints };
   }
 
   private async resolveObservation(
@@ -1365,9 +1381,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (!next) throw new BrowserPilotError('internal_error', 'Click did not produce an Observation');
     const extraEffects = this.collectActionSignalEffects(session, before, next, observation);
     const evidence = this.mergeClickEvidence(result.evidence, extraEffects);
-    this.recordActionEvidence(context, targetId, evidence);
+    const hint = this.recordActionEvidence(context, targetId, evidence);
     this.publishDocumentChanged(context, targetId, next);
-    return this.observationResult(context, targetId, next, evidence);
+    return this.observationResult(context, targetId, next, evidence, hint ? [hint] : []);
   }
 
   private async runPressAction(
@@ -1383,9 +1399,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (!next) throw new BrowserPilotError('internal_error', 'Key action did not produce an Observation');
     const extraEffects = this.collectActionSignalEffects(session, before, next);
     const evidence = this.mergePressEvidence(result.evidence, extraEffects);
-    this.recordActionEvidence(context, targetId, evidence);
+    const hint = this.recordActionEvidence(context, targetId, evidence);
     this.publishDocumentChanged(context, targetId, next);
-    return this.observationResult(context, targetId, next, evidence);
+    return this.observationResult(context, targetId, next, evidence, hint ? [hint] : []);
   }
 
   private async runInputAction(
@@ -1399,9 +1415,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     const result = await action(harness.service);
     const next = harness.observation();
     if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
-    this.recordActionEvidence(context, targetId, result.evidence);
+    const hint = this.recordActionEvidence(context, targetId, result.evidence);
     this.publishDocumentChanged(context, targetId, next);
-    return this.observationResult(context, targetId, next, result.evidence);
+    return this.observationResult(context, targetId, next, result.evidence, hint ? [hint] : []);
   }
 
   private createActionHarness(
@@ -1497,6 +1513,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       | ClickVerificationEvidence
       | PressVerificationEvidence
       | UploadVerificationEvidence,
+    additionalHints: readonly AgentHint[] = [],
   ): JsonValue {
     return asJson({
       ...this.targetResult(context, targetId, created.snapshot.data.url),
@@ -1505,6 +1522,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       elements: created.snapshot.data.elements,
       truncated: created.record.truncated,
       truncationReasons: created.record.truncationReasons,
+      hints: [...created.hints, ...additionalHints],
       ...(evidence ? { evidence } : {}),
     });
   }
@@ -1818,6 +1836,7 @@ export class BrowserToolService implements BrowserToolExecutor {
 
   private retireSession(key: string, session: TargetSession): void {
     if (this.sessions.get(key) === session) this.sessions.delete(key);
+    this.guidanceBySession.delete(session.sessionId);
     this.downloads?.detachSession(session.sessionId, 'session_replaced');
     void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId })
       .finally(() => this.forgetSession(session.sessionId))
@@ -1825,6 +1844,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   }
 
   private forgetSession(sessionId: string): void {
+    this.guidanceBySession.delete(sessionId);
     for (const [key, session] of this.sessions) {
       if (session.sessionId !== sessionId) continue;
       this.watchdogs.resetTarget(session.leaseId, session.targetId);
@@ -1934,6 +1954,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         source: 'action',
         observationId: observation.record.id,
         url: observation.snapshot.data.url,
+        ...(observation.hints.length > 0 ? { hints: observation.hints } : {}),
       },
     });
   }
@@ -1946,8 +1967,8 @@ export class BrowserToolService implements BrowserToolExecutor {
       | ClickVerificationEvidence
       | PressVerificationEvidence
       | UploadVerificationEvidence,
-  ): void {
-    this.watchdogs.actionCompleted({
+  ): AgentHint | undefined {
+    return this.watchdogs.actionCompleted({
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
       targetId,

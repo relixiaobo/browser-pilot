@@ -24,8 +24,10 @@ test('action watchdog emits once per observable no-progress streak and resets on
   watchdogs.actionCompleted(context, stalled);
   watchdogs.actionCompleted(context, stalled);
   assert.equal(events.length, 0);
+  const hint = watchdogs.actionCompleted(context, stalled);
   watchdogs.actionCompleted(context, stalled);
-  watchdogs.actionCompleted(context, stalled);
+  assert.equal(hint.code, 'repeated_action');
+  assert.equal(hint.streak, 3);
   assert.equal(events.length, 1);
   assert.deepEqual(events[0], {
     ...context,
@@ -37,6 +39,7 @@ test('action watchdog emits once per observable no-progress streak and resets on
       reason: 'no_observable_effect',
       streak: 3,
       threshold: 3,
+      hints: [hint],
     },
   });
 

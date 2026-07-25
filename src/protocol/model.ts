@@ -409,6 +409,75 @@ export interface ArtifactDescriptor {
   previewOf?: ArtifactId;
 }
 
+export type AgentHint =
+  | {
+    code: 'autocomplete';
+    source: 'observation';
+    confidence: 'strong' | 'possible';
+    recommendedAction: 'observe_then_select';
+    refs: number[];
+  }
+  | {
+    code: 'modal_overlay';
+    source: 'observation';
+    confidence: 'strong' | 'possible';
+    recommendedAction: 'resolve_overlay_first';
+    blocking: boolean;
+    refs: number[];
+  }
+  | {
+    code: 'filter_controls';
+    source: 'observation';
+    confidence: 'strong';
+    recommendedAction: 'review_refinement_controls';
+    refs: number[];
+  }
+  | {
+    code: 'access_blocked';
+    source: 'network';
+    confidence: 'strong';
+    recommendedAction: 'avoid_same_navigation_retry';
+    status: 403 | 429;
+  }
+  | {
+    code: 'authentication_surface';
+    source: 'observation';
+    confidence: 'strong';
+    recommendedAction: 'inspect_authentication_state';
+    state: 'present' | 'entered' | 'left';
+  }
+  | {
+    code: 'download';
+    source: 'download';
+    confidence: 'strong';
+    recommendedAction: 'wait_for_download';
+    state: 'started';
+  }
+  | {
+    code: 'download';
+    source: 'download';
+    confidence: 'strong';
+    recommendedAction: 'inspect_download_artifact';
+    state: 'completed';
+    artifactId: ArtifactId;
+  }
+  | {
+    code: 'download';
+    source: 'download';
+    confidence: 'strong';
+    recommendedAction: 'inspect_download_failure';
+    state: 'failed' | 'cancelled';
+    reason: string;
+  }
+  | {
+    code: 'repeated_action';
+    source: 'watchdog';
+    confidence: 'strong';
+    recommendedAction: 'change_strategy';
+    streak: number;
+    reason: string;
+  };
+
 export type BrowserEventType =
   | 'navigation'
   | 'document.changed'

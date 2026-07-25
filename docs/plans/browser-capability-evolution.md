@@ -187,9 +187,20 @@ Preserve Browser Pilot advantages:
 
 ### B5. Improve Agent-facing guidance and data handling
 
-- [ ] **B5.1** Add structured hints for autocomplete, modal overlays, filters,
+- [x] **B5.1** Add structured hints for autocomplete, modal overlays, filters,
   blocked/403 pages, login transitions, downloads, and repeated action loops.
   - Covers: FR-8.
+  - Complete: Observation results now contain a bounded discriminated `hints`
+    array derived from DOM/AX signals without collecting page text or input
+    values. Authentication transitions are scoped to the live target session
+    and selected frame. Main-document 403/429, target-session download states,
+    and the no-progress threshold publish the same Agent-neutral hint contract
+    in events; subresource failures are excluded. Refs, reason text, counts,
+    and arrays are bounded, and focused tests cover all hint variants.
+  - A0 decision: this is an optional additive output field under protocol 1.0
+    and 1.1, with no new capability. It exposes no operation and derives only
+    data already covered by `observation.read` or `event.read`; older clients
+    ignore unknown response fields and older executors may omit it.
 - [ ] **B5.2** Mark passwords, cookies, auth, network bodies, uploads,
   downloads, screenshots, and selected page text with sensitivity metadata.
   - Covers: CON-5.

@@ -104,10 +104,14 @@ test('completed target-session downloads become protected Artifacts without expo
   }, contextA.sessionId);
 
   const completed = await waitFor(() => events.find(event => event.payload.state === 'completed'));
+  const started = events.find(event => event.payload.state === 'started');
+  assert.equal(started.payload.hints[0].recommendedAction, 'wait_for_download');
   assert.equal(completed.workspaceId, contextA.workspaceId);
   assert.equal(completed.payload.artifact.kind, 'download');
   assert.equal(completed.payload.artifact.fileName, 'report.pdf');
   assert.equal(completed.payload.artifact.sensitivity, 'user_file');
+  assert.equal(completed.payload.hints[0].state, 'completed');
+  assert.equal(completed.payload.hints[0].artifactId, completed.payload.artifact.id);
   assert.equal(JSON.stringify(events).includes('private-guid'), false);
   assert.equal(JSON.stringify(events).includes(directory), false);
   const stored = await artifacts.get(contextA.workspaceId, completed.payload.artifact.id);
@@ -170,6 +174,14 @@ test('oversized downloads are cancelled by GUID and publish only bounded metadat
   const failed = events.find(event => event.payload.state === 'failed');
   assert.equal(failed.payload.reason, 'size_limit_exceeded');
   assert.equal(failed.payload.maxDownloadBytes, 4);
+  assert.deepEqual(failed.payload.hints[0], {
+    code: 'download',
+    source: 'download',
+    confidence: 'strong',
+    recommendedAction: 'inspect_download_failure',
+    state: 'failed',
+    reason: 'size_limit_exceeded',
+  });
   assert.equal(transport.calls.some(call => (
     call.method === 'Browser.cancelDownload' && call.params.guid === 'oversized-guid'
   )), true);
@@ -253,6 +265,7 @@ test('session cleanup cancels partial downloads and removes staging bytes', asyn
   });
   assert.equal(events.at(-1).payload.state, 'cancelled');
   assert.equal(events.at(-1).payload.reason, 'lease_released');
+  assert.equal(events.at(-1).payload.hints[0].state, 'cancelled');
   assert.equal(artifacts.size(), 0);
 });
 

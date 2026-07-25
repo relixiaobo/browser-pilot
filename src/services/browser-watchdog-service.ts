@@ -1,10 +1,12 @@
 import type {
+  AgentHint,
   BrowserWorkspaceId,
   ControlledTargetId,
   ControlLeaseId,
   FrameId,
 } from '../protocol/model.js';
 import type { PublishBrowserEventInput } from './event-journal.js';
+import { repeatedActionAgentHint } from './agent-hint-service.js';
 
 export const DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000;
 export const DEFAULT_DIALOG_TIMEOUT_MS = 15_000;
@@ -150,11 +152,11 @@ export class BrowserWatchdogService {
     this.dialogs.delete(dialogId);
   }
 
-  actionCompleted(context: BrowserWatchdogContext, evidence: WatchdogActionEvidence): void {
+  actionCompleted(context: BrowserWatchdogContext, evidence: WatchdogActionEvidence): AgentHint | undefined {
     const key = targetKey(context.leaseId, context.targetId);
     if (evidence.status === 'verified') {
       this.noProgress.delete(key);
-      return;
+      return undefined;
     }
     const reason = evidence.reason;
     const observableNoProgress = evidence.status === 'mismatch' || (
@@ -162,14 +164,15 @@ export class BrowserWatchdogService {
     );
     if (!observableNoProgress) {
       this.noProgress.delete(key);
-      return;
+      return undefined;
     }
 
     const streak = this.noProgress.get(key) ?? { ...context, count: 0, emitted: false };
     streak.count += 1;
     this.noProgress.set(key, streak);
-    if (streak.emitted || streak.count < this.noProgressThreshold) return;
+    if (streak.emitted || streak.count < this.noProgressThreshold) return undefined;
     streak.emitted = true;
+    const hint = repeatedActionAgentHint(streak.count, reason ?? 'observable_mismatch');
     this.publish({
       ...context,
       type: 'watchdog.no_progress',
@@ -180,8 +183,10 @@ export class BrowserWatchdogService {
         reason: reason ?? 'observable_mismatch',
         streak: streak.count,
         threshold: this.noProgressThreshold,
+        hints: [hint],
       },
     });
+    return hint;
   }
 
   resetTarget(leaseId: ControlLeaseId, targetId: ControlledTargetId): void {

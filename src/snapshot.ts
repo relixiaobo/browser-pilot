@@ -81,8 +81,20 @@ export interface SnapshotData {
 export interface SnapshotResult {
   text: string;
   data: SnapshotData;
+  guidance: SnapshotGuidanceSignals;
   truncated?: boolean;
   truncationReasons?: Array<'element_limit'>;
+}
+
+export interface SnapshotGuidanceSignals {
+  authenticationSurface: boolean;
+  modalCount: number;
+  blockingModalCount: number;
+  explicitAutocompleteCount: number;
+  explicitFilterCount: number;
+  autocompleteRefs: number[];
+  modalRefs: number[];
+  filterRefs: number[];
 }
 
 export interface SnapshotContext {
@@ -111,7 +123,14 @@ export async function takeSnapshot(
   };
   if (context.executionContextId) infoParams.contextId = context.executionContextId;
   const { result: info } = await transport.send('Runtime.evaluate', infoParams, sessionId);
-  const { title, url } = JSON.parse(info.value);
+  const pageInfo = JSON.parse(info.value);
+  const { title, url } = pageInfo;
+  const pageGuidance = pageInfo.guidance && typeof pageInfo.guidance === 'object'
+    ? pageInfo.guidance as Record<string, unknown>
+    : {};
+  const boundedCount = (value: unknown): number => Number.isSafeInteger(value) && Number(value) >= 0
+    ? Math.min(Number(value), 32)
+    : 0;
 
   const { nodes } = await transport.send(
     'Accessibility.getFullAXTree',
@@ -133,16 +152,26 @@ export async function takeSnapshot(
   // Walk depth-first, collect interactive elements
   const refs: RefEntry[] = [];
   const elements: SnapshotData['elements'] = [];
+  const autocompleteRefs: number[] = [];
+  const modalRefs: number[] = [];
+  const filterRefs: number[] = [];
+  let modalCount = 0;
   let eligibleCount = 0;
 
-  function walk(node: any): void {
+  function walk(node: any, insideDialog = false): void {
     if (!node) return;
 
+    let childInsideDialog = insideDialog;
     if (!node.ignored) {
       const role = node.role?.value;
       const props = Object.fromEntries(
         (node.properties || []).map((p: any) => [p.name, p.value?.value]),
       );
+      const isDialog = role === 'dialog' || role === 'alertdialog';
+      if (isDialog) {
+        modalCount = Math.min(32, modalCount + 1);
+        childInsideDialog = true;
+      }
 
       // Detect contenteditable elements (role=generic with editable=richtext in AX tree)
       const isEditable = props.editable === 'richtext';
@@ -165,12 +194,26 @@ export async function takeSnapshot(
           if (value !== undefined && value !== '') el.value = value;
           if (checked) el.checked = true;
           elements.push(el);
+          const ref = el.ref;
+          const autocomplete = typeof props.autocomplete === 'string'
+            ? props.autocomplete.trim().toLowerCase()
+            : '';
+          if (
+            effectiveRole === 'combobox' &&
+            autocomplete !== '' && autocomplete !== 'none' &&
+            autocompleteRefs.length < 32
+          ) autocompleteRefs.push(ref);
+          if (childInsideDialog && modalRefs.length < 32) modalRefs.push(ref);
+          if (
+            filterRefs.length < 32 &&
+            /(^|[\s_:-])(filter|filters|sort|sorting|refine|refinement)([\s_:-]|$)|筛选|过滤|排序/i.test(name)
+          ) filterRefs.push(ref);
         }
       }
     }
 
     // Always walk children — ignored containers can have interactive descendants
-    for (const child of node.children) walk(child);
+    for (const child of node.children) walk(child, childInsideDialog);
   }
 
   if (root) walk(root);
@@ -193,6 +236,16 @@ export async function takeSnapshot(
   return {
     text: lines.join('\n'),
     data: { title, url, elements },
+    guidance: {
+      authenticationSurface: pageGuidance.authenticationSurface === true,
+      modalCount,
+      blockingModalCount: boundedCount(pageGuidance.blockingModalCount),
+      explicitAutocompleteCount: boundedCount(pageGuidance.explicitAutocompleteCount),
+      explicitFilterCount: boundedCount(pageGuidance.explicitFilterCount),
+      autocompleteRefs,
+      modalRefs,
+      filterRefs,
+    },
     truncated,
     truncationReasons: truncated ? ['element_limit'] : [],
   };

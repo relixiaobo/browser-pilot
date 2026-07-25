@@ -426,8 +426,62 @@ export const READ_FILE_INPUT_STATE = `function() {
   };
 }`;
 
-/** Return {title, url} of the current page. */
-export const PAGE_INFO = `JSON.stringify({title:document.title,url:location.href})`;
+/** Return bounded page identity and guidance signals without page text or field values. */
+export const PAGE_INFO = `JSON.stringify({title:document.title,url:location.href,guidance:(()=>{
+  const result={authenticationSurface:false,blockingModalCount:0,explicitAutocompleteCount:0,explicitFilterCount:0};
+  const roots=[document];
+  let visited=0;
+  const visible=element=>{
+    const style=getComputedStyle(element);
+    if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse')return false;
+    const rects=element.getClientRects();
+    for(let index=0;index<Math.min(rects.length,8);index+=1){
+      if(rects[index].width>0&&rects[index].height>0)return true;
+    }
+    return false;
+  };
+  while(roots.length>0&&visited<10000){
+    const root=roots.shift();
+    const walker=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT);
+    let element;
+    while(visited<10000&&(element=walker.nextNode())){
+      visited+=1;
+      if(element.shadowRoot)roots.push(element.shadowRoot);
+      const tag=String(element.tagName||'').toLowerCase();
+      const role=String(element.getAttribute?.('role')||'').trim().toLowerCase();
+      const inputType=tag==='input'?String(element.type||'').toLowerCase():'';
+      const autocomplete=String(element.getAttribute?.('aria-autocomplete')||'').trim().toLowerCase();
+      const ariaModal=String(element.getAttribute?.('aria-modal')||'').trim().toLowerCase()==='true';
+      let browserModal=false;
+      if(tag==='dialog'&&element.hasAttribute('open')){
+        try{browserModal=element.matches(':modal');}catch{}
+      }
+      const modal=(tag==='dialog'&&element.hasAttribute('open'))||ariaModal;
+      const blockingModal=ariaModal||browserModal;
+      const explicitAutocomplete=(inputType&&element.hasAttribute?.('list'))||
+        (autocomplete!==''&&autocomplete!=='none')||
+        (role==='combobox'&&(
+          element.hasAttribute?.('aria-controls')||element.hasAttribute?.('aria-owns')||
+          (element.hasAttribute?.('aria-haspopup')&&element.getAttribute('aria-haspopup')!=='false')
+        ));
+      const semantics=[
+        role,
+        element.getAttribute?.('aria-label'),
+        element.getAttribute?.('name'),
+        element.id,
+        element.getAttribute?.('data-testid'),
+      ].filter(Boolean).join(' ').toLowerCase();
+      const explicitFilter=/(^|[\\s_:-])(filter|filters|sort|sorting|refine|refinement)([\\s_:-]|$)/.test(semantics)||
+        /筛选|过滤|排序/.test(semantics);
+      if((inputType==='password'||modal||explicitAutocomplete||explicitFilter)&&!visible(element))continue;
+      if(inputType==='password')result.authenticationSurface=true;
+      if(blockingModal)result.blockingModalCount=Math.min(32,result.blockingModalCount+1);
+      if(explicitAutocomplete)result.explicitAutocompleteCount=Math.min(32,result.explicitAutocompleteCount+1);
+      if(explicitFilter)result.explicitFilterCount=Math.min(32,result.explicitFilterCount+1);
+    }
+  }
+  return result;
+})()})`;
 
 /** Return full-page dimensions. */
 export const PAGE_DIMENSIONS = `JSON.stringify({

@@ -38,6 +38,8 @@ class BrowserFixtureTransport {
   responseBodies = new Map();
   childFrames = [];
   extraAxButtons = [];
+  extraAxNodes = [];
+  pageGuidance = {};
   pointerTargetState = {
     status: 'ready',
     x: 100,
@@ -142,7 +144,11 @@ class BrowserFixtureTransport {
           return { result: { objectId: 'object:file-input' } };
         }
         if (String(params.expression).startsWith('JSON.stringify({title:document.title')) {
-          return { result: { value: JSON.stringify({ title: target.title, url: target.url }) } };
+          return {
+            result: {
+              value: JSON.stringify({ title: target.title, url: target.url, guidance: this.pageGuidance }),
+            },
+          };
         }
         return { result: { value: undefined } };
       }
@@ -173,6 +179,7 @@ class BrowserFixtureTransport {
                 'button',
                 ...(editableNode ? [editableNode.nodeId] : []),
                 ...extraNodes.map(node => node.nodeId),
+                ...this.extraAxNodes.filter(node => node.parentId === 'root').map(node => node.nodeId),
               ],
               ignored: false,
               role: { value: 'RootWebArea' },
@@ -189,6 +196,7 @@ class BrowserFixtureTransport {
             },
             ...(editableNode ? [editableNode] : []),
             ...extraNodes,
+            ...this.extraAxNodes,
           ],
         };
       }
@@ -409,6 +417,108 @@ test('tools/call lists user tabs, creates a managed target, and preserves user t
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(transport.targets.has('user-form'), true);
   assert.equal([...transport.targets.keys()].some(id => id.startsWith('managed-')), false);
+});
+
+test('Observations return deterministic browser guidance and authentication transitions', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:hints', 'com.example.agent', 'instance:hints');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+
+  const initial = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.deepEqual(initial.hints, []);
+
+  transport.pageGuidance = {
+    authenticationSurface: true,
+    blockingModalCount: 1,
+    explicitAutocompleteCount: 1,
+    explicitFilterCount: 1,
+  };
+  const entered = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.deepEqual(entered.hints.map(hint => hint.code), [
+    'modal_overlay',
+    'authentication_surface',
+    'autocomplete',
+    'filter_controls',
+  ]);
+  assert.equal(entered.hints[0].blocking, true);
+  assert.equal(entered.hints[1].state, 'entered');
+  assert.equal(entered.hints[2].confidence, 'strong');
+
+  const present = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(present.hints.find(hint => hint.code === 'authentication_surface').state, 'present');
+  transport.pageGuidance = {};
+  const left = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.deepEqual(left.hints, [{
+    code: 'authentication_surface',
+    source: 'observation',
+    confidence: 'strong',
+    recommendedAction: 'inspect_authentication_state',
+    state: 'left',
+  }]);
+});
+
+test('Observation hints carry only numbered refs derived from explicit AX semantics', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.extraAxNodes = [
+    {
+      nodeId: 'dialog',
+      parentId: 'root',
+      childIds: ['dialog-button'],
+      ignored: false,
+      role: { value: 'dialog' },
+      name: { value: 'Preferences' },
+      properties: [],
+    },
+    {
+      nodeId: 'dialog-button',
+      parentId: 'dialog',
+      ignored: false,
+      role: { value: 'button' },
+      name: { value: 'Apply' },
+      properties: [],
+      backendDOMNodeId: 201,
+    },
+    {
+      nodeId: 'autocomplete',
+      parentId: 'root',
+      ignored: false,
+      role: { value: 'combobox' },
+      name: { value: 'City' },
+      properties: [{ name: 'autocomplete', value: { value: 'list' } }],
+      backendDOMNodeId: 202,
+    },
+    {
+      nodeId: 'filter',
+      parentId: 'root',
+      ignored: false,
+      role: { value: 'button' },
+      name: { value: 'Filter results' },
+      properties: [],
+      backendDOMNodeId: 203,
+    },
+  ];
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:ax-hints', 'com.example.agent', 'instance:ax-hints');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+
+  const byCode = Object.fromEntries(observed.hints.map(hint => [hint.code, hint]));
+  assert.deepEqual(byCode.modal_overlay.refs, [2]);
+  assert.equal(byCode.modal_overlay.blocking, false);
+  assert.deepEqual(byCode.autocomplete.refs, [3]);
+  assert.equal(byCode.autocomplete.confidence, 'possible');
+  assert.deepEqual(byCode.filter_controls.refs, [4]);
 });
 
 test('dialogs remain pending, emit ordered events, and require an explicit response', async () => {
@@ -676,6 +786,44 @@ test('network journals, bodies, rules, auth, and events remain isolated across A
   );
 });
 
+test('network events hint only on blocked main-document responses', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:blocked-hints', 'com.example.agent', 'instance:blocked-hints');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const sessionId = [...transport.sessions.keys()][0];
+
+  for (const [requestId, type, status] of [
+    ['document-403', 'Document', 403],
+    ['document-429', 'Document', 429],
+    ['xhr-403', 'XHR', 403],
+  ]) {
+    transport.emit('Network.requestWillBeSent', {
+      requestId,
+      type,
+      request: { method: 'GET', url: `https://blocked.test/${requestId}`, headers: {} },
+    }, sessionId);
+    transport.emit('Network.responseReceived', {
+      requestId,
+      response: { status, statusText: 'Blocked', headers: {}, mimeType: 'text/html' },
+    }, sessionId);
+  }
+
+  const replayed = await runtime.call(client.bridge, 'events/poll', {
+    workspaceId: client.workspace.id,
+    cursor: client.eventCursor,
+  });
+  const responses = replayed.events.filter(event => event.type === 'network.response');
+  assert.deepEqual(responses.slice(0, 2).map(event => event.payload.hints[0].status), [403, 429]);
+  assert.equal(Object.hasOwn(responses[2].payload, 'hints'), false);
+});
+
 test('Workspace network configuration survives Lease replacement and journals are bounded and clearable', async () => {
   const transport = new BrowserFixtureTransport();
   const browserTools = new BrowserToolService(transport, binding);
@@ -831,12 +979,15 @@ test('three observable no-progress actions emit one scoped watchdog event', asyn
   const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
   let observation = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
 
+  let thresholdHint;
   for (let index = 0; index < 4; index += 1) {
     observation = await tool(runtime, client, 'browser.click', {
       target: { observationId: observation.observationId, ref: 1 },
     }, targetId);
     assert.equal(observation.evidence.reason, 'no_observable_effect');
+    if (index === 2) thresholdHint = observation.hints.find(hint => hint.code === 'repeated_action');
   }
+  assert.equal(thresholdHint.streak, 3);
 
   const replayed = await runtime.call(client.bridge, 'events/poll', {
     workspaceId: client.workspace.id,
@@ -852,6 +1003,7 @@ test('three observable no-progress actions emit one scoped watchdog event', asyn
     reason: 'no_observable_effect',
     streak: 3,
     threshold: 3,
+    hints: [thresholdHint],
   });
   assert.equal(JSON.stringify(watchdogEvents).includes('Submit'), false);
 });

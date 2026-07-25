@@ -3,6 +3,8 @@ import { chmod, lstat, mkdir, readdir, rm, stat, unlink } from 'node:fs/promises
 import { basename, join, resolve } from 'node:path';
 import { DOWNLOAD_DIR } from '../paths.js';
 import type {
+  AgentHint,
+  ArtifactId,
   BrowserWorkspaceId,
   ControlledTargetId,
   ControlLeaseId,
@@ -11,6 +13,7 @@ import type {
 import type { Transport } from '../transport.js';
 import type { ArtifactStore } from './artifact-store.js';
 import type { PublishBrowserEventInput } from './event-journal.js';
+import { downloadAgentHint } from './agent-hint-service.js';
 
 export interface DownloadSessionContext {
   workspaceId: BrowserWorkspaceId;
@@ -378,6 +381,7 @@ export class DownloadController {
 
   private publish(session: DownloadSession, payload: Record<string, JsonValue>): void {
     if (!this.publishEvent) return;
+    const hint = this.agentHint(payload);
     try {
       this.publishEvent({
         workspaceId: session.context.workspaceId,
@@ -386,9 +390,33 @@ export class DownloadController {
         browserConnectionGeneration: session.context.browserConnectionGeneration,
         type: 'download',
         sensitivity: 'user_file',
-        payload,
+        payload: {
+          ...payload,
+          ...(hint ? { hints: [hint] as unknown as JsonValue } : {}),
+        },
       });
     } catch { /* event delivery cannot block download cleanup */ }
+  }
+
+  private agentHint(payload: Record<string, JsonValue>): AgentHint | undefined {
+    if (payload.state === 'started') return downloadAgentHint({ state: 'started' });
+    if (payload.state === 'completed') {
+      const artifact = payload.artifact;
+      if (
+        artifact && typeof artifact === 'object' && !Array.isArray(artifact) &&
+        typeof artifact.id === 'string'
+      ) {
+        return downloadAgentHint({ state: 'completed', artifactId: artifact.id as ArtifactId });
+      }
+      return undefined;
+    }
+    if (payload.state === 'failed' || payload.state === 'cancelled') {
+      return downloadAgentHint({
+        state: payload.state,
+        reason: typeof payload.reason === 'string' ? payload.reason : 'unknown',
+      });
+    }
+    return undefined;
   }
 
   private hasDownloadCapacity(session: DownloadSession): boolean {

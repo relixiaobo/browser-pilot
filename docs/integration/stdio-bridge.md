@@ -176,6 +176,28 @@ effect use `unavailable`. Treat evidence as browser-level execution evidence,
 then inspect the returned Observation to decide whether the task itself
 succeeded.
 
+Every Observation produced by the built-in Browser tools also includes a
+bounded `hints` array. Each item is discriminated by `code` and includes
+`source`, `confidence`, and a stable `recommendedAction`:
+
+```json
+{"hints":[{"code":"modal_overlay","source":"observation","confidence":"strong","recommendedAction":"resolve_overlay_first","blocking":true,"refs":[2,5]}]}
+```
+
+Current codes are `autocomplete`, `modal_overlay`, `filter_controls`,
+`authentication_surface`, `access_blocked`, `download`, and
+`repeated_action`. Observation hints may contain only refs from the returned
+Observation. Authentication state is `present` on the first observed auth
+surface, `entered` when a session moves onto one, and `left` when it moves off
+one. A session or selected-frame change resets that transition baseline.
+
+Hints are advisory browser evidence. Use the recommended action as the next
+inspection strategy, not as permission, proof of task success, or a reason to
+skip normal error handling. Unknown hint codes and unknown response fields must
+be ignored. The field is additive for protocol 1.0 and 1.1 and introduces no
+new capability; its data is covered by the tool or event's existing
+sensitivity and granted capability.
+
 `browser.type` and `browser.keyboard` also return bounded evidence after the
 page has had time to apply a controlled-field update:
 
@@ -257,6 +279,12 @@ observation invalidation. They also include `watchdog.navigation_stalled`,
 `watchdog.no_progress`. Network and watchdog events never contain credentials,
 typed values, refs, headers, request/response bodies, or raw CDP IDs; retrieve
 sensitive detail explicitly through the scoped tools.
+
+`network.response` adds an `access_blocked` hint only for a main-document 403 or
+429, not for failed images, scripts, XHR, or fetches. The threshold
+`watchdog.no_progress` event and the action result that reaches the threshold
+both contain the same `repeated_action` hint. Change strategy instead of
+automatically repeating the same action or navigation.
 
 `connection.lost` keeps the last connection generation and causes later browser
 tools to fail with retryable `browser_disconnected`. The daemon repeatedly reads
@@ -341,6 +369,12 @@ attached, the Broker configures target-session download capture and emits
 - `started`: includes an opaque `downloadId`, bounded URL, and suggested filename;
 - `completed`: includes the Workspace-owned `download` Artifact descriptor;
 - `failed` or `cancelled`: includes a stable, bounded reason and byte metadata.
+
+These four lifecycle states also carry a `download` hint. `started` recommends
+waiting, `completed` recommends inspecting the Artifact and includes only its
+public `artifactId`, and terminal failures recommend inspecting the bounded
+failure reason. `capture_unavailable` is setup state and does not claim that a
+download started.
 
 The private CDP GUID and staging path never appear in protocol output. On
 `completed`, use the descriptor's `id` with `artifacts/get` or `artifacts/export`

@@ -9,6 +9,7 @@ export * from './observation-store.js';
 export * from './input-dispatcher.js';
 export * from './action-continuity.js';
 export * from './action-service.js';
+export * from './agent-hint-service.js';
 export * from './upload-service.js';
 export * from './page-content-service.js';
 export * from './target-service.js';
