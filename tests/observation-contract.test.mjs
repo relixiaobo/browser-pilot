@@ -129,7 +129,7 @@ function domSnapshotFixture(elements, frameId = 'frame:test') {
   return {
     strings,
     documents: [{
-      frameId,
+      frameId: intern(frameId),
       documentURL: intern('https://example.test/fusion'),
       baseURL: intern('https://example.test/'),
       nodes,
@@ -275,7 +275,7 @@ test('Observation fuses AX semantics with DOM layout, state, names, and form val
     ),
     'session:fusion',
     'target:fusion',
-    { refStore: refs },
+    { refStore: refs, frameId: 'frame:test' },
   ).observe(20);
 
   assert.deepEqual(result.data.elements, [

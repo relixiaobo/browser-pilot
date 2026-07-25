@@ -17,6 +17,7 @@ import {
   type NetworkRequestId,
   type NetworkRuleId,
   type ObservationId,
+  type ObservationInvalidationReason,
 } from '../protocol/model.js';
 import type { ToolDefinition } from '../protocol/tools.js';
 import { INJECT_BORDER } from '../page-scripts.js';
@@ -54,7 +55,12 @@ import {
 } from './controlled-target-registry.js';
 import { CookieService } from './cookie-service.js';
 import { CaptureService } from './capture-service.js';
-import { FrameService, type PageFrame } from './frame-service.js';
+import {
+  FrameService,
+  type FrameTargetAttachment,
+  type FrameTargetInfo,
+  type SessionPageFrame,
+} from './frame-service.js';
 import { MemoryObservationStore, type StoredObservation } from './observation-store.js';
 import { ObservationService } from './observation-service.js';
 import { PageContentService } from './page-content-service.js';
@@ -116,6 +122,8 @@ interface TargetSession {
 interface ActiveFrame {
   id: FrameId;
   cdpFrameId: string;
+  sessionId: string;
+  cdpTargetId: string;
   executionContextId?: number;
 }
 
@@ -130,6 +138,10 @@ interface SessionFrames {
   byId: Map<FrameId, BrokerFrameRecord>;
   byCdpId: Map<string, BrokerFrameRecord>;
   topFrameId: FrameId;
+}
+
+interface ChildFrameSession extends FrameTargetAttachment {
+  parentFrameId: string;
 }
 
 interface CreatedObservation {
@@ -246,6 +258,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly managedWindowIds = new Map<ManagedTabSetId, number>();
   private readonly ownedSessionIds = new Set<string>();
   private readonly framesBySession = new Map<string, SessionFrames>();
+  private readonly childFrameSessions = new Map<string, Map<string, ChildFrameSession>>();
   private readonly pendingDialogs = new Map<string, PendingDialog>();
   private readonly pendingDialogBySession = new Map<string, string>();
   private readonly dialogResponseBySession = new Map<string, PendingDialogResponse>();
@@ -597,10 +610,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async listFrames(context: BrokerToolCallContext): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
-    const frames = this.syncFrames(session, await new FrameService(
-      this.transport,
-      session.sessionId,
-    ).list());
+    const frames = this.syncFrames(session, await this.listSessionFrames(session));
     const target = this.registry.get(this.inventoryContext(context), targetId);
     return asJson({
       ...this.targetResult(context, targetId, target.url),
@@ -621,17 +631,19 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
-    const service = new FrameService(this.transport, session.sessionId);
-    const frames = this.syncFrames(session, await service.list());
+    const frames = this.syncFrames(session, await this.listSessionFrames(session));
     const selected = args.top === true
       ? frames.byId.get(frames.topFrameId)
       : frames.byId.get(args.frameId as FrameId);
     if (!selected) throw invalidArgument('Frame is stale or does not belong to this target session', 'frameId');
     this.markDispatched(context);
+    const service = new FrameService(this.transport, selected.sessionId);
     const selection = await service.selectById(selected.cdpFrameId);
     session.activeFrame = {
       id: selected.id,
       cdpFrameId: selected.cdpFrameId,
+      sessionId: selected.sessionId,
+      cdpTargetId: selected.cdpTargetId,
       ...(selection.executionContextId !== undefined
         ? { executionContextId: selection.executionContextId }
         : {}),
@@ -676,6 +688,10 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.registry.setActive(inventoryContext, inventoryContext.leaseId, targetId);
     const session = await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
     session.activeFrame = undefined;
+    await Promise.all(
+      [...(this.childFrameSessions.get(session.sessionId)?.values() ?? [])]
+        .map(child => this.detachFrameTargetSession(session, child, true, 'navigation')),
+    );
     this.framesBySession.delete(session.sessionId);
     this.watchdogs.resetTarget(inventoryContext.leaseId, targetId);
     this.observations.invalidateTarget(targetId, 'navigation');
@@ -766,7 +782,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async read(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
-    const result = await new PageContentService(this.transport, session.sessionId).read(
+    const result = await new PageContentService(this.transport, this.activeCdpSessionId(session)).read(
       args.selector as string | undefined,
       Number(args.limit ?? 100_000),
       session.activeFrame?.executionContextId !== undefined
@@ -887,7 +903,11 @@ export class BrowserToolService implements BrowserToolExecutor {
       },
     };
     this.markDispatched(context);
-    const result = await new UploadService(this.transport, session.sessionId, observations).upload(artifact.path, {
+    const result = await new UploadService(
+      this.transport,
+      this.activeCdpSessionId(session),
+      observations,
+    ).upload(artifact.path, {
       inputIndex: args.inputIndex as number | undefined,
       ...(backendNodeId !== undefined ? { backendNodeId } : {}),
       ...(session.activeFrame?.executionContextId !== undefined
@@ -903,7 +923,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async capture(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.capture');
-    const capture = new CaptureService(this.transport, session.sessionId);
+    const capture = new CaptureService(this.transport, this.activeCdpSessionId(session));
     const options = {
       fullPage: args.fullPage as boolean | undefined,
       selector: args.selector as string | undefined,
@@ -1076,7 +1096,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       ...(session.activeFrame?.executionContextId !== undefined
         ? { contextId: session.activeFrame.executionContextId }
         : {}),
-    }, session.sessionId);
+    }, this.activeCdpSessionId(session));
     if (exceptionDetails) {
       throw invalidArgument(
         exceptionDetails.exception?.description || exceptionDetails.text || 'Evaluation error',
@@ -1268,7 +1288,8 @@ export class BrowserToolService implements BrowserToolExecutor {
     afterAction: boolean,
   ): Promise<CreatedObservation> {
     const refs = new MemoryRefStore();
-    const service = new ObservationService(this.transport, session.sessionId, targetId, {
+    const cdpSessionId = this.activeCdpSessionId(session);
+    const service = new ObservationService(this.transport, cdpSessionId, targetId, {
       refStore: refs,
       ...(session.activeFrame?.executionContextId !== undefined
         ? { executionContextId: session.activeFrame.executionContextId }
@@ -1285,7 +1306,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       targetId,
       browserProcessIdentity: context.browser.instance.processIdentity,
       browserConnectionGeneration: context.browser.instance.connectionGeneration,
-      sessionId: session.sessionId,
+      sessionId: cdpSessionId,
       frameId: identity.frameId,
       loaderId: identity.loaderId,
       documentGeneration: identity.documentGeneration,
@@ -1312,6 +1333,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     observationId: ObservationId,
     ref: number,
   ): Promise<StoredObservation> {
+    const cdpSessionId = this.activeCdpSessionId(session);
     const identity = await this.observationContextIdentity(session);
     const observation = this.observations.resolve({
       workspaceId: context.workspace!.id,
@@ -1320,7 +1342,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       observationId,
       browserProcessIdentity: context.browser.instance.processIdentity,
       browserConnectionGeneration: context.browser.instance.connectionGeneration,
-      sessionId: session.sessionId,
+      sessionId: cdpSessionId,
       frameId: identity.frameId,
       loaderId: identity.loaderId,
       documentGeneration: identity.documentGeneration,
@@ -1329,11 +1351,11 @@ export class BrowserToolService implements BrowserToolExecutor {
     try {
       const resolved = await this.transport.send('DOM.resolveNode', {
         backendNodeId: observation.refs[ref - 1].backendNodeId,
-      }, session.sessionId);
+      }, cdpSessionId);
       if (resolved?.object?.objectId) {
         await this.transport.send('Runtime.releaseObject', {
           objectId: resolved.object.objectId,
-        }, session.sessionId).catch(() => {});
+        }, cdpSessionId).catch(() => {});
       }
     } catch (cause) {
       this.observations.invalidateTarget(targetId, 'loader_replaced');
@@ -1358,10 +1380,11 @@ export class BrowserToolService implements BrowserToolExecutor {
     session: TargetSession,
     observation?: StoredObservation,
   ): Promise<ActionSignalSnapshot> {
+    const cdpSessionId = this.activeCdpSessionId(session);
     return {
       loaderId: observation?.loaderId ?? await this.loaderId(session),
       url: observation?.url ?? await this.currentUrl(session),
-      dialogSequence: this.dialogOpenSequenceBySession.get(session.sessionId) ?? 0,
+      dialogSequence: this.dialogOpenSequenceBySession.get(cdpSessionId) ?? 0,
       popupSequence: this.popupSequence,
     };
   }
@@ -1381,7 +1404,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       ));
     if (navigated) effects.push('navigation');
     if (documentChanged) effects.push('document_changed');
-    if ((this.dialogOpenSequenceBySession.get(session.sessionId) ?? 0) > before.dialogSequence) {
+    if ((this.dialogOpenSequenceBySession.get(this.activeCdpSessionId(session)) ?? 0) > before.dialogSequence) {
       effects.push('dialog_opened');
     }
     if (this.popupSignals.some(signal => (
@@ -1452,6 +1475,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     observation: StoredObservation | undefined,
   ): ActionServiceHarness {
     let next: CreatedObservation | undefined;
+    const cdpSessionId = this.activeCdpSessionId(session);
     const refStore = observation ? fixedRefStore(targetId, observation) : new MemoryRefStore();
     const observationOptions = {
       refStore,
@@ -1467,7 +1491,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       refs: refStore,
       locate: (selector: string) => new ObservationService(
         this.transport,
-        session.sessionId,
+        cdpSessionId,
         targetId,
         observationOptions,
       ).locate(selector),
@@ -1477,19 +1501,21 @@ export class BrowserToolService implements BrowserToolExecutor {
       },
     };
     return {
-      service: new ActionService(this.transport, session.sessionId, targetId, {
+      service: new ActionService(this.transport, cdpSessionId, targetId, {
         refStore,
         observationService,
+        pointerOffset: () => this.activeFramePointerOffset(session),
         onWillDispatch: () => this.markDispatched(context),
         continuityFactory: action => CdpActionContinuityGuard.create(
           this.transport,
-          session.sessionId,
+          cdpSessionId,
           action,
           {
             ...(expectedFrameId ? { frameId: expectedFrameId } : {}),
             externalCheck: () => this.actionContinuityFailure(
               session,
               expectedConnectionGeneration,
+              cdpSessionId,
               expectedFrameId,
               expectedExecutionContextId,
             ),
@@ -1506,6 +1532,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private actionContinuityFailure(
     session: TargetSession,
     expectedConnectionGeneration: number,
+    expectedCdpSessionId: string,
     expectedFrameId: string | undefined,
     expectedExecutionContextId: number | undefined,
   ): ActionContinuityFailureReason | undefined {
@@ -1522,6 +1549,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (current.cdpTargetId !== session.cdpTargetId || current.targetId !== session.targetId) {
       return 'target_changed';
     }
+    if (this.activeCdpSessionId(current) !== expectedCdpSessionId) return 'session_changed';
     if (current.activeFrame?.cdpFrameId !== expectedFrameId) return 'frame_changed';
     if (current.activeFrame?.executionContextId !== expectedExecutionContextId) {
       return 'document_changed';
@@ -1627,10 +1655,46 @@ export class BrowserToolService implements BrowserToolExecutor {
     return scale < 0.999 ? scale : undefined;
   }
 
+  private activeCdpSessionId(session: TargetSession): string {
+    return session.activeFrame?.sessionId ?? session.sessionId;
+  }
+
+  private async activeFramePointerOffset(session: TargetSession): Promise<{ x: number; y: number }> {
+    const activeFrame = session.activeFrame;
+    if (!activeFrame) return { x: 0, y: 0 };
+    const frames = this.framesBySession.get(session.sessionId);
+    const selected = frames?.byId.get(activeFrame.id);
+    const parent = selected?.parentCdpFrameId
+      ? frames?.byCdpId.get(selected.parentCdpFrameId)
+      : undefined;
+    if (!selected || !parent || parent.sessionId !== selected.sessionId) {
+      return { x: 0, y: 0 };
+    }
+
+    const owner = await this.transport.send('DOM.getFrameOwner', {
+      frameId: selected.cdpFrameId,
+    }, selected.sessionId);
+    if (!Number.isSafeInteger(owner?.backendNodeId) || owner.backendNodeId <= 0) {
+      throw new BrowserPilotError('internal_error', 'Chrome returned an invalid frame owner');
+    }
+    const { model } = await this.transport.send('DOM.getBoxModel', {
+      backendNodeId: owner.backendNodeId,
+    }, selected.sessionId);
+    const content = model?.content;
+    if (
+      !Array.isArray(content) || content.length < 8 ||
+      !content.every((coordinate: unknown) => Number.isFinite(coordinate))
+    ) {
+      throw new BrowserPilotError('internal_error', 'Chrome returned an invalid frame content box');
+    }
+    return { x: Number(content[0]), y: Number(content[1]) };
+  }
+
   private async frameLoaderIdentity(
     session: TargetSession,
   ): Promise<{ frameId: string; loaderId: string }> {
-    const { frameTree } = await this.transport.send('Page.getFrameTree', {}, session.sessionId);
+    const cdpSessionId = this.activeCdpSessionId(session);
+    const { frameTree } = await this.transport.send('Page.getFrameTree', {}, cdpSessionId);
     const findFrame = (node: any): any => {
       if (!session.activeFrame || node?.frame?.id === session.activeFrame.cdpFrameId) return node?.frame;
       for (const child of node?.childFrames ?? []) {
@@ -1658,7 +1722,8 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (session.activeFrame?.executionContextId !== undefined) {
       params.contextId = session.activeFrame.executionContextId;
     }
-    const { result } = await this.transport.send('Runtime.evaluate', params, session.sessionId);
+    const cdpSessionId = this.activeCdpSessionId(session);
+    const { result } = await this.transport.send('Runtime.evaluate', params, cdpSessionId);
     if (typeof result?.objectId !== 'string' || result.objectId.length === 0) {
       throw new BrowserPilotError('internal_error', 'Chrome returned an invalid Document identity');
     }
@@ -1666,7 +1731,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       const { node } = await this.transport.send('DOM.describeNode', {
         objectId: result.objectId,
         depth: 0,
-      }, session.sessionId);
+      }, cdpSessionId);
       if (!Number.isSafeInteger(node?.backendNodeId) || node.backendNodeId <= 0) {
         throw new BrowserPilotError('internal_error', 'Chrome returned an invalid Document identity');
       }
@@ -1677,7 +1742,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     } finally {
       await this.transport.send('Runtime.releaseObject', {
         objectId: result.objectId,
-      }, session.sessionId).catch(() => {});
+      }, cdpSessionId).catch(() => {});
     }
   }
 
@@ -1693,7 +1758,11 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (session.activeFrame?.executionContextId !== undefined) {
       params.contextId = session.activeFrame.executionContextId;
     }
-    const { result } = await this.transport.send('Runtime.evaluate', params, session.sessionId);
+    const { result } = await this.transport.send(
+      'Runtime.evaluate',
+      params,
+      this.activeCdpSessionId(session),
+    );
     if (typeof result?.value !== 'string' || result.value.length === 0 || result.value.length > 16_384) {
       throw new BrowserPilotError('internal_error', 'Chrome returned an invalid document URL');
     }
@@ -1725,7 +1794,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private installDialogHandlers(): void {
     this.transport.on?.('Page.javascriptDialogOpening', (params: any, sessionId?: string) => {
       if (!sessionId) return;
-      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+      const session = this.targetSessionForCdpSession(sessionId);
       const type = params?.type as DialogType | undefined;
       if (!session || !type || !DIALOG_TYPES.has(type)) return;
       const existingId = this.pendingDialogBySession.get(sessionId);
@@ -1795,8 +1864,8 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
     this.transport.on?.('Page.frameDetached', (params: any, sessionId?: string) => {
       if (!sessionId || typeof params?.frameId !== 'string') return;
-      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
-      const frames = this.framesBySession.get(sessionId);
+      const session = this.targetSessionForCdpSession(sessionId);
+      const frames = session ? this.framesBySession.get(session.sessionId) : undefined;
       const detached = frames?.byCdpId.get(params.frameId);
       if (!session || !frames || !detached) return;
       frames.byCdpId.delete(detached.cdpFrameId);
@@ -1806,52 +1875,141 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
     this.transport.on?.('Page.frameNavigated', (params: any, sessionId?: string) => {
       if (!sessionId || typeof params?.frame?.id !== 'string') return;
-      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+      const session = this.targetSessionForCdpSession(sessionId);
       if (session) this.watchdogs.resetTarget(session.leaseId, session.targetId);
-      if (session?.activeFrame && session.activeFrame.cdpFrameId === params.frame.id) {
+      if (
+        session?.activeFrame &&
+        session.activeFrame.sessionId === sessionId &&
+        session.activeFrame.cdpFrameId === params.frame.id
+      ) {
         session.activeFrame.executionContextId = undefined;
       }
     });
     this.transport.on?.('Runtime.executionContextDestroyed', (params: any, sessionId?: string) => {
       if (!sessionId || !Number.isSafeInteger(params?.executionContextId)) return;
-      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
-      if (session?.activeFrame && session.activeFrame.executionContextId === params.executionContextId) {
+      const session = this.targetSessionForCdpSession(sessionId);
+      if (
+        session?.activeFrame &&
+        session.activeFrame.sessionId === sessionId &&
+        session.activeFrame.executionContextId === params.executionContextId
+      ) {
         session.activeFrame.executionContextId = undefined;
       }
     });
     this.transport.on?.('Runtime.executionContextsCleared', (_params: any, sessionId?: string) => {
       if (!sessionId) return;
-      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
-      if (session?.activeFrame) session.activeFrame.executionContextId = undefined;
+      const session = this.targetSessionForCdpSession(sessionId);
+      if (session?.activeFrame?.sessionId === sessionId) session.activeFrame.executionContextId = undefined;
     });
   }
 
   private async refreshActiveFrameContext(session: TargetSession): Promise<void> {
     if (!session.activeFrame) return;
-    const service = new FrameService(this.transport, session.sessionId);
-    const frames = this.syncFrames(session, await service.list());
     const activeFrameId = session.activeFrame.id;
+    const frames = this.syncFrames(session, await this.listSessionFrames(session));
     const frame = frames.byId.get(activeFrameId);
     if (!frame) {
-      this.selectedFrameDetached(session, activeFrameId);
+      if (session.activeFrame?.id === activeFrameId) this.selectedFrameDetached(session, activeFrameId);
       throw invalidArgument('Active frame is no longer attached; switch frames and observe again', 'frameId');
     }
     if (frame.id === frames.topFrameId) {
-      session.activeFrame = { id: frame.id, cdpFrameId: frame.cdpFrameId };
+      session.activeFrame = {
+        id: frame.id,
+        cdpFrameId: frame.cdpFrameId,
+        sessionId: frame.sessionId,
+        cdpTargetId: frame.cdpTargetId,
+      };
       return;
     }
-    if (session.activeFrame.executionContextId !== undefined) return;
+    if (
+      session.activeFrame.sessionId === frame.sessionId &&
+      session.activeFrame.executionContextId !== undefined
+    ) return;
+    const service = new FrameService(this.transport, frame.sessionId);
     const selection = await service.selectById(frame.cdpFrameId);
     session.activeFrame = {
       id: frame.id,
       cdpFrameId: frame.cdpFrameId,
+      sessionId: frame.sessionId,
+      cdpTargetId: frame.cdpTargetId,
       ...(selection.executionContextId !== undefined
         ? { executionContextId: selection.executionContextId }
         : {}),
     };
   }
 
-  private syncFrames(session: TargetSession, pageFrames: PageFrame[]): SessionFrames {
+  private async listSessionFrames(session: TargetSession): Promise<SessionPageFrame[]> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const traversal = await new FrameService(this.transport, session.sessionId).listAcrossTargets({
+          rootTargetId: session.cdpTargetId,
+          attachment: targetId => this.childFrameSessions.get(session.sessionId)?.get(targetId),
+          attach: target => this.attachFrameTarget(session, target),
+        });
+        await this.pruneFrameTargetSessions(session, new Set(traversal.attachedTargetIds));
+        return traversal.frames;
+      } catch (error) {
+        const children = [...(this.childFrameSessions.get(session.sessionId)?.values() ?? [])];
+        if (attempt > 0 || children.length === 0) throw error;
+        await Promise.all(children.map(child => (
+          this.detachFrameTargetSession(session, child, false, 'frame_detached')
+        )));
+      }
+    }
+    throw new BrowserPilotError('internal_error', 'Unable to rebuild the frame tree');
+  }
+
+  private async attachFrameTarget(
+    session: TargetSession,
+    target: FrameTargetInfo,
+  ): Promise<ChildFrameSession> {
+    const attached = await this.transport.send('Target.attachToTarget', {
+      targetId: target.targetId,
+      flatten: true,
+    });
+    if (typeof attached?.sessionId !== 'string' || !attached.sessionId) {
+      throw new BrowserPilotError('internal_error', 'Chrome returned an invalid iframe CDP session');
+    }
+    const child: ChildFrameSession = {
+      targetId: target.targetId,
+      sessionId: attached.sessionId,
+      parentFrameId: target.parentFrameId,
+    };
+    let children = this.childFrameSessions.get(session.sessionId);
+    if (!children) {
+      children = new Map();
+      this.childFrameSessions.set(session.sessionId, children);
+    }
+    children.set(target.targetId, child);
+    this.ownedSessionIds.add(child.sessionId);
+    try {
+      await this.network.attachSession({ ...session, sessionId: child.sessionId });
+      await this.transport.send('Page.enable', {}, child.sessionId);
+      await this.transport.send('Runtime.enable', {}, child.sessionId);
+      return child;
+    } catch (error) {
+      children.delete(target.targetId);
+      if (children.size === 0) this.childFrameSessions.delete(session.sessionId);
+      this.network.detachSession(child.sessionId);
+      this.ownedSessionIds.delete(child.sessionId);
+      await this.transport.send('Target.detachFromTarget', { sessionId: child.sessionId }).catch(() => {});
+      throw error;
+    }
+  }
+
+  private async pruneFrameTargetSessions(
+    session: TargetSession,
+    liveTargetIds: ReadonlySet<string>,
+  ): Promise<void> {
+    const children = this.childFrameSessions.get(session.sessionId);
+    if (!children) return;
+    const stale = [...children.values()].filter(child => !liveTargetIds.has(child.targetId));
+    await Promise.all(stale.map(child => (
+      this.detachFrameTargetSession(session, child, true, 'frame_detached')
+    )));
+  }
+
+  private syncFrames(session: TargetSession, pageFrames: SessionPageFrame[]): SessionFrames {
     if (pageFrames.length === 0) {
       throw new BrowserPilotError('internal_error', 'Chrome returned an empty frame tree');
     }
@@ -1860,6 +2018,8 @@ export class BrowserToolService implements BrowserToolExecutor {
       const top: BrokerFrameRecord = {
         id: `frame:${randomUUID()}` as FrameId,
         cdpFrameId: pageFrames[0].id,
+        sessionId: pageFrames[0].sessionId,
+        cdpTargetId: pageFrames[0].cdpTargetId,
         ...(pageFrames[0].loaderId ? { loaderId: pageFrames[0].loaderId } : {}),
         url: pageFrames[0].url,
         name: pageFrames[0].name,
@@ -1878,6 +2038,8 @@ export class BrowserToolService implements BrowserToolExecutor {
         frame = {
           id: `frame:${randomUUID()}` as FrameId,
           cdpFrameId: pageFrame.id,
+          sessionId: pageFrame.sessionId,
+          cdpTargetId: pageFrame.cdpTargetId,
           url: pageFrame.url,
           name: pageFrame.name,
         };
@@ -1885,6 +2047,8 @@ export class BrowserToolService implements BrowserToolExecutor {
         frames.byId.set(frame.id, frame);
       }
       frame.parentCdpFrameId = pageFrame.parentId;
+      frame.sessionId = pageFrame.sessionId;
+      frame.cdpTargetId = pageFrame.cdpTargetId;
       frame.loaderId = pageFrame.loaderId;
       frame.url = pageFrame.url;
       frame.name = pageFrame.name;
@@ -1900,19 +2064,94 @@ export class BrowserToolService implements BrowserToolExecutor {
     return frames;
   }
 
+  private targetSessionForCdpSession(sessionId: string): TargetSession | undefined {
+    const root = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+    if (root) return root;
+    for (const [rootSessionId, children] of this.childFrameSessions) {
+      if (![...children.values()].some(child => child.sessionId === sessionId)) continue;
+      return [...this.sessions.values()].find(candidate => candidate.sessionId === rootSessionId);
+    }
+    return undefined;
+  }
+
+  private childFrameSessionById(sessionId: string): {
+    session: TargetSession;
+    child: ChildFrameSession;
+  } | undefined {
+    for (const [rootSessionId, children] of this.childFrameSessions) {
+      const child = [...children.values()].find(candidate => candidate.sessionId === sessionId);
+      if (!child) continue;
+      const session = [...this.sessions.values()].find(candidate => candidate.sessionId === rootSessionId);
+      if (session) return { session, child };
+    }
+    return undefined;
+  }
+
+  private async detachFrameTargetSession(
+    session: TargetSession,
+    child: ChildFrameSession,
+    requestDetach: boolean,
+    reason: ObservationInvalidationReason,
+  ): Promise<void> {
+    const children = this.childFrameSessions.get(session.sessionId);
+    if (children?.get(child.targetId) !== child) return;
+    const frames = this.framesBySession.get(session.sessionId);
+    const detachedFrameIds = new Set(
+      [...(frames?.byId.values() ?? [])]
+        .filter(frame => frame.sessionId === child.sessionId)
+        .map(frame => frame.cdpFrameId),
+    );
+    const descendants = [...children.values()].filter(candidate => (
+      candidate !== child && detachedFrameIds.has(candidate.parentFrameId)
+    ));
+    children.delete(child.targetId);
+    if (children?.size === 0) this.childFrameSessions.delete(session.sessionId);
+    this.observations.invalidateSession(child.sessionId, reason);
+    this.network.detachSession(child.sessionId);
+    this.ownedSessionIds.delete(child.sessionId);
+    this.dialogOpenSequenceBySession.delete(child.sessionId);
+    this.deleteDialogs(dialog => dialog.sessionId === child.sessionId);
+
+    if (frames) {
+      for (const frame of [...frames.byId.values()]) {
+        if (frame.sessionId !== child.sessionId) continue;
+        frames.byId.delete(frame.id);
+        frames.byCdpId.delete(frame.cdpFrameId);
+        if (session.activeFrame?.id === frame.id) this.selectedFrameDetached(session, frame.id);
+      }
+    }
+    await Promise.all(descendants.map(descendant => (
+      this.detachFrameTargetSession(session, descendant, requestDetach, reason)
+    )));
+    if (requestDetach) {
+      await this.transport.send('Target.detachFromTarget', { sessionId: child.sessionId }).catch(() => {});
+    }
+  }
+
   private retireSession(key: string, session: TargetSession): void {
     if (this.sessions.get(key) === session) this.sessions.delete(key);
     this.guidanceBySession.delete(session.sessionId);
     this.downloads?.detachSession(session.sessionId, 'session_replaced');
+    for (const child of [...(this.childFrameSessions.get(session.sessionId)?.values() ?? [])]) {
+      void this.detachFrameTargetSession(session, child, true, 'session_replaced');
+    }
     void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId })
       .finally(() => this.forgetSession(session.sessionId))
       .catch(() => {});
   }
 
   private forgetSession(sessionId: string): void {
+    const child = this.childFrameSessionById(sessionId);
+    if (child) {
+      void this.detachFrameTargetSession(child.session, child.child, false, 'frame_detached');
+      return;
+    }
     this.guidanceBySession.delete(sessionId);
     for (const [key, session] of this.sessions) {
       if (session.sessionId !== sessionId) continue;
+      for (const childSession of [...(this.childFrameSessions.get(sessionId)?.values() ?? [])]) {
+        void this.detachFrameTargetSession(session, childSession, false, 'session_replaced');
+      }
       this.watchdogs.resetTarget(session.leaseId, session.targetId);
       this.sessions.delete(key);
     }

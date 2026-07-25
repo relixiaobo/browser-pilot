@@ -37,6 +37,10 @@ class BrowserFixtureTransport {
   screenshotDimensions;
   responseBodies = new Map();
   childFrames = [];
+  frameTreesByTarget = new Map();
+  frameOwnerBackendNodeIds = new Map();
+  boxModelsByBackendNodeId = new Map();
+  buttonNamesByTarget = new Map();
   extraAxButtons = [];
   extraAxNodes = [];
   pageGuidance = {};
@@ -86,6 +90,7 @@ class BrowserFixtureTransport {
         this.loaders.delete(params.targetId);
         return { success: true };
       case 'Page.enable': return {};
+      case 'Runtime.enable': return {};
       case 'Page.createIsolatedWorld': return { executionContextId: 77 };
       case 'Network.enable': return {};
       case 'Network.getResponseBody': return this.responseBodies.get(`${sessionId}\u0000${params.requestId}`) ?? {
@@ -107,6 +112,9 @@ class BrowserFixtureTransport {
         this.loaders.set(targetId, `${this.loaders.get(targetId)}:next`);
         return { frameId: 'frame:top', loaderId: this.loaders.get(targetId) };
       case 'Page.getFrameTree':
+        if (this.frameTreesByTarget.has(targetId)) {
+          return { frameTree: structuredClone(this.frameTreesByTarget.get(targetId)) };
+        }
         return {
           frameTree: {
             frame: {
@@ -155,6 +163,7 @@ class BrowserFixtureTransport {
         return { result: { value: undefined } };
       }
       case 'Accessibility.getFullAXTree': {
+        const primaryButtonName = this.buttonNamesByTarget.get(targetId) ?? 'Submit';
         const extraNodes = this.extraAxButtons.map((name, index) => ({
           nodeId: `button-extra-${index}`,
           parentId: 'root',
@@ -192,7 +201,7 @@ class BrowserFixtureTransport {
               parentId: 'root',
               ignored: false,
               role: { value: 'button' },
-              name: { value: 'Submit' },
+              name: { value: primaryButtonName },
               properties: [],
               backendDOMNodeId: 42,
             },
@@ -203,6 +212,12 @@ class BrowserFixtureTransport {
         };
       }
       case 'DOMSnapshot.captureSnapshot': return { documents: [], strings: [] };
+      case 'DOM.getFrameOwner': return {
+        backendNodeId: this.frameOwnerBackendNodeIds.get(params.frameId),
+      };
+      case 'DOM.getBoxModel': return {
+        model: this.boxModelsByBackendNodeId.get(params.backendNodeId),
+      };
       case 'DOM.resolveNode': return { object: { objectId: `object:${params.backendNodeId}` } };
       case 'DOM.describeNode':
         if (String(params.objectId).startsWith('document:')) {
@@ -886,6 +901,10 @@ test('frame tools expose session-scoped opaque IDs and apply the selected execut
     url: 'https://frame.test/details',
     name: 'details',
   }];
+  transport.frameOwnerBackendNodeIds.set('cdp-child-frame', 500);
+  transport.boxModelsByBackendNodeId.set(500, {
+    content: [300, 150, 700, 150, 700, 450, 300, 450],
+  });
   const runtime = new MemoryBrokerRuntime({
     serviceVersion: '1.0.0',
     brokerProcessIdentity: 'broker:test',
@@ -912,9 +931,23 @@ test('frame tools expose session-scoped opaque IDs and apply the selected execut
   )).at(-1);
   assert.equal(framedEvaluation.params.contextId, 77);
 
-  const sessionId = [...transport.sessions.entries()]
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  await tool(runtime, client, 'browser.click', {
+    target: { observationId: observed.observationId, ref: 1 },
+  }, targetId);
+  const rootSessionId = [...transport.sessions.entries()]
     .find(([, cdpTargetId]) => cdpTargetId === 'user-form')[0];
-  transport.emit('Page.frameDetached', { frameId: 'cdp-child-frame' }, sessionId);
+  const pointerCalls = transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent');
+  assert.deepEqual(
+    pointerCalls.map(call => [call.params.x, call.params.y, call.sessionId]),
+    [
+      [400, 230, rootSessionId],
+      [400, 230, rootSessionId],
+      [400, 230, rootSessionId],
+    ],
+  );
+
+  transport.emit('Page.frameDetached', { frameId: 'cdp-child-frame' }, rootSessionId);
   const frameEvents = await runtime.call(client.bridge, 'events/poll', {
     workspaceId: client.workspace.id,
     cursor: client.eventCursor,
@@ -930,6 +963,87 @@ test('frame tools expose session-scoped opaque IDs and apply the selected execut
     call.method === 'Runtime.evaluate' && call.params.expression === '6 * 7'
   )).at(-1);
   assert.equal('contextId' in topEvaluation.params, false);
+});
+
+test('OOPIF frames use their own CDP session for observations, refs, and actions', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.targets.set('oopif-target', {
+    targetId: 'oopif-target',
+    type: 'iframe',
+    title: 'Cross Frame',
+    url: 'https://cross.test/frame',
+    parentId: 'frame:user-form',
+    parentFrameId: 'frame:user-form',
+  });
+  transport.frameTreesByTarget.set('oopif-target', {
+    frame: {
+      id: 'oopif-target',
+      parentId: 'frame:user-form',
+      loaderId: 'loader:oopif:1',
+      url: 'https://cross.test/frame',
+      name: 'cross',
+    },
+  });
+  transport.buttonNamesByTarget.set('oopif-target', 'Cross Frame Command');
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:oopif',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:oopif', 'com.example.agent', 'instance:oopif');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+
+  const listed = await tool(runtime, client, 'browser.frames.list', {}, targetId);
+  assert.equal(listed.frames.length, 2);
+  const oopifFrameId = listed.frames.find(frame => frame.url === 'https://cross.test/frame').frameId;
+  await tool(runtime, client, 'browser.frames.switch', { frameId: oopifFrameId }, targetId);
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(observed.url, 'https://cross.test/frame');
+  assert.deepEqual(observed.elements, [{ ref: 1, role: 'button', name: 'Cross Frame Command' }]);
+
+  const oopifSessionId = [...transport.sessions.entries()]
+    .find(([, cdpTargetId]) => cdpTargetId === 'oopif-target')[0];
+  assert.ok(transport.calls.some(call => (
+    call.method === 'DOMSnapshot.captureSnapshot' && call.sessionId === oopifSessionId
+  )));
+  await tool(runtime, client, 'browser.click', {
+    target: { observationId: observed.observationId, ref: 1 },
+  }, targetId);
+  const pointerCalls = transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent');
+  assert.deepEqual(
+    pointerCalls.map(call => [call.params.x, call.params.y, call.sessionId]),
+    [
+      [100, 80, oopifSessionId],
+      [100, 80, oopifSessionId],
+      [100, 80, oopifSessionId],
+    ],
+  );
+  assert.equal(transport.calls.some(call => call.method === 'DOM.getFrameOwner'), false);
+  assert.equal(transport.calls.some(call => (
+    call.method === 'DOM.resolveNode' && call.params.backendNodeId === 42 && call.sessionId !== oopifSessionId
+  )), false);
+
+  transport.emit('Page.javascriptDialogOpening', {
+    type: 'confirm',
+    message: 'Cross-frame confirmation',
+    url: 'https://cross.test/frame',
+  }, oopifSessionId);
+  const dialogs = await tool(runtime, client, 'browser.dialogs.list', {});
+  assert.equal(dialogs.dialogs.length, 1);
+  await tool(runtime, client, 'browser.dialogs.respond', {
+    dialogId: dialogs.dialogs[0].dialogId,
+    action: 'dismiss',
+  }, targetId);
+  assert.ok(transport.calls.some(call => (
+    call.method === 'Page.handleJavaScriptDialog' && call.sessionId === oopifSessionId
+  )));
+
+  await runtime.call(client.bridge, 'workspaces/release', { workspaceId: client.workspace.id });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(transport.calls.some(call => (
+    call.method === 'Target.detachFromTarget' && call.params.sessionId === oopifSessionId
+  )));
 });
 
 test('stalled navigation returns unknown_outcome and an inspect-before-retry event', async () => {

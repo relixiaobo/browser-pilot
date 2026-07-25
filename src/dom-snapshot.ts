@@ -200,7 +200,7 @@ export function parseDomSnapshot(raw: unknown): ParsedDomSnapshot {
       });
     }
 
-    const frameId = typeof document.frameId === 'string' ? document.frameId : '';
+    const frameId = stringAt(strings, document.frameId);
     const nodes: DomSnapshotNodeFact[] = [];
     for (let nodeIndex = 0; nodeIndex < backendNodeIds.length; nodeIndex += 1) {
       const backendNodeId = backendNodeIds[nodeIndex];

@@ -33,6 +33,7 @@ export interface ActionServiceOptions {
   refStore?: RefStore;
   observationService?: ActionObservationService;
   inputDispatcher?: InputDispatcher;
+  pointerOffset?: () => Promise<{ x: number; y: number }>;
   readbackDelayMs?: number;
   focusDelayMs?: number;
   executionContextId?: number;
@@ -531,6 +532,7 @@ export class ActionService {
   private readonly refStore: RefStore;
   private readonly observations: ActionObservationService;
   private readonly input: InputDispatcher;
+  private readonly pointerOffset: () => Promise<{ x: number; y: number }>;
   private readonly readbackDelayMs: number;
   private readonly focusDelayMs: number;
   private readonly executionContextId?: number;
@@ -551,6 +553,7 @@ export class ActionService {
       { refStore: this.refStore },
     );
     this.input = options.inputDispatcher ?? new InputDispatcher(transport, sessionId);
+    this.pointerOffset = options.pointerOffset ?? (async () => ({ x: 0, y: 0 }));
     this.readbackDelayMs = options.readbackDelayMs ?? 50;
     this.focusDelayMs = options.focusDelayMs ?? 300;
     this.executionContextId = options.executionContextId;
@@ -568,9 +571,10 @@ export class ActionService {
     try {
       let evidence: ClickVerificationEvidence;
       if (target.kind === 'coordinates') {
+        const point = await this.offsetPointerPoint(target.x, target.y);
         await this.checkpoint(run, 'pointer_dispatch');
         this.willDispatch();
-        await this.input.click(target.x, target.y, { button, clickCount });
+        await this.input.click(point.x, point.y, { button, clickCount });
         this.markDispatched(run);
         evidence = {
           action: 'click',
@@ -612,9 +616,10 @@ export class ActionService {
               context,
             });
           }
+          const point = await this.offsetPointerPoint(state.x, state.y);
           await this.checkpoint(run, 'pointer_dispatch');
           this.willDispatch();
-          await this.input.click(state.x, state.y, { button, clickCount });
+          await this.input.click(point.x, point.y, { button, clickCount });
           this.markDispatched(run);
           if (this.readbackDelayMs > 0) {
             await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
@@ -643,6 +648,14 @@ export class ActionService {
     } finally {
       await this.releaseRun(run);
     }
+  }
+
+  private async offsetPointerPoint(x: number, y: number): Promise<{ x: number; y: number }> {
+    const offset = await this.pointerOffset();
+    if (!Number.isFinite(offset?.x) || !Number.isFinite(offset?.y)) {
+      throw new BrowserPilotError('internal_error', 'Browser returned an invalid frame pointer offset');
+    }
+    return { x: x + offset.x, y: y + offset.y };
   }
 
   async press(key: string, observationLimit = 50): Promise<PressActionResult> {

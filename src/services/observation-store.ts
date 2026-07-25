@@ -190,10 +190,13 @@ export class MemoryObservationStore {
     }
   }
 
-  invalidateSession(sessionId: string): void {
+  invalidateSession(
+    sessionId: string,
+    reason: ObservationInvalidationReason = 'session_replaced',
+  ): void {
     for (const record of this.records.values()) {
       if (record.sessionId === sessionId && !record.invalidatedBy) {
-        this.invalidateRecord(record, 'session_replaced');
+        this.invalidateRecord(record, reason);
       }
     }
   }

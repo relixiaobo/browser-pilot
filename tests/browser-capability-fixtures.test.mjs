@@ -15,6 +15,7 @@ let primaryServer;
 let secondaryServer;
 let primaryOrigin;
 let secondaryOrigin;
+let nestedCdpRequestId = 1;
 
 function listen(handler) {
   return new Promise((resolve, reject) => {
@@ -47,6 +48,34 @@ function closeServer(server) {
 
 function axValue(node, key) {
   return node[key]?.value;
+}
+
+function sendToTargetSession(client, sessionId, method, params = {}) {
+  const id = nestedCdpRequestId++;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      client.off('Target.receivedMessageFromTarget', onMessage);
+      reject(new Error(`Timed out waiting for ${method}`));
+    }, 5_000);
+    const onMessage = event => {
+      if (event.sessionId !== sessionId) return;
+      const message = JSON.parse(event.message);
+      if (message.id !== id) return;
+      clearTimeout(timer);
+      client.off('Target.receivedMessageFromTarget', onMessage);
+      if (message.error) reject(new Error(message.error.message));
+      else resolve(message.result ?? {});
+    };
+    client.on('Target.receivedMessageFromTarget', onMessage);
+    client.send('Target.sendMessageToTarget', {
+      sessionId,
+      message: JSON.stringify({ id, method, params }),
+    }).catch(error => {
+      clearTimeout(timer);
+      client.off('Target.receivedMessageFromTarget', onMessage);
+      reject(error);
+    });
+  });
 }
 
 function observeWithCdp(client, targetId) {
@@ -199,9 +228,43 @@ test('same-origin frames and forced cross-origin OOPIFs are independently observ
     assert.notEqual(new URL(crossFrame.url()).origin, primaryOrigin);
     assert.equal(await crossFrame.getByRole('button').innerText(), 'Cross Frame Command');
     const targets = await browserCdp.send('Target.getTargets');
-    assert.ok(targets.targetInfos.some(target => (
+    const oopif = targets.targetInfos.find(target => (
       target.type === 'iframe' && target.url.startsWith(secondaryOrigin)
-    )), 'Expected the isolated cross-origin frame to have its own CDP target');
+    ));
+    assert.ok(oopif, 'Expected the isolated cross-origin frame to have its own CDP target');
+    assert.ok(oopif.parentFrameId || oopif.parentId);
+
+    const attached = await browserCdp.send('Target.attachToTarget', {
+      targetId: oopif.targetId,
+      flatten: false,
+    });
+    try {
+      const frameTree = await sendToTargetSession(
+        browserCdp,
+        attached.sessionId,
+        'Page.getFrameTree',
+      );
+      assert.equal(frameTree.frameTree.frame.id, oopif.targetId);
+      const axTree = await sendToTargetSession(
+        browserCdp,
+        attached.sessionId,
+        'Accessibility.getFullAXTree',
+      );
+      assert.ok(axTree.nodes.some(node => (
+        axValue(node, 'role') === 'button' && axValue(node, 'name') === 'Cross Frame Command'
+      )));
+      const domSnapshot = await sendToTargetSession(
+        browserCdp,
+        attached.sessionId,
+        'DOMSnapshot.captureSnapshot',
+        { computedStyles: ['display', 'visibility', 'opacity', 'pointer-events'] },
+      );
+      assert.ok(domSnapshot.documents.some(document => (
+        domSnapshot.strings[document.frameId] === oopif.targetId
+      )));
+    } finally {
+      await browserCdp.send('Target.detachFromTarget', { sessionId: attached.sessionId });
+    }
   } finally {
     await page.close();
   }

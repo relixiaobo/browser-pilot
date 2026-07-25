@@ -99,9 +99,18 @@ Preserve Browser Pilot advantages:
     are excluded. Unit and isolated system-Chrome fixtures cover AX-only,
     DOM-only, hidden/disabled controls, Shadow DOM, contenteditable, and
     controlled-input readback without changing Observation v1 fields.
-- [ ] **B1.3** Preserve Shadow DOM traversal and add session-aware frame/OOPIF
+- [x] **B1.3** Preserve Shadow DOM traversal and add session-aware frame/OOPIF
   traversal with deterministic ordering.
   - Covers: AC-8.
+  - Complete: frame discovery now recursively joins same-process frame trees
+    with descendant OOPIF targets in stable parent-first order while excluding
+    iframe targets owned by other tabs. Observations, refs, actions, reads,
+    evaluation, uploads, captures, dialogs, network handling, continuity, and
+    invalidation use the selected frame's actual CDP session. Same-process
+    pointer coordinates are translated through the live frame-owner content
+    box; OOPIF roots remain frame-local. Child sessions are detached and their
+    state invalidated on navigation, detach, Lease release, reconnect, and
+    target teardown.
 - [x] **B1.4** Add explicit element/page/text limits and truncation reasons;
   keep output lean enough for Agent context.
   - Covers: BR-16, NFR-1.

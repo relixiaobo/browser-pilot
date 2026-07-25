@@ -112,6 +112,21 @@ test('ActionService dispatches a coordinate click and observes the result', asyn
   assert.equal(transport.calls[1].params.clickCount, 2);
 });
 
+test('ActionService applies the selected frame offset to pointer coordinates', async () => {
+  const transport = new FakeTransport();
+  const service = new ActionService(transport, 'session-offset', 'target-offset', {
+    pointerOffset: async () => ({ x: 300, y: 150 }),
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  await service.click({ kind: 'coordinates', x: 10, y: 20 });
+
+  assert.deepEqual(
+    transport.calls.map(call => [call.params.x, call.params.y]),
+    [[310, 170], [310, 170], [310, 170]],
+  );
+});
+
 test('ActionService resolves a ref, clicks its current coordinates, and releases it', async () => {
   const refs = new MemoryRefStore();
   refs.save('target-4', [{ backendNodeId: 99, role: 'link', name: 'Details' }]);
@@ -973,6 +988,102 @@ test('FrameService lists nested frames and creates a selected context', async ()
     frame: { id: 'child', parentId: 'top', url: 'https://frame.test', name: 'details' },
     executionContextId: 77,
   });
+});
+
+test('FrameService recursively merges only OOPIF targets descended from the root frame', async () => {
+  const transport = new FakeTransport((method, _params, sessionId) => {
+    if (method === 'Page.getFrameTree' && sessionId === 'session-root') {
+      return {
+        frameTree: {
+          frame: { id: 'top', url: 'https://app.test', name: '' },
+          childFrames: [{ frame: { id: 'same', url: 'https://app.test/same', name: 'same' } }],
+        },
+      };
+    }
+    if (method === 'Page.getFrameTree' && sessionId === 'session-oopif') {
+      return {
+        frameTree: {
+          frame: {
+            id: 'oopif-target',
+            parentId: 'top',
+            url: 'https://cross.test/frame',
+            name: 'cross',
+          },
+          childFrames: [{
+            frame: {
+              id: 'oopif-same-child',
+              url: 'https://cross.test/inner',
+              name: 'inner',
+            },
+          }],
+        },
+      };
+    }
+    if (method === 'Page.getFrameTree' && sessionId === 'session-nested') {
+      return {
+        frameTree: {
+          frame: {
+            id: 'nested-oopif',
+            parentId: 'oopif-same-child',
+            url: 'https://nested.test/frame',
+            name: 'nested',
+          },
+        },
+      };
+    }
+    if (method === 'Target.getTargets') {
+      return {
+        targetInfos: [
+          {
+            targetId: 'nested-oopif',
+            type: 'iframe',
+            url: 'https://nested.test/frame',
+            parentFrameId: 'oopif-same-child',
+          },
+          {
+            targetId: 'unrelated-oopif',
+            type: 'iframe',
+            url: 'https://unrelated.test/',
+            parentFrameId: 'another-tab',
+          },
+          {
+            targetId: 'oopif-target',
+            type: 'iframe',
+            url: 'https://cross.test/frame',
+            parentFrameId: 'top',
+          },
+        ],
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  });
+  const attached = [];
+  const service = new FrameService(transport, 'session-root');
+  const result = await service.listAcrossTargets({
+    rootTargetId: 'root-target',
+    attachment: () => undefined,
+    async attach(target) {
+      attached.push(target.targetId);
+      return {
+        targetId: target.targetId,
+        sessionId: target.targetId === 'nested-oopif' ? 'session-nested' : 'session-oopif',
+      };
+    },
+  });
+
+  assert.deepEqual(attached, ['oopif-target', 'nested-oopif']);
+  assert.deepEqual(result.attachedTargetIds, ['oopif-target', 'nested-oopif']);
+  assert.deepEqual(result.frames.map(frame => ({
+    id: frame.id,
+    parentId: frame.parentId,
+    sessionId: frame.sessionId,
+  })), [
+    { id: 'top', parentId: undefined, sessionId: 'session-root' },
+    { id: 'same', parentId: 'top', sessionId: 'session-root' },
+    { id: 'oopif-target', parentId: 'top', sessionId: 'session-oopif' },
+    { id: 'oopif-same-child', parentId: 'oopif-target', sessionId: 'session-oopif' },
+    { id: 'nested-oopif', parentId: 'oopif-same-child', sessionId: 'session-nested' },
+  ]);
 });
 
 test('CookieService scopes cookie reads to the current URL or explicit domain', async () => {
