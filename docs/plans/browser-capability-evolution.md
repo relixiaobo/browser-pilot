@@ -324,9 +324,16 @@ Preserve Browser Pilot advantages:
     tests verify typed obstruction failure, loader replacement cancellation,
     and merged navigation, Document, dialog, and popup evidence for click and
     press actions.
-- [ ] **B6.3** Add real-site canaries that report drift without making release
+- [x] **B6.3** Add real-site canaries that report drift without making release
   tests depend on third-party availability.
   - Covers: FR-8.
+  - Complete: the existing real-site suite now preflights its third-party host,
+    marks transport availability failures explicitly, and treats missing
+    expected controls as drift instead of silently skipping behavior. An
+    Agent-neutral reporter writes a bounded versioned JSON report that
+    distinguishes `healthy`, `drift`, `unavailable`, and runner `error` states.
+    `npm run test:canary` is non-blocking, strict mode remains available, and
+    the deterministic release command does not execute the canary project.
 - [x] **B6.4** Compare metrics against B0.4 and reject changes that increase
   unsafe false-positive interactions or unbounded output.
   - Covers: NFR-1, AC-8.

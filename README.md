@@ -299,20 +299,22 @@ bp net clear                           # clear captured request log
 
 ## Testing
 
-121 tests across 4 Playwright projects, adapted from Playwright/Puppeteer test fixtures and real-world sites:
+Local release tests are deterministic. Real-site checks run separately as
+non-blocking canaries so a third-party outage cannot fail the release gate:
 
 ```bash
-npm test                    # core + compat + network (105 tests, ~2min)
-npm run test:integration    # real-site tests against the-internet.herokuapp.com
-npm run test:all            # all 121 tests
+npm test                         # unit + local core, compat, and network gates
+npm run test:capabilities        # isolated-Chrome quantitative capability gate
+npm run test:canary              # real-site drift report; non-blocking
+npm run test:canary:strict       # fail on drift or unavailability
+npm run test:integration         # compatibility alias for strict canaries
+npm run test:all                 # release gates plus non-blocking canaries
 ```
 
-| Project | Tests | Coverage |
-|---------|-------|----------|
-| **core** | 41 | lifecycle, nav, click, type, press, eval, screenshot, pdf, cookies, frames, upload, auth, tabs, dialogs |
-| **compat** | 46 | contenteditable (5 variants), Shadow DOM (3 levels), input types, scrollable, overlay, select |
-| **network** | 19 | request monitoring, block, mock, headers, rule management |
-| **integration** | 15 | checkboxes, dropdown, key presses, dynamic controls, Shadow DOM, nested frames, TinyMCE, large DOM |
+The canary report is written to
+`test-results/real-site-canary/report.json`. It distinguishes semantic drift,
+third-party unavailability, and runner errors. Set
+`BROWSER_PILOT_CANARY_REPORT` to use another report path.
 
 ## Requirements
 

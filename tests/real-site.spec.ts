@@ -1,9 +1,47 @@
 // Real-world site integration tests against the-internet.herokuapp.com
 // These test bp against actual web pages with real CSS, JS frameworks, and server responses.
 import { test, expect } from '@playwright/test';
-import { open, click, type as bpType, evaluate, snapshot, press, findRef, findRefByRole, bp } from './bp.js';
+import {
+  open as bpOpen,
+  click,
+  type as bpType,
+  evaluate,
+  snapshot,
+  press,
+  findRef,
+  findRefByRole,
+  bp,
+  type BpResult,
+} from './bp.js';
 
 const SITE = 'https://the-internet.herokuapp.com';
+let availabilityError: string | undefined;
+
+test.beforeAll(async ({ request }) => {
+  try {
+    const response = await request.get(SITE, { timeout: 10_000 });
+    if (!response.ok()) availabilityError = `HTTP ${response.status()}`;
+  } catch (error) {
+    availabilityError = error instanceof Error ? error.message : String(error);
+  }
+});
+
+test.beforeEach(() => {
+  test.skip(
+    availabilityError !== undefined,
+    `third_party_unavailable: ${(availabilityError ?? '').slice(0, 300)}`,
+  );
+});
+
+function open(url: string): BpResult {
+  const result = bpOpen(url);
+  if (!result.ok && /net::ERR_|timed?\s*out|timeout|ENOTFOUND|ECONNRESET|ECONNREFUSED/i.test(
+    result.error ?? '',
+  )) {
+    test.skip(true, `third_party_unavailable: ${(result.error ?? 'navigation failed').slice(0, 300)}`);
+  }
+  return result;
+}
 
 // ── Checkboxes ──────────────────────────────────────
 
@@ -49,9 +87,8 @@ test.describe('key presses', () => {
     const snap = open(`${SITE}/key_presses`);
     expect(snap.ok).toBe(true);
     const ref = findRefByRole(snap, 'textbox');
-    if (ref) {
-      click(ref); // focus
-    }
+    expect(ref).toBeDefined();
+    click(ref!); // focus
     press('a');
     const result = evaluate('document.getElementById("result").textContent');
     expect(result.value).toContain('A');
@@ -93,10 +130,9 @@ test.describe('dynamic controls', () => {
     // Now the input should be enabled and typeable
     const snap2 = snapshot();
     const inputRef = snap2.elements?.find(e => e.role === 'textbox');
-    if (inputRef) {
-      const result = bpType(inputRef.ref, 'enabled text');
-      expect(result.ok).toBe(true);
-    }
+    expect(inputRef).toBeDefined();
+    const result = bpType(inputRef!.ref, 'enabled text');
+    expect(result.ok).toBe(true);
   });
 });
 
@@ -131,10 +167,9 @@ test.describe('inputs', () => {
     const snap = open(`${SITE}/inputs`);
     expect(snap.ok).toBe(true);
     const ref = findRefByRole(snap, 'spinbutton') || findRefByRole(snap, 'textbox');
-    if (ref) {
-      const result = bpType(ref, '42');
-      expect(result.ok).toBe(true);
-    }
+    expect(ref).toBeDefined();
+    const result = bpType(ref!, '42');
+    expect(result.ok).toBe(true);
   });
 });
 
@@ -186,14 +221,11 @@ test.describe('TinyMCE editor', () => {
     open(`${SITE}/tinymce`);
     const frames = bp('frame');
     // Switch to TinyMCE iframe (usually index 1)
-    if (frames.frames && frames.frames.length > 1) {
-      bp('frame 1');
-      // Try typing via eval in the iframe context
-      const result = evaluate('document.body.contentEditable');
-      console.log('TinyMCE body contentEditable:', result.value);
-      // Switch back
-      bp('frame 0');
-    }
+    expect(frames.frames?.length).toBeGreaterThan(1);
+    expect(bp('frame 1').ok).toBe(true);
+    const result = evaluate('document.body.contentEditable');
+    expect(result.value).toBe('true');
+    expect(bp('frame 0').ok).toBe(true);
   });
 });
 

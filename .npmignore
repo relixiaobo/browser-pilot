@@ -10,6 +10,8 @@ plugin/
 .claude-plugin/
 playwright.config.ts
 test-results/
+scripts/real-site-canary-policy.mjs
+scripts/run-real-site-canaries.mjs
 dist/protocol.js
 dist/services.js
 dist/capture-service.js
