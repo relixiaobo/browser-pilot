@@ -7,6 +7,7 @@ export const ERROR_CODES = [
   'browser_not_found',
   'browser_not_authorized',
   'browser_disconnected',
+  'broker_in_use',
   'workspace_not_found',
   'lease_expired',
   'target_not_owned',

@@ -618,6 +618,27 @@ export class MemoryBrokerRuntime {
     };
   }
 
+  lifecycleSummary(): {
+    embeddedConnections: number;
+    oneShotConnections: number;
+    activeWorkspaces: number;
+    activeLeases: number;
+  } {
+    let embeddedConnections = 0;
+    let oneShotConnections = 0;
+    for (const connection of this.connectionsByBridge.values()) {
+      if (connection.value.launchMode === 'embedded') embeddedConnections += 1;
+      else oneShotConnections += 1;
+    }
+    const stats = this.stats();
+    return {
+      embeddedConnections,
+      oneShotConnections,
+      activeWorkspaces: stats.activeWorkspaces,
+      activeLeases: stats.activeLeases,
+    };
+  }
+
   private initialize(bridgeSessionId: string, value: unknown): JsonValue {
     const params = validateInitializeParams(value);
     const existing = this.connectionsByBridge.get(bridgeSessionId);

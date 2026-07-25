@@ -279,8 +279,9 @@ On Unix it uses an owner-only domain socket and falls back to a deterministic
 short owner-specific runtime directory when the state path would exceed
 portable socket limits. On Windows it uses a named pipe derived from the OS
 user identity. Persistent state defaults to the Browser Pilot user directory
-(`%LOCALAPPDATA%\\Browser Pilot` on Windows); an explicit
-`BROWSER_PILOT_HOME` is an installation-level isolation override on Unix.
+(`%LOCALAPPDATA%\\Browser Pilot` on Windows). An explicit absolute
+`BROWSER_PILOT_HOME` is the cross-platform installation-level isolation
+override. It is never selected automatically.
 
 State/runtime directories are mode `0700` and regular metadata files are mode
 `0600` where POSIX modes apply. The socket is mode `0600`; Windows relies on the
@@ -288,10 +289,15 @@ creating user's process-token DACL for its local named pipe. Symlinked final
 directories and metadata, foreign ownership, unexpected file types, and
 overly-permissive metadata are rejected.
 
-The versioned locator records only PID, endpoint/transport, start time, and
-Broker process identity. An atomic owner-recorded startup lock surrounds
-discovery and daemon launch. Every contender health-checks before and after the
-lock; therefore exactly one process starts the Broker and all others reuse it.
+The versioned locator records PID, endpoint/transport, start time, Broker
+process identity, service version, executable installation identity/path, and
+the supported protocol range. A separate owner-only `broker-versions.json`
+keeps only the current and immediately previous executable metadata for
+diagnosis and explicit rollback; it does not preserve an executable or any
+browser, target, Workspace, Lease, ref, credential, rule, or command state. An
+atomic owner-recorded startup lock surrounds discovery and daemon launch. Every
+contender health-checks before and after the lock; therefore exactly one
+process starts the Broker and all others reuse it.
 A lock whose owner is dead can be reclaimed; a live owner is never displaced
 merely because startup is slow. A dead locator/socket is removed without
 signaling its recorded PID. If the PID is alive but the endpoint is
@@ -313,9 +319,12 @@ Lease with a maximum five-minute TTL. Normal process exit leaves that transient
 daemon-memory state available to the next command; expiry invalidates refs and
 releases target control. No target, frame, session, Observation, ref, auth, or
 network mapping is persisted to disk. `bp disconnect` explicitly releases the
-Workspace, closes only its managed targets, and stops the daemon. JavaScript
-dialogs remain pending and are handled explicitly with `bp dialogs` and
-`bp dialog`; Workspace isolation prevents access to other clients' dialogs.
+compatibility Workspace and closes only its managed targets. It stops the
+daemon only when called by the matching executable installation and no live
+embedded Connection remains; otherwise it returns `protocol_incompatible` or
+`broker_in_use` without replacing or terminating the Broker. JavaScript dialogs
+remain pending and are handled explicitly with `bp dialogs` and `bp dialog`;
+Workspace isolation prevents access to other clients' dialogs.
 
 ### FLOW-2 Product-embedded use
 
@@ -783,6 +792,7 @@ and optional structured remediation. Required codes include:
 ```text
 protocol_incompatible   not_initialized       capability_denied
 browser_not_found       browser_not_authorized browser_disconnected
+broker_in_use
 workspace_not_found     lease_expired          target_not_owned
 target_busy             stale_ref               command_cancelled
 action_not_verified     command_expired         unknown_outcome
@@ -797,6 +807,16 @@ fields, never on message text.
 ## Compatibility and Versioning
 
 - Protocol versions are independent of executable versions.
+- Compatible embedded clients reuse the running Broker even when their host or
+  bundled executable versions differ. The one-shot compatibility CLI requires
+  the running Broker's exact executable version because its external JSON
+  contract is versioned separately from the bridge protocol.
+- An incompatible executable never replaces a live Broker. A host either uses
+  a compatible executable or deliberately supplies a distinct
+  `BROWSER_PILOT_HOME`; Browser Pilot never creates a hidden version namespace.
+- Broker shutdown is compare-and-stop: it requires the current Broker process
+  identity and matching executable installation identity, and refuses while
+  any embedded Connection remains live.
 - Additive tool and field changes use capability negotiation and schema
   evolution. Breaking semantics require a protocol-major change.
 - Unknown response fields are ignored; unknown request fields are rejected only

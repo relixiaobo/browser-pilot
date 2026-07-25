@@ -49,6 +49,18 @@ function daemonRequest(socketPath, path, body) {
   });
 }
 
+async function stopDaemon(socketPath, bridgeSessionId) {
+  if (bridgeSessionId) {
+    await daemonRequest(socketPath, '/broker/disconnect', { bridgeSessionId }).catch(() => {});
+  }
+  const health = await daemonRequest(socketPath, '/health');
+  return daemonRequest(socketPath, '/shutdown', {
+    brokerProcessIdentity: health.brokerProcessIdentity,
+    executableVersion: health.executableVersion,
+    executableIdentity: health.executableIdentity,
+  });
+}
+
 async function waitFor(operation, predicate, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
@@ -84,7 +96,7 @@ test('daemon rediscovers the selected profile and publishes one restored generat
   });
   child.stderr.on('data', bytes => stderr.push(bytes.toString()));
   t.after(async () => {
-    await daemonRequest(socketPath, '/shutdown', {}).catch(() => {});
+    await stopDaemon(socketPath, 'bridge:daemon-test').catch(() => {});
     if (child.exitCode === null) child.kill('SIGTERM');
     await first?.close().catch(() => {});
     await second?.close().catch(() => {});
@@ -172,7 +184,7 @@ test('daemon initializes with structured remediation before remote debugging is 
   child.stderr.on('data', bytes => stderr.push(bytes.toString()));
   let cdp;
   t.after(async () => {
-    await daemonRequest(socketPath, '/shutdown', {}).catch(() => {});
+    await stopDaemon(socketPath, 'bridge:discovery-test').catch(() => {});
     if (child.exitCode === null) child.kill('SIGTERM');
     await cdp?.close().catch(() => {});
     await rm(root, { recursive: true, force: true });

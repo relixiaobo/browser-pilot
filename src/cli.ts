@@ -295,7 +295,7 @@ program.command('bridge')
 // ─── disconnect ─────────────────────────────────────
 
 program.command('disconnect')
-  .description('Close pilot window and stop daemon')
+  .description('Release CLI browser state and stop an otherwise unused daemon')
   .action(action(async () => {
     await shutdownCompatibility(PKG_VERSION);
     emit({ ok: true }, '\u2713 Disconnected');

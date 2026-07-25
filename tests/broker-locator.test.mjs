@@ -4,10 +4,13 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   acquireBrokerStartupLock,
+  createExecutableMetadataSync,
   ensureBrokerDirectoriesSync,
   readBrokerLocatorSync,
+  readBrokerVersionHistorySync,
   removeBrokerLocatorSync,
   resolveBrowserPilotPaths,
+  updateBrokerVersionHistorySync,
   writeBrokerLocatorSync,
 } from '../dist/services.js';
 
@@ -51,6 +54,17 @@ test('platform path resolution uses a private short Unix endpoint and a per-user
   assert.equal(windows.stateDir, 'C:\\Users\\Alice\\AppData\\Local\\Browser Pilot');
   assert.match(windows.endpoint, /^\\\\\.\\pipe\\browser-pilot-[a-f0-9]{16}$/);
   assert.equal(windows.transport, 'windows_pipe');
+
+  const isolatedWindows = resolveBrowserPilotPaths({
+    platform: 'win32', homeDir: 'C:\\Users\\Alice', tempDir: 'C:\\Temp',
+    env: { BROWSER_PILOT_HOME: 'D:\\Agents\\browser-pilot-v2' }, username: 'Alice',
+  });
+  assert.equal(isolatedWindows.stateDir, 'D:\\Agents\\browser-pilot-v2');
+  assert.notEqual(isolatedWindows.endpoint, windows.endpoint);
+  assert.throws(() => resolveBrowserPilotPaths({
+    platform: 'win32', homeDir: 'C:\\Users\\Alice',
+    env: { BROWSER_PILOT_HOME: 'relative\\broker' }, username: 'Alice',
+  }), /must be absolute/);
 });
 
 test('Broker locator files are private, validated, and removed only by their owner', async t => {
@@ -87,6 +101,36 @@ test('Broker locator files are private, validated, and removed only by their own
   assert.deepEqual(readBrokerLocatorSync(paths), locator);
   removeBrokerLocatorSync(locator.brokerProcessIdentity, paths);
   assert.equal(readBrokerLocatorSync(paths), undefined);
+});
+
+test('Broker version history is private, bounded, and excludes transient browser state', async t => {
+  const root = await mkdtemp('/tmp/bp-version-history-');
+  const paths = testPaths(root);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const first = createExecutableMetadataSync('1.0.0', process.execPath);
+  const second = createExecutableMetadataSync('2.0.0', process.execPath);
+  const third = createExecutableMetadataSync('3.0.0', process.execPath);
+  updateBrokerVersionHistorySync(first, 100, paths);
+  updateBrokerVersionHistorySync(second, 200, paths);
+  const history = updateBrokerVersionHistorySync(third, 300, paths);
+
+  assert.equal(history.current.version, '3.0.0');
+  assert.equal(history.previous.version, '2.0.0');
+  assert.equal(history.current.firstSeenAt, 300);
+  assert.equal(Object.keys(history).sort().join(','), 'current,previous,schemaVersion');
+  assert.equal(/target|workspace|lease|ref|cookie|browserId/.test(JSON.stringify(history)), false);
+  assert.deepEqual(readBrokerVersionHistorySync(paths), history);
+  if (process.platform !== 'win32') {
+    assert.equal((await lstat(paths.versionHistoryFile)).mode & 0o777, 0o600);
+    const original = await readFile(paths.versionHistoryFile, 'utf8');
+    await chmod(paths.versionHistoryFile, 0o644);
+    assert.throws(
+      () => updateBrokerVersionHistorySync(first, 400, paths),
+      /invalid or inaccessible/,
+    );
+    assert.equal(await readFile(paths.versionHistoryFile, 'utf8'), original);
+  }
 });
 
 test('startup lock serializes contenders and safely reclaims a dead owner', async t => {

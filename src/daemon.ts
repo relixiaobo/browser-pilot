@@ -2,16 +2,23 @@ import http from 'node:http';
 import { unlinkSync, chmodSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { BROKER_TRANSPORT, STATE_DIR, SOCKET_PATH } from './paths.js';
 import {
   ensureBrokerDirectoriesSync,
+  createExecutableMetadataSync,
   removeBrokerLocatorSync,
+  updateBrokerVersionHistorySync,
   writeBrokerLocatorSync,
 } from './broker-locator.js';
 import { CDPClient } from './cdp.js';
-import { asBrowserPilotError, invalidArgument } from './protocol/errors.js';
-import type { BrowserInstanceId, JsonValue } from './protocol/model.js';
+import { BrowserPilotError, asBrowserPilotError, invalidArgument } from './protocol/errors.js';
+import {
+  SUPPORTED_PROTOCOL_VERSIONS,
+  type BrowserInstanceId,
+  type JsonValue,
+} from './protocol/model.js';
 import {
   DEFAULT_PROTOCOL_LIMITS,
   MemoryBrokerRuntime,
@@ -30,6 +37,11 @@ import { ManagedTargetJanitorClient } from './managed-target-janitor-client.js';
 
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
+const CLI_EXECUTABLE_PATH = fileURLToPath(new URL('cli.js', import.meta.url));
+const PROTOCOL_RANGE = {
+  min: { ...SUPPORTED_PROTOCOL_VERSIONS[0] },
+  max: { ...SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1] },
+};
 
 const initialWsUrl = process.argv[2] || undefined;
 const browserProduct = process.argv[3] || '';
@@ -165,8 +177,10 @@ async function main() {
   let activeSessionId: string | undefined;
   let currentWsUrl = initialWsUrl;
   let terminating = false;
+  let shutdownReserved = false;
   const startedAt = Date.now();
   const brokerProcessIdentity = `${process.pid}:${startedAt}`;
+  const executable = createExecutableMetadataSync(PKG_VERSION, CLI_EXECUTABLE_PATH);
   const discoveredBrowsers = await discoverBrowserCandidates();
   const knownSelection = discoveredBrowsers.find(browser => (
     browser.dataDir === browserProfile &&
@@ -601,11 +615,18 @@ async function main() {
     try {
       // ── Core endpoints ────────────────────────────
       if (req.method === 'GET' && url.pathname === '/health') {
+        const clients = broker.lifecycleSummary();
         res.writeHead(200); res.end(JSON.stringify({
           ok: true,
           wsUrl: currentWsUrl,
           brokerProtocol: 1,
           brokerProcessIdentity,
+          serviceVersion: PKG_VERSION,
+          executableVersion: executable.version,
+          executableIdentity: executable.identity,
+          protocol: PROTOCOL_RANGE,
+          clients,
+          shuttingDown: shutdownReserved || terminating,
           ...(selectedBrowser ? { browser: {
             id: browserBinding.candidate.id,
             product: selectedProduct,
@@ -618,6 +639,11 @@ async function main() {
       }
       if (req.method === 'POST' && url.pathname === '/broker/rpc') {
         try {
+          if (shutdownReserved || terminating) {
+            throw new BrowserPilotError('browser_disconnected', 'Browser Pilot Broker is shutting down', {
+              retryable: true,
+            });
+          }
           const body: unknown = JSON.parse(await readBody(req, DEFAULT_PROTOCOL_LIMITS.maxMessageBytes + 4096));
           if (!isRecord(body)) throw invalidArgument('Broker RPC body must be an object', 'body');
           if (typeof body.bridgeSessionId !== 'string') {
@@ -715,20 +741,69 @@ async function main() {
         res.writeHead(200); res.end(JSON.stringify({ targets: discoveredTargets })); return;
       }
       if (req.method === 'POST' && url.pathname === '/shutdown') {
-        res.writeHead(200); res.end(JSON.stringify({ ok: true }));
-        setTimeout(async () => {
-          clearInterval(leaseSweepTimer);
-          clearInterval(discoveryRefreshTimer);
-          broker.close();
-          server.close();
-          await janitor.close();
-          await Promise.all(additionalControllers.map(controller => controller.janitor.close()));
-          for (const controller of additionalControllers) controller.cdp.close();
-          cdp.close();
-          await artifactStore.clear().catch(() => {});
-          cleanup(brokerProcessIdentity);
-          process.exit(0);
-        }, 50); return;
+        try {
+          if (shutdownReserved || terminating) {
+            throw new BrowserPilotError('browser_disconnected', 'Browser Pilot Broker is already shutting down', {
+              retryable: true,
+            });
+          }
+          const body: unknown = JSON.parse(await readBody(req, 4096));
+          if (
+            !isRecord(body) ||
+            typeof body.brokerProcessIdentity !== 'string' ||
+            typeof body.executableVersion !== 'string' ||
+            typeof body.executableIdentity !== 'string'
+          ) {
+            throw invalidArgument(
+              'brokerProcessIdentity, executableVersion, and executableIdentity are required',
+            );
+          }
+          if (body.brokerProcessIdentity !== brokerProcessIdentity) {
+            throw new BrowserPilotError('protocol_incompatible', 'The Broker changed before shutdown could be authorized', {
+              retryable: true,
+              context: { brokerProcessIdentity },
+              remediation: {
+                code: 'refresh_broker_identity',
+                message: 'Reconnect with the same executable and retry against the current Broker.',
+                actionRequired: true,
+              },
+            });
+          }
+          if (
+            body.executableVersion !== executable.version ||
+            body.executableIdentity !== executable.identity
+          ) {
+            throw new BrowserPilotError('protocol_incompatible', 'Only the executable installation that started this Broker may stop it', {
+              context: {
+                brokerExecutableVersion: executable.version,
+                requesterExecutableVersion: body.executableVersion,
+              },
+              remediation: {
+                code: 'use_matching_executable_or_isolate',
+                message: 'Use the matching Browser Pilot installation, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
+                actionRequired: true,
+              },
+            });
+          }
+          const clients = broker.lifecycleSummary();
+          if (clients.embeddedConnections > 0) {
+            throw new BrowserPilotError('broker_in_use', 'Browser Pilot has live embedded clients and cannot be stopped', {
+              retryable: true,
+              context: clients,
+              remediation: {
+                code: 'close_embedded_clients',
+                message: 'Close the Agent products using Browser Pilot, then retry disconnect.',
+                actionRequired: true,
+              },
+            });
+          }
+          shutdownReserved = true;
+          res.writeHead(200); res.end(JSON.stringify({ ok: true }));
+          setTimeout(() => { void terminate(); }, 50);
+        } catch (error) {
+          res.writeHead(200); res.end(JSON.stringify({ error: asBrowserPilotError(error).toJsonRpcError() }));
+        }
+        return;
       }
 
       // ── Network: enable ───────────────────────────
@@ -838,13 +913,22 @@ async function main() {
     if (BROKER_TRANSPORT === 'unix_socket') {
       try { chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
     }
+    const history = updateBrokerVersionHistorySync(executable, startedAt);
     writeBrokerLocatorSync({
-      schemaVersion: 1,
+      schemaVersion: 2,
       pid: process.pid,
       endpoint: SOCKET_PATH,
       transport: BROKER_TRANSPORT,
       startedAt,
       brokerProcessIdentity,
+      serviceVersion: PKG_VERSION,
+      executable,
+      protocol: PROTOCOL_RANGE,
+      ...(history.previous ? { previousExecutable: {
+        version: history.previous.version,
+        path: history.previous.path,
+        identity: history.previous.identity,
+      } } : {}),
     });
   });
   const terminate = async () => {

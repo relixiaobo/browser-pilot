@@ -132,8 +132,11 @@ browser-observable no-progress actions are also implemented. An internal
 managed-target janitor owns Broker-created tabs through a separate CDP
 connection and closes only those tabs and their managed popup descendants if
 the daemon exits or crashes; it does not persist target IDs or close user tabs.
-Embedded products should still use the documented release gate while Broker
-lifecycle/versioning and browser-capability conformance work remain in progress.
+Compatible Agent products reuse one per-user Broker through protocol
+negotiation. Protected shutdown cannot terminate live embedded clients, and an
+incompatible product must explicitly select a separate `BROWSER_PILOT_HOME`.
+Browser-capability conformance and distributable packaging work remain in
+progress.
 
 ## Commands
 
@@ -195,7 +198,7 @@ listed tab.
 | Command | Description |
 |---------|-------------|
 | `bp connect` | Connect to Chrome, create pilot window |
-| `bp disconnect` | Close pilot window, stop daemon |
+| `bp disconnect` | Close the CLI Pilot window; stop the daemon when no embedded client is live |
 | `bp tabs` | List all controllable tabs in the current browser |
 | `bp tab <n>` | Switch to any listed managed or user tab |
 | `bp close` | Close the current tab (`--all` closes Pilot-managed tabs only) |

@@ -12,6 +12,7 @@ export interface BrowserPilotPaths {
   locatorFile: string;
   pidFile: string;
   startupLockFile: string;
+  versionHistoryFile: string;
   artifactDir: string;
   downloadDir: string;
 }
@@ -37,11 +38,14 @@ export function resolveBrowserPilotPaths(options: BrowserPilotPathOptions = {}):
   const env = options.env ?? process.env;
   if (os === 'win32') {
     const localAppData = env.LOCALAPPDATA ?? win32.join(home, 'AppData', 'Local');
-    const stateDir = win32.join(localAppData, 'Browser Pilot');
+    const stateDir = env.BROWSER_PILOT_HOME ?? win32.join(localAppData, 'Browser Pilot');
+    if (!win32.isAbsolute(stateDir)) throw new Error('BROWSER_PILOT_HOME must be absolute');
     const username = options.username ?? (() => {
       try { return userInfo().username; } catch { return home; }
     })();
-    const identity = identityDigest(`${username.toLowerCase()}\0${home.toLowerCase()}`);
+    const identity = identityDigest(
+      `${username.toLowerCase()}\0${home.toLowerCase()}\0${stateDir.toLowerCase()}`,
+    );
     return {
       stateDir,
       runtimeDir: stateDir,
@@ -50,12 +54,14 @@ export function resolveBrowserPilotPaths(options: BrowserPilotPathOptions = {}):
       locatorFile: win32.join(stateDir, 'broker-locator.json'),
       pidFile: win32.join(stateDir, 'daemon.pid'),
       startupLockFile: win32.join(stateDir, 'startup.lock'),
+      versionHistoryFile: win32.join(stateDir, 'broker-versions.json'),
       artifactDir: win32.join(stateDir, 'artifacts'),
       downloadDir: win32.join(stateDir, 'downloads'),
     };
   }
 
   const stateDir = env.BROWSER_PILOT_HOME ?? join(home, '.browser-pilot');
+  if (!isAbsolute(stateDir)) throw new Error('BROWSER_PILOT_HOME must be absolute');
   const defaultEndpoint = join(stateDir, 'daemon.sock');
   const uid = options.uid ?? process.getuid?.() ?? 0;
   const useShortRuntimePath = Buffer.byteLength(defaultEndpoint) > MAX_PORTABLE_UNIX_SOCKET_BYTES;
@@ -79,6 +85,7 @@ export function resolveBrowserPilotPaths(options: BrowserPilotPathOptions = {}):
     locatorFile: join(stateDir, 'broker-locator.json'),
     pidFile: join(stateDir, 'daemon.pid'),
     startupLockFile: join(stateDir, 'startup.lock'),
+    versionHistoryFile: join(stateDir, 'broker-versions.json'),
     artifactDir: join(stateDir, 'artifacts'),
     downloadDir: join(stateDir, 'downloads'),
   };

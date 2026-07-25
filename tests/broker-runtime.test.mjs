@@ -103,6 +103,12 @@ test('Broker initializes one connection and filters the canonical tool manifest'
     activeWorkspaces: 0,
     activeLeases: 0,
   });
+  assert.deepEqual(runtime.lifecycleSummary(), {
+    embeddedConnections: 1,
+    oneShotConnections: 0,
+    activeWorkspaces: 0,
+    activeLeases: 0,
+  });
 });
 
 test('browser discovery is Broker-owned, filterable, and available without a browser connection', async () => {

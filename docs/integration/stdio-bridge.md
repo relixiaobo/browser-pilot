@@ -39,6 +39,15 @@ the next launch. A live process with an unresponsive endpoint is not killed or
 replaced; launch returns `browser_disconnected` with
 `restart_unresponsive_broker` remediation.
 
+The default is one shared Broker per OS user. Protocol-compatible clients reuse
+it even when different Agent products or product versions launched their
+bridges. If a product must run an incompatible Browser Pilot version, set an
+absolute, product-owned `BROWSER_PILOT_HOME` before process launch. This creates
+a deliberately isolated locator, endpoint, Artifact store, and version history
+on macOS, Linux, and Windows. Do not silently choose an isolated home after
+`protocol_incompatible`: shared-browser coordination and cleanup semantics must
+remain an explicit host decision.
+
 ## Framing
 
 The transport is JSON-RPC 2.0 over newline-delimited UTF-8 JSON:
@@ -95,9 +104,11 @@ and waits for that switch before parsing a pipelined next line. Oversized
 responses become `result_too_large`; oversized best-effort notifications are
 dropped and remain recoverable through `events/poll`.
 
-An already-running daemon from an older executable is not replaced while it
-may have live clients. Initialization returns `protocol_incompatible` with a
-restart remediation instead.
+An already-running incompatible daemon is never replaced. Initialization
+returns `protocol_incompatible` with remediation to use a compatible executable
+or a deliberate `BROWSER_PILOT_HOME` isolation boundary. Executable versions
+and protocol versions are independent; successful protocol negotiation is what
+allows embedded clients from different products or releases to share a Broker.
 
 ## Lifecycle Methods
 
@@ -445,6 +456,21 @@ janitor perform bounded cleanup without consulting disk or grouping tabs by
 browser window. This internal process is not a public SDK, tool, or transport;
 embedded clients still launch only `browser-pilot bridge --stdio`.
 
+The stdio `shutdown` method exits only that bridge and disconnects its Broker
+Connection. The human `bp disconnect` command separately releases the one-shot
+compatibility Workspace and requests daemon shutdown. The daemon accepts that
+request only when the Broker process identity and executable installation
+identity still match and `embeddedConnections` is zero. Otherwise it returns
+`protocol_incompatible` or retryable `broker_in_use`; it never evicts an Agent
+product to complete an upgrade.
+
+Owner-only `broker-locator.json` contains current executable and protocol
+metadata. Owner-only `broker-versions.json` retains at most current and previous
+executable installation metadata. Neither file contains browser selection,
+tabs, target IDs, Workspaces, Leases, refs, Artifacts, credentials, network
+rules, or command results. Rollback selection and preservation of old binaries
+belong to the installer or embedding product, not to the Broker.
+
 The current lifecycle runtime uses finite limits for live Connections,
 per-Principal Workspaces, per-Connection Leases, and retained terminal records.
 It does not persist target mappings, refs, cookies, credentials, network bodies,
@@ -458,10 +484,9 @@ advertised. The current bridge supports discovery, connect, open, all-tab
 inventory, observe/read, core actions, scoped frames, explicit dialogs, cookies,
 auth, network observation/rules, eval, screenshot, PDF, protected upload import,
 scoped download Artifacts, Artifact access, command recovery, browser reconnect,
-and event replay.
-An embedding adapter should not ship against this work-in-progress bridge until
-the remaining Broker lifecycle/versioning work and conformance coverage meet
-the release gate.
+and event replay. Broker startup serialization, executable/protocol negotiation,
+live-client shutdown protection, bounded version history, and deliberate
+version isolation are covered by process tests.
 
 Before shipping an adapter, run the black-box
 [stdio conformance suite](stdio-conformance.md) against the exact bundled launch

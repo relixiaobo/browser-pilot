@@ -72,6 +72,7 @@ test('compatibility client rejects a daemon from another executable version', as
   });
   await assert.rejects(
     () => CompatibilityBrokerClient.create(runtimeTransport(runtime), '0.1.6'),
-    error => error.code === 'protocol_incompatible' && error.remediation?.code === 'restart_browser_pilot',
+    error => error.code === 'protocol_incompatible' &&
+      error.remediation?.code === 'use_matching_executable_or_isolate',
   );
 });

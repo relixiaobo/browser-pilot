@@ -260,9 +260,20 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     single-winner operation. Dead owners are reclaimed without killing a PID;
     live but unresponsive Brokers fail with explicit remediation and are never
     silently replaced.
-- [ ] **A6.3** Implement executable/protocol negotiation, live-client upgrade
+- [x] **A6.3** Implement executable/protocol negotiation, live-client upgrade
   protection, rollback metadata, and deliberate version isolation.
   - Covers: AC-7, NFR-2.
+  - Complete: compatible embedded clients negotiate and reuse the running
+    Broker, while the one-shot compatibility CLI retains exact executable
+    version semantics. Health and schema-2 locator metadata expose the current
+    service, executable installation identity, protocol range, and bounded live
+    client counts. Protected compare-and-stop shutdown rejects mismatched
+    executables and returns `broker_in_use` while embedded Connections remain.
+    Owner-only version history retains only current/previous executable metadata
+    and no transient browser state. `BROWSER_PILOT_HOME` provides explicit
+    cross-platform isolation; incompatibility never triggers hidden replacement
+    or isolation. Process tests cover reuse, incompatibility, shutdown
+    protection, crash recovery, and two intentional Broker namespaces.
 - [ ] **A6.4** Preserve global npm, local npm/npx, and product-bundled launch
   modes. Add signed/self-contained artifacts where each platform permits.
   - Covers: FR-1, FR-2.

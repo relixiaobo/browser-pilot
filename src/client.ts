@@ -6,6 +6,19 @@ import type { Transport } from './transport.js';
 import { browserPilotErrorFromJsonRpc } from './protocol/errors.js';
 import type { JsonRpcErrorObject, JsonRpcNotification, JsonValue } from './protocol/model.js';
 
+export interface BrokerClientSummary {
+  embeddedConnections: number;
+  oneShotConnections: number;
+  activeWorkspaces: number;
+  activeLeases: number;
+}
+
+export interface DaemonShutdownExpectation {
+  brokerProcessIdentity: string;
+  executableVersion: string;
+  executableIdentity: string;
+}
+
 export function isDaemonRunning(): boolean {
   const locator = readBrokerLocatorSync();
   if (locator) return processIsAlive(locator.pid);
@@ -81,6 +94,15 @@ export class DaemonClient implements Transport {
     wsUrl?: string;
     brokerProtocol?: number;
     brokerProcessIdentity?: string;
+    serviceVersion?: string;
+    executableVersion?: string;
+    executableIdentity?: string;
+    shuttingDown?: boolean;
+    protocol?: {
+      min: { major: number; minor: number };
+      max: { major: number; minor: number };
+    };
+    clients?: BrokerClientSummary;
     browser?: {
       id?: string;
       product: string;
@@ -93,8 +115,8 @@ export class DaemonClient implements Transport {
     try { return await this.request('/health'); } catch { return { ok: false }; }
   }
 
-  async shutdown(): Promise<void> {
-    try { await this.request('/shutdown', {}); } catch { /* may already be gone */ }
+  async shutdown(expectation: DaemonShutdownExpectation): Promise<void> {
+    await this.request('/shutdown', expectation);
   }
 
   async brokerCall(

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -8,12 +8,13 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  realpathSync,
   statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
   BROWSER_PILOT_PATHS,
   type BrowserPilotPaths,
@@ -24,13 +25,48 @@ const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_METADATA_BYTES = 16 * 1024;
 
-export interface BrokerLocator {
-  schemaVersion: 1;
+interface BrokerLocatorBase {
   pid: number;
   endpoint: string;
   transport: BrokerTransportKind;
   startedAt: number;
   brokerProcessIdentity: string;
+}
+
+export interface LegacyBrokerLocator extends BrokerLocatorBase {
+  schemaVersion: 1;
+}
+
+export interface CurrentBrokerLocator extends BrokerLocatorBase {
+  schemaVersion: 2;
+  serviceVersion: string;
+  executable: BrokerExecutableMetadata;
+  protocol: BrokerProtocolRange;
+  previousExecutable?: BrokerExecutableMetadata;
+}
+
+export type BrokerLocator = LegacyBrokerLocator | CurrentBrokerLocator;
+
+export interface BrokerExecutableMetadata {
+  version: string;
+  path: string;
+  identity: string;
+}
+
+export interface BrokerProtocolRange {
+  min: { major: number; minor: number };
+  max: { major: number; minor: number };
+}
+
+export interface BrokerVersionHistoryEntry extends BrokerExecutableMetadata {
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
+export interface BrokerVersionHistory {
+  schemaVersion: 1;
+  current: BrokerVersionHistoryEntry;
+  previous?: BrokerVersionHistoryEntry;
 }
 
 interface StartupLockRecord {
@@ -95,16 +131,122 @@ function isSafePid(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
+function isSafeTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function validExecutable(value: unknown): value is BrokerExecutableMetadata {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.version === 'string' && record.version.length > 0 && record.version.length <= 128 &&
+    typeof record.path === 'string' && record.path.length > 0 && record.path.length <= 4096 &&
+    isAbsolute(record.path) &&
+    typeof record.identity === 'string' && /^executable:[a-f0-9]{64}$/.test(record.identity);
+}
+
+function validProtocolVersion(value: unknown): value is { major: number; minor: number } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Number.isSafeInteger(record.major) && Number(record.major) >= 0 &&
+    Number.isSafeInteger(record.minor) && Number(record.minor) >= 0;
+}
+
+function validProtocolRange(value: unknown): value is BrokerProtocolRange {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (!validProtocolVersion(record.min) || !validProtocolVersion(record.max)) return false;
+  return record.min.major < record.max.major ||
+    (record.min.major === record.max.major && record.min.minor <= record.max.minor);
+}
+
 function validLocator(value: unknown, paths: BrowserPilotPaths): value is BrokerLocator {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return record.schemaVersion === 1 &&
+  const common = (record.schemaVersion === 1 || record.schemaVersion === 2) &&
     isSafePid(record.pid) &&
     record.endpoint === paths.endpoint &&
     record.transport === paths.transport &&
-    typeof record.startedAt === 'number' && Number.isSafeInteger(record.startedAt) && record.startedAt > 0 &&
+    isSafeTimestamp(record.startedAt) &&
     typeof record.brokerProcessIdentity === 'string' && record.brokerProcessIdentity.length > 0 &&
     record.brokerProcessIdentity.length <= 256;
+  if (!common) return false;
+  if (record.schemaVersion === 1) return true;
+  return typeof record.serviceVersion === 'string' && record.serviceVersion.length > 0 &&
+    record.serviceVersion.length <= 128 && validExecutable(record.executable) &&
+    validProtocolRange(record.protocol) &&
+    (record.previousExecutable === undefined || validExecutable(record.previousExecutable));
+}
+
+function validVersionHistoryEntry(value: unknown): value is BrokerVersionHistoryEntry {
+  if (!validExecutable(value)) return false;
+  const record = value as unknown as Record<string, unknown>;
+  return isSafeTimestamp(record.firstSeenAt) && isSafeTimestamp(record.lastSeenAt) &&
+    Number(record.firstSeenAt) <= Number(record.lastSeenAt);
+}
+
+function validVersionHistory(value: unknown): value is BrokerVersionHistory {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.schemaVersion === 1 && validVersionHistoryEntry(record.current) &&
+    (record.previous === undefined || validVersionHistoryEntry(record.previous));
+}
+
+export function createExecutableMetadataSync(version: string, path: string): BrokerExecutableMetadata {
+  if (!version || version.length > 128) throw new Error('Invalid Browser Pilot executable version');
+  const resolvedPath = realpathSync(path);
+  const digest = createHash('sha256').update(`${resolvedPath}\0${version}\0`);
+  for (const artifactPath of [
+    resolvedPath,
+    join(dirname(resolvedPath), 'daemon.js'),
+    join(dirname(resolvedPath), 'managed-target-janitor.js'),
+  ]) {
+    if (!existsSync(artifactPath)) continue;
+    digest.update(basename(artifactPath)).update('\0').update(readFileSync(artifactPath)).update('\0');
+  }
+  return {
+    version,
+    path: resolvedPath,
+    identity: `executable:${digest.digest('hex')}`,
+  };
+}
+
+export function readBrokerVersionHistorySync(
+  paths: BrowserPilotPaths = BROWSER_PILOT_PATHS,
+): BrokerVersionHistory | undefined {
+  if (!existsSync(paths.versionHistoryFile)) return undefined;
+  try {
+    const value = parseJsonFile(paths.versionHistoryFile);
+    return validVersionHistory(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function updateBrokerVersionHistorySync(
+  executable: BrokerExecutableMetadata,
+  now = Date.now(),
+  paths: BrowserPilotPaths = BROWSER_PILOT_PATHS,
+): BrokerVersionHistory {
+  if (!validExecutable(executable) || !isSafeTimestamp(now)) {
+    throw new Error('Invalid Broker executable history update');
+  }
+  const existing = readBrokerVersionHistorySync(paths);
+  if (existsSync(paths.versionHistoryFile) && !existing) {
+    throw new Error('Existing Broker version history is invalid or inaccessible');
+  }
+  const current: BrokerVersionHistoryEntry = existing?.current.identity === executable.identity
+    ? { ...existing.current, ...executable, lastSeenAt: Math.max(existing.current.lastSeenAt, now) }
+    : { ...executable, firstSeenAt: now, lastSeenAt: now };
+  const previous = existing?.current.identity === executable.identity
+    ? existing.previous
+    : existing?.current;
+  const history: BrokerVersionHistory = {
+    schemaVersion: 1,
+    current,
+    ...(previous ? { previous: { ...previous } } : {}),
+  };
+  atomicWriteJson(paths.versionHistoryFile, history);
+  return history;
 }
 
 export function readBrokerLocatorSync(paths: BrowserPilotPaths = BROWSER_PILOT_PATHS): BrokerLocator | undefined {

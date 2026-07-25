@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DaemonClient, isDaemonRunning } from './client.js';
 import { connectDaemon } from './session.js';
+import { createExecutableMetadataSync } from './broker-locator.js';
 import { BrowserPilotError } from './protocol/errors.js';
 import {
   CAPABILITIES,
@@ -83,8 +84,8 @@ export class CompatibilityBrokerClient {
     if (initialized.executableVersion !== executableVersion) {
       throw new BrowserPilotError('protocol_incompatible', 'Running Browser Pilot daemon is from another executable version', {
         remediation: {
-          code: 'restart_browser_pilot',
-          message: 'Run bp disconnect, then retry the command.',
+          code: 'use_matching_executable_or_isolate',
+          message: 'Use the matching Browser Pilot installation, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
           actionRequired: true,
         },
       });
@@ -217,8 +218,8 @@ async function validateDaemon(client: DaemonClient): Promise<void> {
   if (health.brokerProtocol !== 1) {
     throw new BrowserPilotError('protocol_incompatible', 'Running Browser Pilot daemon is from an older executable', {
       remediation: {
-        code: 'restart_browser_pilot',
-        message: 'Run bp disconnect, then retry the command.',
+        code: 'use_compatible_executable_or_isolate',
+        message: 'Use a compatible Browser Pilot executable, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
         actionRequired: true,
       },
     });
@@ -260,12 +261,49 @@ export async function withCompatibilityTarget<T>(
 export async function shutdownCompatibility(executableVersion: string): Promise<void> {
   if (!isDaemonRunning()) return;
   const daemon = new DaemonClient();
+  await validateDaemon(daemon);
+  const health = await daemon.healthInfo();
+  if (
+    !health.ok ||
+    !health.brokerProcessIdentity ||
+    !health.executableVersion ||
+    !health.executableIdentity
+  ) {
+    throw new BrowserPilotError('protocol_incompatible', 'Running Browser Pilot Broker does not support protected shutdown', {
+      remediation: {
+        code: 'use_matching_executable_or_isolate',
+        message: 'Use the Browser Pilot installation that started the Broker, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
+        actionRequired: true,
+      },
+    });
+  }
+  const requester = createExecutableMetadataSync(executableVersion, process.argv[1]);
+  if (
+    requester.version !== health.executableVersion ||
+    requester.identity !== health.executableIdentity
+  ) {
+    throw new BrowserPilotError('protocol_incompatible', 'This Browser Pilot installation does not own the running Broker', {
+      context: {
+        brokerExecutableVersion: health.executableVersion,
+        requesterExecutableVersion: requester.version,
+      },
+      remediation: {
+        code: 'use_matching_executable_or_isolate',
+        message: 'Use the matching Browser Pilot installation, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
+        actionRequired: true,
+      },
+    });
+  }
   try {
-    await validateDaemon(daemon);
     const client = await CompatibilityBrokerClient.create(daemon, executableVersion);
     await client.releaseWorkspace();
-  } catch {
-    // Shutdown is still authoritative if the compatibility Workspace is absent or stale.
+  } catch (error) {
+    // With no ready browser there cannot be a compatibility Workspace to release.
+    if (!(error instanceof BrowserPilotError) || error.code !== 'browser_not_found') throw error;
   }
-  await daemon.shutdown();
+  await daemon.shutdown({
+    brokerProcessIdentity: health.brokerProcessIdentity,
+    executableVersion: requester.version,
+    executableIdentity: requester.identity,
+  });
 }

@@ -123,13 +123,22 @@ export function negotiateProtocol(
 
   if (!selected) {
     const serviceVersions = supported.map(version => `${version.major}.${version.minor}`).join(', ');
-    throw protocolIncompatible(
+    throw new BrowserPilotError(
+      'protocol_incompatible',
       `No compatible protocol version. Client requested ${clientRange.min.major}.${clientRange.min.minor}` +
       `-${clientRange.max.major}.${clientRange.max.minor}; service supports ${serviceVersions || 'none'}.`,
       {
-        clientMin: `${clientRange.min.major}.${clientRange.min.minor}`,
-        clientMax: `${clientRange.max.major}.${clientRange.max.minor}`,
-        serviceVersions,
+        context: {
+          clientMin: `${clientRange.min.major}.${clientRange.min.minor}`,
+          clientMax: `${clientRange.max.major}.${clientRange.max.minor}`,
+          serviceVersions,
+        },
+        remediation: {
+          code: 'use_compatible_executable_or_isolate',
+          message: 'Use a compatible Browser Pilot executable, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
+          actionRequired: true,
+        },
+        rpcCode: -32001,
       },
     );
   }

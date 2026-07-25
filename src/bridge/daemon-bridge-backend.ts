@@ -41,8 +41,8 @@ export class DaemonBridgeBackend implements StdioBridgeBackend {
     if (health.brokerProtocol !== 1) {
       throw new BrowserPilotError('protocol_incompatible', 'Running Browser Pilot daemon is from an older executable', {
         remediation: {
-          code: 'restart_browser_pilot',
-          message: 'Run bp disconnect, then start the bridge again.',
+          code: 'use_compatible_executable_or_isolate',
+          message: 'Use a compatible Browser Pilot executable, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
           actionRequired: true,
         },
       });
