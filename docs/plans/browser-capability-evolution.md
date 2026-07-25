@@ -221,9 +221,17 @@ Preserve Browser Pilot advantages:
   - Covers: BR-20, AC-6.
   - Complete: large machine captures return a Chrome-scaled preview by default
     and an optional original with an explicit `previewOf` relationship.
-- [ ] **B5.4** Update the universal skill with decision guidance grounded in
+- [x] **B5.4** Update the universal skill with decision guidance grounded in
   actual tool errors and state, not framework-specific prompts.
   - Covers: FR-1, FR-8.
+  - Complete: the Agent-neutral skill now separates direct one-shot CLI use
+    from embedded stdio integration, starts from current tab/page state, uses
+    fresh refs, verifies action results, and gives explicit recovery decisions
+    for structured evidence, hints, stable errors, events, reconnects, dialogs,
+    and Artifacts. Command guidance now reflects all-tab inventory, explicit
+    dialog handling, managed-only bulk cleanup, and actual local capture output.
+    It names no Agent framework in its runtime decisions and adds no adapter or
+    prompt-specific production behavior.
 
 ### B6. Reliability and regression gates
 

@@ -7,11 +7,17 @@ user-invocable: true
 Use the `bp` CLI tool to browse $ARGUMENTS.
 
 Steps:
-1. Check if bp is connected: run `bp snapshot`. If it fails, run `bp connect` first.
-2. Run `bp open "$ARGUMENTS"` to navigate to the URL.
-3. Read the snapshot output to understand the page structure.
-4. Follow up with `bp click`, `bp type`, `bp eval` as needed based on the user's goal.
+1. Check `bp tabs` first when the request may refer to a page the user already
+   opened. Select it with `bp tab <index>`.
+2. If a new URL is needed, run `bp open "$ARGUMENTS" --new` unless replacing the
+   current tab is clearly intended. Run `bp connect` only if Browser Pilot says
+   it is not connected.
+3. Use `bp snapshot` for controls and `bp read` for page content.
+4. Use fresh refs with `bp click` or `bp type`, then verify the returned state.
+   Use `bp eval` only when semantic commands cannot perform the operation.
 
 If the user provided a URL, open it directly. If they described a task (e.g., "search Google for X"), navigate to the appropriate site and complete the task.
 
-Always read the `[ref]` numbers from the snapshot before interacting with elements.
+Never reuse refs after navigation or a tab/frame change. Do not blindly retry a
+mutation after an uncertain failure. Dialogs require an explicit `bp dialogs`
+and `bp dialog ... --accept|--dismiss` decision.

@@ -1,6 +1,8 @@
 # browser-pilot plugin
 
-Agent plugin that teaches AI coding agents (Claude Code, Codex, OpenClaw, Cursor, etc.) to control your real Chrome browser via the `bp` CLI.
+Agent-neutral skill that teaches shell-capable AI agents to control eligible
+tabs in your real Chrome browser through the `bp` CLI. It also includes a
+separate decision guide for products embedding `browser-pilot bridge --stdio`.
 
 ## Install browser-pilot-cli first
 
@@ -55,10 +57,13 @@ After installation, your AI agent learns to use `bp` commands via bash:
 - `bp click <ref>` — click elements by reference number
 - `bp type <ref> "text"` — fill form fields
 - `bp eval <js>` — run JavaScript
-- `bp screenshot` — capture the page
+- `bp screenshot <file>` — capture the page to a local file
 - `bp net` — monitor network requests
 
-The agent uses your real browser with your existing login sessions — no separate browser needed.
+The agent uses your real browser with your existing login sessions. `bp tabs`
+includes Browser Pilot managed tabs and eligible user-opened tabs; no extension
+or separate browser profile is required. Dialogs remain pending until the Agent
+explicitly accepts or dismisses them.
 
 ## Slash commands
 

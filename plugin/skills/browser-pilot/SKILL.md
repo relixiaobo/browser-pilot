@@ -1,272 +1,196 @@
 ---
 name: browser-pilot
 description: >
-  Control a real Chrome browser via the `bp` CLI tool. Use when the user needs to
-  browse websites, interact with web pages, fill forms, scrape content, test UIs,
-  monitor network requests, or take screenshots. The browser keeps the user's real
-  login sessions, cookies, and extensions — no separate browser instance needed.
-  Activate this skill whenever a task involves web browsing, web scraping, form
-  filling, UI testing, or any interaction with a website.
+  Control the user's eligible Chrome tabs through the `bp` CLI without a browser
+  extension. Use for browsing signed-in websites, reading pages, filling forms,
+  operating web apps, handling tabs or dialogs, uploading files, capturing
+  screenshots/PDFs, and inspecting network activity. Also use when integrating
+  Browser Pilot into an Agent host through `browser-pilot bridge --stdio`.
 ---
 
 # Browser Pilot
 
-Control the user's real Chrome browser via bash commands. Every action returns a
-snapshot of interactive elements with `[ref]` numbers you can use in follow-up commands.
+Use the user's real Chromium browser through the `bp` executable. Existing
+logins, cookies, and extensions remain available. Browser Pilot can list and
+control both its managed tabs and eligible tabs the user opened; it requires no
+browser extension.
 
-## Prerequisites
+## Select the Interface
 
-- Chrome remote debugging must be enabled: `chrome://inspect/#remote-debugging` toggle ON
-- Run `bp connect` once per session (user clicks "Allow" in Chrome)
-- If `bp` command is not found, install it first: `npm install -g browser-pilot-cli`
+- For an Agent with shell access completing a browser task now, use the
+  one-shot commands in this file.
+- For a product embedding long-lived browser control, read
+  [references/embedded-stdio.md](references/embedded-stdio.md). Do not drive the
+  NDJSON bridge manually for an ordinary browsing task.
+- Read [references/commands.md](references/commands.md) only when a command or
+  option is not covered here.
 
-## Core Workflow
+## Prepare
 
-```bash
-bp connect                    # connect to Chrome (once per session)
-bp open "https://example.com" # navigate — returns snapshot
-bp click 3                    # click element [3] — returns snapshot
-bp type 5 "hello" --submit    # type into [5] + Enter — returns snapshot
-bp disconnect                 # end session
-```
-
-## Decision Tree (READ THIS FIRST)
-
-For every step, pick the right command in this order:
-
-1. **Need to GO somewhere?** → `bp open <url>`
-   - **Always prefer URL parameters over UI navigation** when possible.
-     - GitHub: `bp open "https://github.com/search?q=foo&type=repositories"`
-     - Allrecipes: `bp open "https://www.allrecipes.com/search?q=lasagna"`
-     - Amazon: `bp open "https://www.amazon.com/s?k=keyword"`
-     - ArXiv: `bp open "https://arxiv.org/list/cs.CL/recent"`
-   - This skips form-filling, is faster, and more reliable.
-
-2. **Need to READ page content** (search results, articles, lists, prices)? → `bp read`
-   - The snapshot only shows interactive elements (buttons, links, inputs).
-   - Search results, article bodies, recipe details, news, product cards are NOT in the snapshot.
-   - `bp read` returns the cleaned text content of the main area.
-   - `bp read ".selector"` for a specific region.
-
-3. **Need to CLICK or TYPE on a specific control?** → `bp snapshot` then `bp click <ref>` / `bp type <ref> "text"`
-   - The previous action's response already includes a fresh snapshot. **Don't call `bp snapshot` after a click/type — you already have one.**
-
-4. **Need STRUCTURED data** (specific attribute, JSON, computed value)? → `bp eval`
-   - Last resort. Use only when read/snapshot can't get what you need.
-
-5. **Have an answer?** → Output `ANSWER: <answer on one line>` and STOP.
-   - Don't repeat ANSWER. Don't write multi-line answers — keep it on one line so the runner can capture it.
-
-## Common Patterns
+Check installation without changing the machine:
 
 ```bash
-# Search a site (preferred — direct URL)
-bp open "https://github.com/search?q=climate+visualization&type=repositories&s=stars"
-bp read --limit 5000     # see the top results
-# Pick best match → bp open "https://github.com/owner/repo"
-# bp read for details
-
-# Look up a single page
-bp open "https://dictionary.cambridge.org/dictionary/english/serendipity"
-bp read
-
-# Scrape a list
-bp open "https://news.ycombinator.com/"
-bp read --limit 8000
+command -v bp
 ```
 
-## Understanding Snapshots
-
-Every action (`open`, `click`, `type`, `keyboard`, `press`) returns a snapshot listing interactive elements:
-
-```
-[1] link "Home"
-[2] textbox "Search"              ← standard <input> or <textarea>
-[3] textbox "Editor"              ← contenteditable (rich text editors)
-[4] textbox ""                    ← unnamed input (still interactive)
-[5] combobox ""                   ← <select> dropdown
-[6] spinbutton "Quantity"         ← <input type="number">
-[7] button "Submit"
-[8] checkbox "Agree" checked
-[9] slider "Volume"               ← <input type="range">
-```
-
-Use the `[ref]` number in subsequent commands. Refs refresh after every action.
-
-**Common roles:** `textbox` (inputs, textareas, contenteditable), `combobox` (select),
-`spinbutton` (number/date/time inputs), `slider` (range), `button`, `link`, `checkbox`, `radio`, `switch`, `tab`.
-
-## Commands
-
-### Navigation & Interaction
-| Command | Description |
-|---------|-------------|
-| `bp open <url>` | Navigate to URL, returns snapshot |
-| `bp snapshot` | Refresh current page snapshot |
-| `bp click <ref>` | Click element by ref number |
-| `bp click --xy 400,300` | Click at viewport coordinates (canvas, maps) |
-| `bp click <ref> --double` | Double-click |
-| `bp click <ref> --right` | Right-click (context menu) |
-| `bp locate ".selector"` | Get element center x,y + size (for click --xy) |
-| `bp type <ref> "text"` | Type into element |
-| `bp type <ref> "text" --clear` | Clear field first, then type |
-| `bp type <ref> "text" --submit` | Type then press Enter |
-| `bp press Enter` | Press a key (Enter, Tab, Escape, etc.) |
-| `bp press Control+a` | Key combo (Control, Shift, Alt, Meta) |
-| `bp keyboard "text"` | Type via keyboard events (no ref needed) |
-| `bp keyboard "text" --click ".sel"` | Click to focus, then type |
-| `bp keyboard "text" --clear` | Select all + delete, then type |
-
-### Reading Content
-| Command | Description |
-|---------|-------------|
-| `bp read` | Get cleaned text of the page's main content area |
-| `bp read ".search-results"` | Read text from a specific selector |
-| `bp read --limit 10000` | Allow longer output (default 5000 chars) |
-
-Use `bp read` whenever you need to *see* what's on the page (search results,
-articles, product listings, news, prices, ratings). It strips nav/footer/scripts and returns
-cleaned text. **This is what you want 90% of the time** — not `bp eval`.
-
-**ANTI-PATTERN — DO NOT DO THIS:**
-```bash
-# WRONG: using eval to extract text content
-bp eval "Array.from(document.querySelectorAll('.result')).map(e => e.innerText)"
-bp eval "document.querySelector('article').textContent"
-bp eval "document.body.innerText.substring(0, 3000)"
-```
-
-**RIGHT — use bp read:**
-```bash
-bp read                            # whole page main content
-bp read ".result"                  # just the results region
-bp read "article"                  # just the article
-```
-
-`bp read` is faster, cleaner (auto-strips nav/scripts/ads), and uses fewer tokens.
-Reach for `bp eval` only when you need a *specific attribute* (href, value, dataset)
-or *computed value* — not for plain text.
-
-### JavaScript (escape hatch for anything)
-| Command | Description |
-|---------|-------------|
-| `bp eval "document.title"` | Run JS, return result |
-| `bp eval "history.back()"` | Go back |
-| `bp eval "history.forward()"` | Go forward |
-| `bp eval "location.reload()"` | Reload page |
-| `bp eval "window.scrollBy(0, 500)"` | Scroll down |
-| `bp eval "document.querySelector('h1').textContent"` | Extract text |
-
-### Capture
-| Command | Description |
-|---------|-------------|
-| `bp screenshot` | Screenshot to stdout (base64 when piped) |
-| `bp screenshot page.png` | Save screenshot to file |
-| `bp screenshot --full` | Full page screenshot |
-| `bp pdf report.pdf` | Save page as PDF |
-
-### Tabs & Frames
-| Command | Description |
-|---------|-------------|
-| `bp tabs` | List open pilot tabs |
-| `bp tab 2` | Switch to tab 2 |
-| `bp close` | Close current tab |
-| `bp frame` | List iframes |
-| `bp frame 1` | Switch to iframe 1 |
-| `bp frame 0` | Back to top frame |
-
-### Network Monitoring
-| Command | Description |
-|---------|-------------|
-| `bp net` | List recent requests |
-| `bp net --url "*api*"` | Filter by URL pattern |
-| `bp net show 3` | Full request/response details |
-| `bp net block "*tracking*"` | Block matching requests |
-| `bp net mock "*api*" --body '{"ok":true}'` | Mock a response |
-| `bp net headers "*api*" "Auth:Bearer tok"` | Override headers |
-| `bp net rules` | List active interception rules |
-| `bp net remove --all` | Remove all rules |
-
-### Other
-| Command | Description |
-|---------|-------------|
-| `bp upload photo.jpg` | Upload file (auto-finds file input) |
-| `bp auth user pass` | Set HTTP Basic Auth |
-| `bp cookies` | View cookies (includes HttpOnly) |
-| `bp cookies example.com` | Filter cookies by domain |
-
-## Output Format
-
-When piped (default for agents), output is JSON:
-```json
-{"ok":true, "title":"Example", "url":"https://example.com", "elements":[{"ref":1, "role":"link", "name":"More info"}]}
-```
-
-Errors include hints:
-```json
-{"ok":false, "error":"Ref [99] not found.", "hint":"Run 'bp snapshot' to refresh element refs."}
-```
-
-## How to Choose the Right Command
-
-**Clicking:**
-1. Element in snapshot → `bp click <ref>`
-2. Element NOT in snapshot (canvas, map, chart) → `bp locate ".sel"` then `bp click --xy x,y`
-
-**Typing:**
-1. Element in snapshot as `textbox` → `bp type <ref> "text"`
-2. Canvas editor (Google Docs, Sheets) → `bp keyboard "text" --click ".sel"`
-3. `<select>` dropdown (`combobox`) → use `bp eval` (see below)
-
-**Complex forms (Google Flights, Booking.com):**
-- Prefer URL parameters over field-by-field input when possible:
-  `bp open "https://www.amazon.com/s?k=keyword"`
-
-## Patterns
-
-### Coordinate Clicks (Canvas, Maps, Charts)
+If it is absent, install the official executable with
+`npm install -g browser-pilot-cli`. Chrome remote debugging must be enabled at
+`chrome://inspect/#remote-debugging`. Connect only when a command reports that
+Browser Pilot is not connected:
 
 ```bash
-bp locate "canvas"                  # → {"ok":true, "x":400, "y":300, "width":800, "height":600}
-bp click --xy 400,300               # click at those coordinates
-bp click --xy 400,300 --right       # right-click (context menu)
+bp connect
 ```
 
-### Canvas Editors (Google Docs, Sheets)
+Chrome may require the user to click Allow. Do not claim connection until the
+command succeeds.
+
+## Operate from Current State
+
+1. Resolve the intended tab.
+   - If the user refers to a page already open, run `bp tabs`, identify it by
+     URL/title/origin, then run `bp tab <index>`.
+   - For independent work, prefer `bp open <url> --new` so an unrelated user tab
+     is not replaced.
+   - Use plain `bp open <url>` only when navigating the currently selected tab
+     is intended.
+2. Inspect the right representation.
+   - Run `bp snapshot` for controls and numbered refs.
+   - Run `bp read [selector]` for article text, search results, lists, prices,
+     and other non-interactive content.
+   - If `bp read` reports `truncated`, increase its `--limit`. If an expected
+     control is absent from a bounded snapshot, refresh with a larger
+     `--limit`; do not infer that omitted content is absent.
+3. Act on fresh state.
+   - Prefer `bp click <ref>` and `bp type <ref> <text>` over selectors or
+     coordinates.
+   - Treat refs as belonging only to the current tab, frame, and latest page
+     state. After navigation, tab/frame changes, or a stale-ref error, obtain a
+     new snapshot and choose a new ref.
+   - Use `bp locate <selector>` plus `bp click --xy x,y` only for canvas, maps,
+     charts, or controls absent from the snapshot.
+4. Verify the result.
+   - Action commands return the resulting snapshot. Check the URL, relevant
+     control state, and page content before concluding that the user's goal
+     succeeded.
+   - A successful command proves browser dispatch completed, not that a
+     purchase, message, upload, or other business outcome succeeded.
+   - On failure after possible input/navigation, inspect current state before
+     retrying. Never blindly repeat a mutating action.
+5. Use `bp eval` only as an escape hatch for a value or operation unavailable
+   through `tabs`, `snapshot`, `read`, `click`, `type`, `press`, or `keyboard`.
+
+## Core Commands
 
 ```bash
-bp keyboard "Hello!" --click ".kix-appview-editor"   # click to focus + type
-bp press Meta+b                                       # toggle bold
-bp keyboard "bold text"
-bp press Meta+b                                       # turn off bold
+bp tabs                              # all controllable managed and user tabs
+bp tab 2                             # select tab index 2
+bp open "https://example.com" --new  # create an independent managed tab
+bp snapshot                          # interactive controls with refs
+bp read                              # readable page content
+bp read "main" --limit 10000         # bounded region text
+bp click 3                           # click current ref 3
+bp type 5 "hello" --clear            # replace a text control
+bp type 5 "query" --submit           # type, then press Enter
+bp press Escape                      # key or key combination
+bp keyboard "text" --click ".editor" # canvas-style editor fallback
 ```
 
-### Select Dropdowns
+Direct URLs are often more reliable for search/list pages when the URL contract
+is known, but do not replace a user-opened form or draft merely to save steps.
+
+## Read and Interaction Rules
+
+- Prefer `bp read` for text. Do not use `eval` to dump `document.body.innerText`
+  or rebuild text extraction.
+- Prefer returned refs for semantic controls. Empty-name textboxes and
+  contenteditable elements are still valid controls.
+- After typing, confirm the displayed/effective value when the task depends on
+  exact input. Frameworks may sanitize or reject input.
+- For an autocomplete field, type first, inspect the updated snapshot, then
+  select the intended suggestion. Do not assume typed text selected an item.
+- If a modal or dialog blocks the page, resolve it before interacting with the
+  content behind it.
+- If repeated actions produce no visible progress, stop repeating them. Refresh
+  state and change strategy.
+- Treat a main-document 403/429 as an access state. Do not loop the same
+  navigation; inspect login state, rate limits, or an alternate user-approved
+  path.
+
+## Tabs, Frames, and Dialogs
+
+`bp tabs` includes eligible user tabs as well as Browser Pilot managed tabs.
+Selecting a user tab makes it the current controlled tab. `bp close` explicitly
+closes the current tab even when it is user-owned; `bp close --all` closes only
+managed tabs. Do not close a tab unless the task requires it.
+
+Use `bp frame` to list frames, `bp frame <index>` to select one, and `bp frame 0`
+to return to the top frame. Refresh the snapshot after changing frames.
+
+JavaScript dialogs remain pending; Browser Pilot never chooses for the user:
 
 ```bash
-bp eval 'document.querySelector("select").value="opt2"; document.querySelector("select").dispatchEvent(new Event("change",{bubbles:true}))'
+bp dialogs
+bp dialog <dialog-id> --accept
+bp dialog <dialog-id> --dismiss
+bp dialog <dialog-id> --accept --prompt "text"
 ```
 
-### Waiting for Dynamic Content
+Choose accept, dismiss, or prompt text only when it follows from the user's
+request and current page state.
+
+## Files and Captures
+
+One-shot capture commands always write a local file and return its path. Supply
+an explicit absolute or task-owned path when a later step must find it:
 
 ```bash
-bp eval 'new Promise(r => setTimeout(r, 2000))'     # wait 2 seconds
-bp eval 'new Promise(r => { const i = setInterval(() => { if (document.querySelector("#result")) { clearInterval(i); r(); } }, 200); })'
+bp screenshot /absolute/path/page.png
+bp screenshot /absolute/path/full.png --full
+bp screenshot /absolute/path/chart.png --selector ".chart"
+bp pdf /absolute/path/report.pdf --landscape
 ```
 
-### Iframe Editors (TinyMCE)
+Without a filename, Browser Pilot creates a timestamped file in the current
+working directory. Confirm the returned `file` before opening or attaching it.
+
+Upload only a path the user or host has authorized:
 
 ```bash
-bp frame 1                                            # switch to editor iframe
-bp eval "document.body.innerHTML = 'content'"         # edit
-bp frame 0                                            # back to main
+bp upload /absolute/path/resume.pdf
+bp upload /absolute/path/photo.jpg --nth 2
 ```
 
-## Notes
+The upload command verifies browser selection internally and returns a fresh
+snapshot. Inspect the page for the expected selected filename or upload result.
 
-- Shadow DOM is traversed automatically — no special handling needed
-- Dialogs (alert/confirm) are auto-handled by the daemon
-- Popup windows are auto-detected — use `bp tabs` to see them
-- `--limit N` caps snapshot elements (default 50)
-- Contenteditable editors appear as `textbox` in snapshots — `bp type` works
-- If `bp type` doesn't work, try `bp keyboard` as fallback
+## Sensitive Data
+
+Page text, element values, URLs, cookies, auth data, network bodies, screenshots,
+and files may be sensitive. Do not print, persist, or repeat values that are not
+needed for the task. Prefer stdin or structured host input over command-line
+arguments for secrets when the surrounding Agent runtime supports it. Avoid
+`bp cookies`, response bodies, and broad `eval` unless the task requires them.
+
+## Recover from Direct CLI Errors
+
+- Not connected: run `bp connect`, wait for authorization, then retry the read
+  or state-discovery command.
+- Ref not found/stale: run `bp snapshot` and select a ref from that result.
+- Selector not found: inspect `bp snapshot` or `bp read`; correct the selector
+  instead of repeating it.
+- Page load timeout or uncertain action: run `bp tabs`, select the intended tab,
+  and inspect with `bp snapshot`/`bp read` before deciding whether to continue.
+- Pending dialog: run `bp dialogs` and respond explicitly.
+- Missing/closed tab or frame: list tabs/frames again and rebuild state.
+
+Never treat an English error substring as evidence that a mutation did not
+happen. Embedded hosts have stable error codes and command outcomes; see the
+stdio reference for exact recovery semantics.
+
+## Cleanup
+
+Leave user-owned tabs open unless explicitly asked to close them. For temporary
+managed work, close the current managed tab or use `bp close --all` when the
+task is complete. Run `bp disconnect` only when the user wants Browser Pilot's
+managed window and daemon stopped; it is not required after every command.

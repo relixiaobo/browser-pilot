@@ -1,178 +1,202 @@
-# Browser Pilot CLI — Complete Command Reference
+# Browser Pilot One-Shot Command Reference
 
-## Session Management
+Use these commands when an Agent has shell access and needs to operate the
+browser directly. Machine-oriented output is JSON when stdout is not a TTY;
+`bp --human ...` forces human-readable output.
+
+## Connection
 
 ### `bp connect [--browser <name>]`
-Connect to Chrome and create a pilot window. Chrome shows an "Allow" dialog on first connect.
-- `--browser brave` — connect to Brave instead of Chrome
-- Supported browsers: chrome, chromium, edge, brave
+
+Connect to an authorized local Chromium browser and create the managed Pilot
+window. Supported compatibility names are `chrome`, `chromium`, `edge`, and
+`brave`. Chrome may ask the user to click Allow.
 
 ### `bp disconnect`
-Close the pilot window and stop the daemon process.
 
-## Navigation
+Close Browser Pilot managed targets and stop the compatibility daemon. Do not
+use this as routine per-task cleanup when other clients may still need Browser
+Pilot.
+
+## Tabs and Navigation
+
+### `bp tabs`
+
+List all controllable page tabs in the connected browser. Results include
+Browser Pilot managed tabs, their eligible popups, and eligible user-opened
+tabs. Each JSON tab has `index`, `url`, `title`, `active`, and `origin`.
+
+### `bp tab <index>`
+
+Select any tab returned by the latest `bp tabs`. Tab indexes are inventory
+positions and may change; list again after tabs open or close.
 
 ### `bp open <url> [--new] [--limit <n>]`
-Navigate to a URL. Returns a snapshot of interactive elements.
-- `--new` — open in a new tab instead of navigating the current one
-- `--limit 20` — limit snapshot to 20 elements
-- URL can omit `https://`: `bp open github.com` works
+
+Navigate the current tab and return a snapshot. `--new` creates a new managed
+tab instead of replacing the selected tab. A URL without a scheme defaults to
+HTTPS.
+
+### `bp close [--all]`
+
+Without `--all`, explicitly close the current tab, including a selected user
+tab. `--all` closes Browser Pilot managed tabs only and leaves user tabs open.
+
+## Observation
 
 ### `bp snapshot [--limit <n>]`
-Get the current page's interactive elements without navigating.
+
+Return bounded interactive elements with numbered refs. The default limit is
+50. A ref belongs to the current tab/frame/page state; refresh after navigation,
+tab/frame changes, or a ref error.
+
+### `bp read [selector] [--limit <n>]`
+
+Return cleaned readable text for the main page or a CSS selector. The default
+text limit is 3000 characters. Use this for articles, search results, lists,
+prices, and other content not represented by interactive refs.
+
+### `bp locate <selector>`
+
+Return an element's viewport center and bounding box. Use it only when a canvas,
+map, chart, or other non-semantic surface requires coordinate interaction.
 
 ## Interaction
 
 ### `bp click [ref] [--xy <x,y>] [--double] [--right] [--limit <n>]`
-Click an element by its `[ref]` number from the snapshot, or at viewport coordinates.
-- `--xy 400,300` — click at viewport coordinates (ref not needed)
-- `--double` — double-click
-- `--right` — right-click (opens context menu)
 
-Use `bp locate` to get coordinates: `bp locate ".target"` → `{"x":400,"y":300,...}`
-
-### `bp locate <selector>`
-Get an element's center coordinates and bounding box by CSS selector.
-Returns `{"ok":true, "x":400, "y":300, "top":100, "left":200, "width":800, "height":600}`.
-Use with `bp click --xy` for canvas, maps, charts, or elements not in the snapshot.
-- `bp locate "canvas"` — canvas element
-- `bp locate ".kix-appview-editor"` — Google Docs editor area
+Click a fresh ref or explicit viewport coordinates and return the resulting
+snapshot. `--double` and `--right` are mutually exclusive. Ref clicks validate
+live layout, enabled state, and obstruction before pointer dispatch.
 
 ### `bp type <ref> <text> [--clear] [--submit] [--limit <n>]`
-Type text into an input element.
-- `--clear` — clear the field before typing
-- `--submit` — press Enter after typing
 
-### `bp press <key>`
-Press a keyboard key or combination.
-- Single keys: `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `Space`
-- Arrow keys: `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`
-- Navigation: `Home`, `End`, `PageUp`, `PageDown`
-- Combos: `Control+a`, `Control+c`, `Meta+v`, `Shift+Enter`, `Alt+Tab`
+Edit a semantic text/value control and return the resulting snapshot. `--clear`
+replaces existing content; `--submit` presses Enter after input. Browser Pilot
+reads back native/contenteditable state internally and rejects controls that
+are disabled, readonly, inert, detached, or unsupported.
 
-### `bp keyboard <text> [--click <selector>] [--clear] [--submit] [--delay <ms>]`
-Type text via real keyboard events. Works with canvas-based editors (Google Docs, Sheets, Figma) that don't expose DOM inputs.
-- `--click ".selector"` — click an element first to focus it (real CDP mouse click)
-- `--clear` — select all + delete before typing
-- `--submit` — press Enter after typing
-- `--delay 50` — delay between keystrokes in ms (for apps that need slower input)
+### `bp keyboard <text> [--click <selector>] [--clear] [--submit] [--delay <ms>] [--limit <n>]`
 
-Unlike `bp type`, this does not target a specific `[ref]` element. It sends keyboard events to whatever is currently focused.
+Send keyboard events to the focused control. Use this for canvas-style editors
+that do not expose a semantic textbox. `--click` focuses a selector first.
+Browser Pilot stops remaining characters if focus, page, frame, or document
+identity changes during the composite action.
 
-```bash
-bp keyboard "Hello Docs!" --click ".kix-appview-editor"    # Google Docs
-bp keyboard "new content" --clear                           # replace focused content
-bp keyboard "slow input" --delay 100                        # type slowly
-```
+### `bp press <key> [--limit <n>]`
 
-## JavaScript
+Press a key or combination and return the resulting snapshot. Examples include
+`Enter`, `Escape`, `Tab`, `ArrowDown`, `Control+a`, and `Meta+b`.
 
-### `bp eval [expression]`
-Execute JavaScript in the page context and return the result.
-
-```bash
-# Inline
-bp eval "document.title"
-bp eval "document.querySelector('h1').textContent"
-bp eval "window.scrollBy(0, 500)"
-bp eval "history.back()"
-bp eval "history.forward()"
-bp eval "location.reload()"
-bp eval "JSON.stringify(localStorage)"
-bp eval "document.querySelectorAll('a').length"
-bp eval "getComputedStyle(document.body).backgroundColor"
-
-# Stdin (for complex scripts)
-echo 'document.querySelectorAll("li").forEach(e => console.log(e.textContent))' | bp eval
-```
-
-## Capture
-
-### `bp screenshot [file] [--full] [--selector <sel>]`
-Take a screenshot.
-- No file argument: outputs to stdout (base64 when piped)
-- `--full` — capture the entire scrollable page
-- `--selector "div.main"` — capture a specific element
-
-### `bp pdf [file] [--landscape]`
-Save the page as a PDF.
-- `--landscape` — landscape orientation
-
-## Cookies
-
-### `bp cookies [domain]`
-View cookies, including HttpOnly cookies not accessible via JavaScript.
-- `bp cookies` — all cookies for current page
-- `bp cookies github.com` — filter by domain
-
-## File Upload
-
-### `bp upload <filepath> [--nth <n>]`
-Upload a file. Automatically finds `<input type="file">` on the page.
-- `--nth 2` — use the 2nd file input if multiple exist
-
-## HTTP Auth
-
-### `bp auth [user] [pass] [--clear]`
-Set HTTP Basic Authentication credentials for the session.
-- `bp auth admin password123` — set credentials
-- `bp auth --clear` — remove credentials
-
-## Tabs
-
-### `bp tabs`
-List all pilot tabs. Popup windows opened by the page are auto-detected.
-
-### `bp tab <index>`
-Switch to a tab by its index number (from `bp tabs` output).
-
-### `bp close [--all]`
-Close the current pilot tab.
-- `--all` — close all pilot tabs
-
-## Frames
+## Frames and Dialogs
 
 ### `bp frame [index]`
-List iframes or switch execution context to an iframe.
-- `bp frame` — list all iframes with their indices
-- `bp frame 1` — switch to iframe 1
-- `bp frame 0` — switch back to top-level frame
 
-## Network Monitoring & Interception
+List frames or select one. Index `0` returns to the top frame. List and snapshot
+again after frame navigation or detachment.
 
-### `bp net [--limit <n>] [--url <pattern>] [--method <m>] [--status <code>] [--type <t>]`
-List captured network requests.
-- `--url "*api*"` — filter by URL pattern
-- `--method POST` — filter by HTTP method
-- `--status 404` — filter by status code
-- `--type xhr` — filter by resource type
+### `bp dialogs`
+
+List pending JavaScript dialogs. Dialogs remain pending until explicitly
+handled.
+
+### `bp dialog <dialog-id> --accept|--dismiss [--prompt <text>]`
+
+Respond to one pending dialog. Provide exactly one of `--accept` or `--dismiss`.
+Use `--prompt` only when accepting a prompt dialog.
+
+## Files and Capture
+
+### `bp screenshot [filename] [--full] [--selector <selector>]`
+
+Write a PNG and return `{ "ok": true, "file": "..." }`. `--full` captures the
+full scrollable page; `--selector` captures one matching element. Without a
+filename, the CLI writes a timestamped PNG in the current working directory.
+
+### `bp pdf [filename] [--landscape]`
+
+Write a PDF and return its path. Without a filename, the CLI writes a
+timestamped PDF in the current working directory.
+
+### `bp upload <filepath> [--nth <n>]`
+
+Resolve the path, select a file input, assign one file, verify the browser
+filename/count internally, and return a fresh snapshot. `--nth` selects a
+1-based file input when the page has more than one.
+
+## Page Evaluation
+
+### `bp eval [expression]`
+
+Evaluate JavaScript in the selected frame and return the value. If no argument
+is supplied, read the expression from stdin. Prefer `read`, `snapshot`, and
+semantic actions for ordinary work; use eval for a specific missing operation
+or structured value.
+
+```bash
+bp eval "document.title"
+bp eval "history.back()"
+bp eval "window.scrollBy(0, 500)"
+echo 'document.querySelector("a")?.href' | bp eval
+```
+
+## Cookies and HTTP Authentication
+
+### `bp cookies [domain]`
+
+Return cookies visible to the selected target, including HttpOnly cookies.
+Treat the complete output as credential-sensitive.
+
+### `bp auth [username] [password] [--clear]`
+
+Set compatibility-session HTTP Basic Auth credentials before navigation, or
+clear them with `--clear`. Command-line arguments may be visible to local
+process inspection/history; an embedding host should use the structured bridge
+instead of placing credentials in argv.
+
+## Network
+
+### `bp net [filters]`
+
+List recent requests. Filters include `--limit`, `--url`, `--method`,
+`--status`, `--type`, and `--after`.
 
 ### `bp net show <id> [--save <file>]`
-Show full details of a captured request (headers, body, response).
-- `--save response.json` — save response body to file
+
+Return bounded request/response detail. `--save` writes the response body to the
+specified path. Headers and bodies may contain credentials or private data.
 
 ### `bp net block <pattern>`
-Block all requests matching a URL pattern.
-- `bp net block "*tracking*"` — block analytics
-- `bp net block "*ads*"` — block ad requests
 
-### `bp net mock <pattern> [--body <json>] [--file <path>]`
-Return a mock response for matching requests (always returns status 200).
-- `bp net mock "*api/data*" --body '{"items":[]}'`
-- `bp net mock "*api/users*" --file mock.json`
+Add a blocking rule.
+
+### `bp net mock <pattern> [--body <text>] [--file <path>] [--status <code>]`
+
+Add a mock response rule. The default status is 200.
 
 ### `bp net headers <pattern> <header...>`
-Add or override request headers for matching URLs.
-- `bp net headers "*api*" "Authorization:Bearer tok123"`
-- `bp net headers "*" "X-Custom:value"`
+
+Add or override request headers. Header values may contain credentials.
 
 ### `bp net rules`
-List all active interception rules (block/mock/headers).
 
-### `bp net remove [id] [--all]`
-Remove interception rules.
-- `bp net remove 2` — remove rule #2
-- `bp net remove --all` — remove all rules
+List compatibility-session interception rules.
+
+### `bp net remove [rule-id] [--all]`
+
+Remove one rule or all rules.
 
 ### `bp net clear`
-Clear the captured request log.
+
+Clear the compatibility request journal.
+
+## JSON Results and Failures
+
+Successful snapshots contain `title`, `url`, and `elements`; content reads also
+include `text`, `length`, and `truncated`. Capture commands return a local
+`file` path. Failed one-shot commands return `ok: false`, an English `error`,
+and sometimes a recovery `hint`, then exit nonzero.
+
+The one-shot error shape is intentionally smaller than the embedded bridge
+contract. Do not infer that a partially completed mutation was rolled back from
+an English error message. Inspect current tab/page state before retrying.
