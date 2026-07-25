@@ -328,6 +328,8 @@ test('InputDispatcher handles modifiers, tabs, and non-ASCII text', async () => 
     transport.calls.slice(0, 4).map(call => [call.params.type, call.params.key]),
     [['keyDown', 'Control'], ['keyDown', 'a'], ['keyUp', 'a'], ['keyUp', 'Control']],
   );
+  assert.deepEqual(transport.calls[1].params.commands, ['SelectAll']);
+  assert.equal(transport.calls[1].params.text, '');
 
   transport.calls.length = 0;
   await input.typeText('x\t中');
@@ -352,8 +354,14 @@ test('ActionService types into a controlled input and returns value-length evide
   const refs = new MemoryRefStore();
   refs.save('target-8', [{ backendNodeId: 8, role: 'textbox', name: 'Query' }]);
   const editableStates = [
-    { kind: 'input', value: 'old', sensitive: false },
-    { kind: 'input', value: 'old-new', sensitive: false },
+    {
+      kind: 'input', value: 'old', sensitive: false, editable: true,
+      inputType: 'text', editMode: 'text', selectionMode: 'range',
+    },
+    {
+      kind: 'input', value: 'old-new', sensitive: false, editable: true,
+      inputType: 'text', editMode: 'text', selectionMode: 'range',
+    },
   ];
   const transport = new FakeTransport((method, params) => {
     if (method === 'DOM.resolveNode') return { object: { objectId: 'input-1' } };
@@ -379,10 +387,15 @@ test('ActionService types into a controlled input and returns value-length evide
     expectedLength: 7,
     afterLength: 7,
   });
-  const setCall = transport.calls.find(call => (
-    call.method === 'Runtime.callFunctionOn' && Array.isArray(call.params.arguments)
+  const prepareCall = transport.calls.find(call => (
+    call.method === 'Runtime.callFunctionOn' && call.params.returnByValue
   ));
-  assert.deepEqual(setCall.params.arguments, [{ value: '-new' }, { value: false }]);
+  assert.deepEqual(prepareCall.params.arguments, [{ value: false }]);
+  assert.deepEqual(transport.calls.find(call => call.method === 'Input.insertText'), {
+    method: 'Input.insertText',
+    params: { text: '-new' },
+    sessionId: 'session-8',
+  });
   assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
 });
 
@@ -390,8 +403,14 @@ test('exact input verification fails without exposing password contents', async 
   const refs = new MemoryRefStore();
   refs.save('target-9', [{ backendNodeId: 9, role: 'textbox', name: 'Password' }]);
   const editableStates = [
-    { kind: 'input', value: 'old-secret', sensitive: true },
-    { kind: 'input', value: 'masked-result', sensitive: true },
+    {
+      kind: 'input', value: 'old-secret', sensitive: true, editable: true,
+      inputType: 'password', editMode: 'text', selectionMode: 'range',
+    },
+    {
+      kind: 'input', value: 'masked-result', sensitive: true, editable: true,
+      inputType: 'password', editMode: 'text', selectionMode: 'range',
+    },
   ];
   const transport = new FakeTransport((method, params) => {
     if (method === 'DOM.resolveNode') return { object: { objectId: 'password-1' } };
@@ -422,7 +441,9 @@ test('exact input verification fails without exposing password contents', async 
 test('keyboard reports unavailable verification for canvas-style focus', async () => {
   const transport = new FakeTransport(method => {
     if (method === 'Runtime.evaluate') {
-      return { result: { value: { kind: 'unsupported', value: '', sensitive: false } } };
+      return { result: { value: {
+        kind: 'unsupported', value: '', sensitive: false, editable: false, reason: 'unsupported_element',
+      } } };
     }
     return {};
   });
@@ -440,6 +461,106 @@ test('keyboard reports unavailable verification for canvas-style focus', async (
     reason: 'active_element_not_readable',
   });
   assert.deepEqual(result.observation, snapshot);
+});
+
+test('ActionService rejects readonly and unsupported inputs before dispatch', async () => {
+  for (const fixture of [
+    {
+      state: {
+        kind: 'input', value: 'fixed', sensitive: false, editable: false,
+        inputType: 'text', editMode: 'text', selectionMode: 'range', reason: 'readonly',
+      },
+      code: 'action_not_verified',
+    },
+    {
+      state: {
+        kind: 'unsupported', value: '', sensitive: false, editable: false,
+        inputType: 'checkbox', reason: 'unsupported_input_type',
+      },
+      code: 'invalid_argument',
+    },
+  ]) {
+    const refs = new MemoryRefStore();
+    refs.save('target-blocked', [{ backendNodeId: 10, role: 'textbox', name: 'Blocked' }]);
+    const transport = new FakeTransport((method, params) => {
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'blocked-input' } };
+      if (method === 'Runtime.callFunctionOn' && params.returnByValue) {
+        return { result: { value: fixture.state } };
+      }
+      return {};
+    });
+    const service = new ActionService(transport, 'session-blocked', 'target-blocked', {
+      refStore: refs,
+      observationService: { async observeAfterAction() { return snapshot; } },
+    });
+
+    await assert.rejects(
+      () => service.type('1', 'new value'),
+      error => error.code === fixture.code && error.context?.reason === fixture.state.reason,
+    );
+    assert.equal(transport.calls.some(call => call.method.startsWith('Input.')), false);
+    assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
+  }
+});
+
+test('ActionService uses the bounded value-control path for date inputs', async () => {
+  const refs = new MemoryRefStore();
+  refs.save('target-date', [{ backendNodeId: 11, role: 'textbox', name: 'Date' }]);
+  const editableStates = [
+    {
+      kind: 'input', value: '', sensitive: false, editable: true,
+      inputType: 'date', editMode: 'value',
+    },
+    {
+      kind: 'input', value: '2026-07-25', sensitive: false, editable: true,
+      inputType: 'date', editMode: 'value',
+    },
+  ];
+  const transport = new FakeTransport((method, params) => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'date-input' } };
+    if (method === 'Runtime.callFunctionOn' && params.returnByValue) {
+      return { result: { value: editableStates.shift() } };
+    }
+    return {};
+  });
+  const service = new ActionService(transport, 'session-date', 'target-date', {
+    refStore: refs,
+    readbackDelayMs: 0,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  const result = await service.type('1', '2026-07-25', { clear: true });
+
+  assert.equal(result.evidence.status, 'verified');
+  const valueCall = transport.calls.find(call => (
+    call.method === 'Runtime.callFunctionOn' && !call.params.returnByValue && call.params.arguments
+  ));
+  assert.deepEqual(valueCall.params.arguments, [{ value: '2026-07-25' }]);
+  assert.equal(transport.calls.some(call => call.method === 'Input.insertText'), false);
+});
+
+test('ActionService fails closed on malformed editable state', async () => {
+  const refs = new MemoryRefStore();
+  refs.save('target-malformed', [{ backendNodeId: 12, role: 'textbox', name: 'Malformed' }]);
+  const transport = new FakeTransport((method, params) => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'malformed-input' } };
+    if (method === 'Runtime.callFunctionOn' && params.returnByValue) {
+      return { result: { value: {
+        kind: 'input', value: 'old', sensitive: false, editable: true,
+      } } };
+    }
+    return {};
+  });
+  const service = new ActionService(transport, 'session-malformed', 'target-malformed', {
+    refStore: refs,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  await assert.rejects(
+    () => service.type('1', 'new'),
+    error => error.code === 'internal_error',
+  );
+  assert.equal(transport.calls.some(call => call.method.startsWith('Input.')), false);
 });
 
 test('UploadService selects a file input, uploads, releases, and observes', async () => {

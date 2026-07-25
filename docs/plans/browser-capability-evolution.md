@@ -115,12 +115,18 @@ Preserve Browser Pilot advantages:
     dialog openings, and attributable popup creation without exposing raw CDP
     IDs. Expected checkbox/radio/option state failures report `mismatch`;
     coordinate and otherwise unobservable clicks report `unavailable`.
-- [ ] **B3.3** Unify input behavior for native fields, controlled React/Vue
+- [x] **B3.3** Unify input behavior for native fields, controlled React/Vue
   fields, and contenteditable; read back the effective value/content.
   - Covers: AC-8.
-  - Progress: native input and contenteditable actions now read state before
-    and after input. Evidence contains only kind, sensitivity, status, and
-    lengths; password values are never returned. Framework fixtures remain.
+  - Complete: text controls, email/number controls, and contenteditable now use
+    Chrome's native editing path with trusted, cancelable input semantics;
+    date/time/color/range controls use a bounded value path without emitting an
+    early `change`. Targets are classified and rejected before dispatch when
+    detached, disabled, readonly, inert, or unsupported. Final readback detects
+    framework acceptance, synchronous/asynchronous rollback, browser
+    sanitization, and editor interception. Password evidence contains lengths
+    only, deep open-Shadow-DOM focus is readable, and keyboard clear uses
+    Chrome's `SelectAll` editing command.
 - [ ] **B3.4** Return typed action evidence and failure reasons instead of
   reporting success solely because CDP dispatch completed.
   - Covers: command reliability contract.
@@ -185,6 +191,10 @@ Preserve Browser Pilot advantages:
 - [ ] **B6.2** Add action verification tests for obstruction, checkbox/radio,
   controlled inputs, contenteditable, focus loss, popup, and navigation.
   - Covers: AC-8.
+  - Progress: isolated system-Chrome tests cover trusted controlled-input
+    events and rollback, canceled `beforeinput`, native email/number selection,
+    nested contenteditable replacement/append, blocked fields, special value
+    controls, Shadow DOM readback, and keyboard clear. Focus loss remains.
 - [ ] **B6.3** Add real-site canaries that report drift without making release
   tests depend on third-party availability.
   - Covers: FR-8.

@@ -1,12 +1,11 @@
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import {
-  CONTENTEDITABLE_CLEAR,
-  CONTENTEDITABLE_FOCUS_END,
   GET_POINTER_TARGET_STATE,
+  PREPARE_EDITABLE_TARGET,
   READ_ACTIVE_EDITABLE_STATE,
   READ_CLICK_TARGET_STATE,
   READ_EDITABLE_STATE,
-  SET_VALUE,
+  SET_VALUE_CONTROL,
 } from '../page-scripts.js';
 import { legacyRefStore, resolveTarget, type RefStore, type SnapshotResult } from '../snapshot.js';
 import type { Transport } from '../transport.js';
@@ -109,7 +108,31 @@ interface EditableState {
   kind: 'input' | 'contenteditable' | 'unsupported';
   value: string;
   sensitive: boolean;
+  editable: boolean;
+  inputType?: string;
+  editMode?: 'text' | 'value';
+  selectionMode?: 'range' | 'select';
+  reason?: EditableBlockReason;
 }
+
+type EditableBlockReason =
+  | 'detached'
+  | 'disabled'
+  | 'readonly'
+  | 'inert'
+  | 'unsupported_input_type'
+  | 'unsupported_element'
+  | 'selection_unavailable';
+
+const EDITABLE_BLOCK_REASONS: ReadonlySet<EditableBlockReason> = new Set([
+  'detached',
+  'disabled',
+  'readonly',
+  'inert',
+  'unsupported_input_type',
+  'unsupported_element',
+  'selection_unavailable',
+]);
 
 type PointerTargetFailureReason =
   | 'detached'
@@ -277,15 +300,42 @@ function clickEvidence(
 }
 
 function parseEditableState(value: unknown): EditableState {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid input verification state');
+  }
+  const record = value as Record<string, unknown>;
+  const kind = record.kind;
+  const inputType = record.inputType;
+  const editMode = record.editMode;
+  const selectionMode = record.selectionMode;
+  const reason = record.reason;
   if (
-    typeof value !== 'object' || value === null ||
-    !['input', 'contenteditable', 'unsupported'].includes(String((value as Record<string, unknown>).kind)) ||
-    typeof (value as Record<string, unknown>).value !== 'string' ||
-    typeof (value as Record<string, unknown>).sensitive !== 'boolean'
+    !['input', 'contenteditable', 'unsupported'].includes(String(kind)) ||
+    typeof record.value !== 'string' ||
+    typeof record.sensitive !== 'boolean' ||
+    typeof record.editable !== 'boolean' ||
+    (inputType !== undefined && (typeof inputType !== 'string' || inputType.length > 64)) ||
+    (editMode !== undefined && editMode !== 'text' && editMode !== 'value') ||
+    (selectionMode !== undefined && selectionMode !== 'range' && selectionMode !== 'select') ||
+    (reason !== undefined && !EDITABLE_BLOCK_REASONS.has(reason as EditableBlockReason)) ||
+    (record.editable && (kind === 'unsupported' || editMode === undefined || reason !== undefined)) ||
+    (!record.editable && reason === undefined) ||
+    (kind === 'input' && inputType === undefined) ||
+    (editMode === 'text' && selectionMode === undefined) ||
+    (editMode === 'value' && selectionMode !== undefined)
   ) {
     throw new BrowserPilotError('internal_error', 'Chrome returned invalid input verification state');
   }
-  return value as EditableState;
+  return {
+    kind: kind as EditableState['kind'],
+    value: record.value,
+    sensitive: record.sensitive,
+    editable: record.editable,
+    ...(inputType !== undefined ? { inputType } : {}),
+    ...(editMode !== undefined ? { editMode } : {}),
+    ...(selectionMode !== undefined ? { selectionMode } : {}),
+    ...(reason !== undefined ? { reason: reason as EditableBlockReason } : {}),
+  };
 }
 
 function inputEvidence(before: EditableState, after: EditableState, text: string, clear: boolean): InputVerificationEvidence {
@@ -297,7 +347,10 @@ function inputEvidence(before: EditableState, after: EditableState, text: string
       reason: 'active_element_not_readable',
     };
   }
-  const expected = clear ? text : before.value + text;
+  const insertion = before.kind === 'contenteditable' || before.inputType === 'textarea'
+    ? text.replace(/\r\n?/g, '\n')
+    : text;
+  const expected = clear ? insertion : before.value + insertion;
   const matched = after.value === expected;
   return {
     status: matched ? 'verified' : 'mismatch',
@@ -428,22 +481,24 @@ export class ActionService {
     );
     let evidence: InputVerificationEvidence;
     try {
-      const before = await this.readElementState(objectId);
-      if (before.kind === 'unsupported') {
-        throw invalidArgument(`Ref [${ref}] is not an editable input`, 'ref');
-      }
+      const before = await this.prepareElement(objectId, !!options.clear);
+      this.requireEditableTarget(before, ref);
 
-      if (before.kind === 'contenteditable') {
-        await this.transport.send('Runtime.callFunctionOn', {
-          objectId,
-          functionDeclaration: options.clear ? CONTENTEDITABLE_CLEAR : CONTENTEDITABLE_FOCUS_END,
-        }, this.sessionId);
-        await this.transport.send('Input.insertText', { text }, this.sessionId);
+      if (before.editMode === 'text') {
+        if (!options.clear && before.selectionMode === 'select') {
+          await this.input.press('End');
+        }
+        if (text.length > 0) {
+          await this.input.insertText(text);
+        } else if (options.clear) {
+          await this.input.press('Backspace');
+        }
       } else {
+        const desired = options.clear ? text : before.value + text;
         await this.transport.send('Runtime.callFunctionOn', {
           objectId,
-          functionDeclaration: SET_VALUE,
-          arguments: [{ value: text }, { value: !!options.clear }],
+          functionDeclaration: SET_VALUE_CONTROL,
+          arguments: [{ value: desired }],
         }, this.sessionId);
       }
 
@@ -499,6 +554,16 @@ export class ActionService {
     return parseEditableState(result.value);
   }
 
+  private async prepareElement(objectId: string, clear: boolean): Promise<EditableState> {
+    const { result } = await this.transport.send('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: PREPARE_EDITABLE_TARGET,
+      arguments: [{ value: clear }],
+      returnByValue: true,
+    }, this.sessionId);
+    return parseEditableState(result.value);
+  }
+
   private async readActiveState(): Promise<EditableState> {
     const params: Record<string, unknown> = {
       expression: READ_ACTIVE_EDITABLE_STATE,
@@ -525,6 +590,32 @@ export class ActionService {
         afterLength: evidence.afterLength,
         reason: evidence.reason,
       },
+    });
+  }
+
+  private requireEditableTarget(state: EditableState, ref: string): void {
+    if (state.editable) return;
+    const context = {
+      targetId: this.targetId,
+      ref,
+      kind: state.kind,
+      ...(state.inputType ? { inputType: state.inputType } : {}),
+      ...(state.reason ? { reason: state.reason } : {}),
+    };
+    if (state.reason === 'detached') {
+      throw new BrowserPilotError('stale_ref', `Ref [${ref}] no longer resolves to a connected element`, {
+        context,
+      });
+    }
+    if (state.reason === 'unsupported_input_type' || state.reason === 'unsupported_element') {
+      throw new BrowserPilotError('invalid_argument', `Ref [${ref}] is not an editable text or value control`, {
+        context: { ...context, field: 'ref' },
+        rpcCode: -32602,
+      });
+    }
+    throw new BrowserPilotError('action_not_verified', `Ref [${ref}] is not currently editable`, {
+      retryable: state.reason === 'disabled' || state.reason === 'readonly' || state.reason === 'inert',
+      context,
     });
   }
 }

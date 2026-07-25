@@ -107,6 +107,9 @@ export class InputDispatcher {
     const key = known?.key ?? mainKey;
     const code = known?.code ?? (mainKey.length === 1 ? `Key${mainKey.toUpperCase()}` : mainKey);
     const keyCode = known?.keyCode ?? mainKey.toUpperCase().charCodeAt(0);
+    const commands = mainKey.toLowerCase() === 'a' && modifiers.length === 1 && (
+      modifiers[0].key === 'Control' || modifiers[0].key === 'Meta'
+    ) ? ['SelectAll'] : undefined;
 
     for (const modifier of modifiers) {
       await this.transport.send('Input.dispatchKeyEvent', {
@@ -117,9 +120,10 @@ export class InputDispatcher {
         modifiers: modifierFlags,
       }, this.sessionId);
     }
-    const text = key === 'Enter' ? '\r' : (known ? '' : mainKey);
+    const text = key === 'Enter' ? '\r' : (known || modifiers.length > 0 ? '' : mainKey);
     await this.transport.send('Input.dispatchKeyEvent', {
       type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text, modifiers: modifierFlags,
+      ...(commands ? { commands } : {}),
     }, this.sessionId);
     await this.transport.send('Input.dispatchKeyEvent', {
       type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, modifiers: modifierFlags,
@@ -149,9 +153,13 @@ export class InputDispatcher {
           type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode,
         }, this.sessionId);
       } else {
-        await this.transport.send('Input.insertText', { text: char }, this.sessionId);
+        await this.insertText(char);
       }
       if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
     }
+  }
+
+  async insertText(text: string): Promise<void> {
+    await this.transport.send('Input.insertText', { text }, this.sessionId);
   }
 }

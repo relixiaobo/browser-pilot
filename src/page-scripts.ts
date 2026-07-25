@@ -189,80 +189,146 @@ export const GET_POINTER_TARGET_STATE = `function() {
   return blocked('obscured', firstObstruction);
 }`;
 
-/** Focus `this`, set its value (React-compatible), dispatch input+change. */
-export const SET_VALUE = `function(text, clear) {
-  this.focus();
-  const proto = this instanceof HTMLTextAreaElement
-    ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-  const val = clear ? text : this.value + text;
-  if (setter) setter.call(this, val); else this.value = val;
-  this.dispatchEvent(new Event('input',  {bubbles:true}));
-  this.dispatchEvent(new Event('change', {bubbles:true}));
+const EDITABLE_STATE_FUNCTION = `function(target) {
+  const unsupported = (reason, inputType) => ({
+    kind:'unsupported', value:'', sensitive:false, editable:false,
+    ...(inputType ? {inputType} : {}), reason,
+  });
+  if (!target || target.nodeType !== 1 || !target.isConnected) return unsupported('detached');
+
+  const composedParent = node => {
+    if (node && node.parentElement) return node.parentElement;
+    const root = node && typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    return root && root.host ? root.host : null;
+  };
+  const hasComposedState = (node, property, attribute) => {
+    for (let current = node; current; current = composedParent(current)) {
+      if (current[property] === true || current.hasAttribute?.(attribute)) return true;
+    }
+    return false;
+  };
+  const ariaTrue = (node, name) => String(node.getAttribute?.(name) || '').trim().toLowerCase() === 'true';
+  const blockedReason = node => {
+    if (hasComposedState(node, 'inert', 'inert')) return 'inert';
+    for (let current = node; current; current = composedParent(current)) {
+      if (current.matches?.(':disabled') || current.disabled === true || ariaTrue(current, 'aria-disabled')) {
+        return 'disabled';
+      }
+    }
+    for (let current = node; current; current = composedParent(current)) {
+      if (current.readOnly === true || ariaTrue(current, 'aria-readonly')) return 'readonly';
+    }
+    return null;
+  };
+  const contenteditableRoot = node => {
+    let root = node;
+    while (root.parentElement && root.parentElement.isContentEditable) root = root.parentElement;
+    return root;
+  };
+
+  if (target instanceof HTMLInputElement) {
+    const inputType = String(target.type || 'text').toLowerCase();
+    const rangeTextTypes = new Set(['text', 'search', 'tel', 'url', 'password']);
+    const selectTextTypes = new Set(['email', 'number']);
+    const valueTypes = new Set(['date', 'time', 'datetime-local', 'month', 'week', 'color', 'range']);
+    const editMode = rangeTextTypes.has(inputType) || selectTextTypes.has(inputType)
+      ? 'text' : valueTypes.has(inputType) ? 'value' : null;
+    if (!editMode) return unsupported('unsupported_input_type', inputType);
+    const reason = blockedReason(target);
+    return {
+      kind:'input', value:String(target.value ?? ''), sensitive:inputType === 'password',
+      editable:!reason, inputType, editMode,
+      ...(editMode === 'text' ? {selectionMode:selectTextTypes.has(inputType) ? 'select' : 'range'} : {}),
+      ...(reason ? {reason} : {}),
+    };
+  }
+  if (target instanceof HTMLTextAreaElement) {
+    const reason = blockedReason(target);
+    return {
+      kind:'input', value:String(target.value ?? ''), sensitive:false,
+      editable:!reason, inputType:'textarea', editMode:'text', selectionMode:'range',
+      ...(reason ? {reason} : {}),
+    };
+  }
+  if (target.isContentEditable) {
+    const root = contenteditableRoot(target);
+    const reason = blockedReason(root);
+    return {
+      kind:'contenteditable', value:String(root.innerText ?? root.textContent ?? ''), sensitive:false,
+      editable:!reason, inputType:'contenteditable', editMode:'text', selectionMode:'range',
+      ...(reason ? {reason} : {}),
+    };
+  }
+  return unsupported('unsupported_element');
 }`;
 
-/** Focus `this` and optionally clear its value. */
-export const FOCUS_AND_CLEAR = `function(clear) {
-  this.focus();
-  if (clear) { this.value = ''; this.dispatchEvent(new Event('input',{bubbles:true})); }
-}`;
+/** Validate and focus an editable target, then select its replacement/insertion range. */
+export const PREPARE_EDITABLE_TARGET = `function(clear) {
+  const readState = ${EDITABLE_STATE_FUNCTION};
+  const state = readState(this);
+  if (!state.editable) return state;
 
-/** Check if `this` element is a contenteditable (Draft.js, ProseMirror, etc.). */
-export const IS_CONTENTEDITABLE = `function() {
-  return this.isContentEditable && !(this instanceof HTMLInputElement) && !(this instanceof HTMLTextAreaElement);
-}`;
+  if (state.kind === 'input') {
+    this.focus();
+    const focusedState = readState(this);
+    if (!focusedState.editable) return focusedState;
+    if (focusedState.editMode === 'text') {
+      if (focusedState.selectionMode === 'range') {
+        const end = String(this.value ?? '').length;
+        this.setSelectionRange(clear ? 0 : end, end, 'none');
+      } else if (clear) {
+        this.select();
+      }
+    }
+    return focusedState;
+  }
 
-/** Focus `this` contenteditable element. */
-export const CONTENTEDITABLE_FOCUS = `function() {
-  this.focus();
-}`;
-
-/** Select all content in `this` contenteditable (call after focus has settled). */
-export const CONTENTEDITABLE_SELECT_ALL = `function() {
+  let root = this;
+  while (root.parentElement && root.parentElement.isContentEditable) root = root.parentElement;
+  root.focus();
+  const focusedState = readState(root);
+  if (!focusedState.editable) return focusedState;
   const range = document.createRange();
-  range.selectNodeContents(this);
-  const sel = window.getSelection();
-  sel.removeAllRanges();
-  sel.addRange(range);
+  range.selectNodeContents(root);
+  if (!clear) range.collapse(false);
+  const selection = window.getSelection();
+  if (!selection) return {...focusedState, editable:false, reason:'selection_unavailable'};
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return focusedState;
 }`;
 
-/** Clear all content from `this` contenteditable via native editing commands.
- *  Uses execCommand which triggers beforeinput/input events correctly. */
-export const CONTENTEDITABLE_CLEAR = `function() {
+/** Set non-text value controls while preserving framework setter interception. */
+export const SET_VALUE_CONTROL = `function(value) {
+  const readState = ${EDITABLE_STATE_FUNCTION};
+  const state = readState(this);
+  if (!state.editable || state.kind !== 'input' || state.editMode !== 'value') return;
   this.focus();
-  document.execCommand('selectAll');
-  document.execCommand('delete');
-}`;
-
-/** Focus a contenteditable element and move the caret to its end. */
-export const CONTENTEDITABLE_FOCUS_END = `function() {
-  this.focus();
-  const sel = window.getSelection();
-  sel.selectAllChildren(this);
-  sel.collapseToEnd();
+  const beforeInput = new InputEvent('beforeinput', {
+    bubbles:true, composed:true, cancelable:true, inputType:'insertReplacementText', data:value,
+  });
+  if (!this.dispatchEvent(beforeInput)) return;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  if (setter) setter.call(this, value); else this.value = value;
+  this.dispatchEvent(new InputEvent('input', {
+    bubbles:true, composed:true, inputType:'insertReplacementText', data:value,
+  }));
 }`;
 
 /** Return readable input state for verification without page-side logging. */
 export const READ_EDITABLE_STATE = `function() {
-  if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
-    return {kind:'input', value:String(this.value ?? ''), sensitive:this instanceof HTMLInputElement && this.type === 'password'};
-  }
-  if (this.isContentEditable) {
-    return {kind:'contenteditable', value:String(this.innerText ?? this.textContent ?? ''), sensitive:false};
-  }
-  return {kind:'unsupported', value:'', sensitive:false};
+  const readState = ${EDITABLE_STATE_FUNCTION};
+  return readState(this);
 }`;
 
-/** Return editable state for the active element, used after keyboard input. */
+/** Return editable state for the deepest active element, including open Shadow DOM. */
 export const READ_ACTIVE_EDITABLE_STATE = `(() => {
-  const el = document.activeElement;
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-    return {kind:'input', value:String(el.value ?? ''), sensitive:el instanceof HTMLInputElement && el.type === 'password'};
+  const readState = ${EDITABLE_STATE_FUNCTION};
+  let active = document.activeElement;
+  while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+    active = active.shadowRoot.activeElement;
   }
-  if (el && el.isContentEditable) {
-    return {kind:'contenteditable', value:String(el.innerText ?? el.textContent ?? ''), sensitive:false};
-  }
-  return {kind:'unsupported', value:'', sensitive:false};
+  return readState(active);
 })()`;
 
 /** Return {title, url} of the current page. */

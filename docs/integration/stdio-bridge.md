@@ -176,6 +176,21 @@ effect use `unavailable`. Treat evidence as browser-level execution evidence,
 then inspect the returned Observation to decide whether the task itself
 succeeded.
 
+`browser.type` and `browser.keyboard` also return bounded evidence after the
+page has had time to apply a controlled-field update:
+
+```json
+{"status":"verified","kind":"input","sensitive":false,"beforeLength":3,"expectedLength":7,"afterLength":7}
+```
+
+Use `verification: "require_exact"` when a mismatch must fail the command.
+Native text controls and contenteditable receive Chrome editing events;
+date/time/color/range controls use their native value setter and emit
+`beforeinput` plus `input`, but not an early `change`. Framework rollback,
+browser value sanitization, canceled `beforeinput`, and editor interception are
+reported from the effective value after the action. Password evidence never
+contains the value itself.
+
 Inventory includes every eligible ordinary user tab plus the Workspace's
 managed tabs. A physical tab can be controlled by only one Lease at a time.
 Releasing a Workspace closes managed tabs but leaves user tabs open.

@@ -40,6 +40,8 @@ class BrowserFixtureTransport {
     targetState: { connected: true, kind: 'control', focused: false },
   };
   pointerReadbackState = { connected: true, kind: 'control', focused: true };
+  editableState;
+  nextInputClear = false;
   onMouseReleased;
 
   async send(method, params = {}, sessionId) {
@@ -128,11 +130,24 @@ class BrowserFixtureTransport {
           properties: [],
           backendDOMNodeId: 100 + index,
         }));
+        const editableNode = this.editableState ? {
+          nodeId: 'editable',
+          parentId: 'root',
+          ignored: false,
+          role: { value: 'textbox' },
+          name: { value: 'Query' },
+          properties: [],
+          backendDOMNodeId: 43,
+        } : undefined;
         return {
           nodes: [
             {
               nodeId: 'root',
-              childIds: ['button', ...extraNodes.map(node => node.nodeId)],
+              childIds: [
+                'button',
+                ...(editableNode ? [editableNode.nodeId] : []),
+                ...extraNodes.map(node => node.nodeId),
+              ],
               ignored: false,
               role: { value: 'RootWebArea' },
               properties: [],
@@ -146,6 +161,7 @@ class BrowserFixtureTransport {
               properties: [],
               backendDOMNodeId: 42,
             },
+            ...(editableNode ? [editableNode] : []),
             ...extraNodes,
           ],
         };
@@ -163,12 +179,29 @@ class BrowserFixtureTransport {
         if (String(params.functionDeclaration).includes("connected:false, kind:'other'")) {
           return { result: { value: this.pointerReadbackState } };
         }
-        return { result: { value: { kind: 'input', value: '', sensitive: false } } };
+        if (String(params.functionDeclaration).includes('unsupported_input_type') && this.editableState) {
+          if (params.returnByValue) {
+            if (String(params.functionDeclaration).startsWith('function(clear)')) {
+              this.nextInputClear = params.arguments?.[0]?.value === true;
+            }
+            return { result: { value: { ...this.editableState } } };
+          }
+          if (String(params.functionDeclaration).startsWith('function(value)')) {
+            this.editableState.value = String(params.arguments?.[0]?.value ?? '');
+          }
+          return {};
+        }
+        return { result: { value: undefined } };
       case 'Input.dispatchMouseEvent':
         if (params.type === 'mouseReleased') this.onMouseReleased?.(sessionId);
         return {};
       case 'Input.dispatchKeyEvent': return {};
-      case 'Input.insertText': return {};
+      case 'Input.insertText':
+        if (this.editableState) {
+          this.editableState.value = `${this.nextInputClear ? '' : this.editableState.value}${params.text}`;
+          this.nextInputClear = false;
+        }
+        return {};
       case 'Page.getLayoutMetrics': return {
         cssVisualViewport: {
           pageX: 0,
@@ -694,6 +727,51 @@ test('browser.upload consumes only imported upload_input Artifacts and preserves
   await assert.rejects(
     () => tool(runtime, client, 'browser.upload', { artifactId: screenshot.descriptor.id }, targetId),
     error => error.code === 'invalid_argument',
+  );
+});
+
+test('browser.type exposes verified readback through the public tool surface', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.editableState = {
+    kind: 'input',
+    value: 'old',
+    sensitive: false,
+    editable: true,
+    inputType: 'text',
+    editMode: 'text',
+    selectionMode: 'range',
+  };
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:type', 'com.example.agent', 'instance:type');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const field = observed.elements.find(element => element.name === 'Query');
+  assert.ok(field);
+
+  const typed = await tool(runtime, client, 'browser.type', {
+    observationId: observed.observationId,
+    ref: field.ref,
+    text: '-new',
+    verification: 'require_exact',
+  }, targetId);
+
+  assert.notEqual(typed.observationId, observed.observationId);
+  assert.deepEqual(typed.evidence, {
+    status: 'verified',
+    kind: 'input',
+    sensitive: false,
+    beforeLength: 3,
+    expectedLength: 7,
+    afterLength: 7,
+  });
+  assert.deepEqual(
+    transport.calls.find(call => call.method === 'Input.insertText')?.params,
+    { text: '-new' },
   );
 });
 
