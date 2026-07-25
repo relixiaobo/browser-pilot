@@ -6,7 +6,7 @@ const CLEANUP_TIMEOUT_MS = 5_000;
 
 interface RequestMessage {
   id: number;
-  method: 'create' | 'adopt';
+  method: 'create' | 'adopt' | 'cdp.send';
   params: Record<string, unknown>;
 }
 
@@ -23,7 +23,11 @@ let commandTail = Promise.resolve();
 let finishing = false;
 let outputAvailable = true;
 
-function send(value: unknown): void {
+function emit(value: unknown): void {
+  if (typeof process.send === 'function' && process.connected) {
+    process.send(value);
+    return;
+  }
   if (!outputAvailable || process.stdout.destroyed || !process.stdout.writable) return;
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
@@ -33,21 +37,26 @@ function boundedMessage(error: unknown): string {
   return message.slice(0, 1024);
 }
 
-function parseRequest(line: Buffer): RequestMessage {
-  if (line.length === 0 || line.length > MAX_LINE_BYTES) throw new Error('Invalid janitor request size');
-  const value: unknown = JSON.parse(line.toString('utf8'));
+function validateRequest(value: unknown): RequestMessage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid janitor request');
   const request = value as Record<string, unknown>;
   if (!Number.isSafeInteger(request.id) || Number(request.id) < 1) throw new Error('Invalid janitor request ID');
-  if (request.method !== 'create' && request.method !== 'adopt') throw new Error('Invalid janitor method');
+  if (request.method !== 'create' && request.method !== 'adopt' && request.method !== 'cdp.send') {
+    throw new Error('Invalid janitor method');
+  }
   if (!request.params || typeof request.params !== 'object' || Array.isArray(request.params)) {
     throw new Error('Invalid janitor params');
   }
   return request as unknown as RequestMessage;
 }
 
+function parseRequest(line: Buffer): RequestMessage {
+  if (line.length === 0 || line.length > MAX_LINE_BYTES) throw new Error('Invalid janitor request size');
+  return validateRequest(JSON.parse(line.toString('utf8')));
+}
+
 function notifyOwned(targetId: string, openerTargetId?: string): void {
-  send({ event: 'owned', targetId, ...(openerTargetId ? { openerTargetId } : {}) });
+  emit({ event: 'owned', targetId, ...(openerTargetId ? { openerTargetId } : {}) });
 }
 
 async function trackTarget(targetId: string, openerTargetId?: string): Promise<boolean> {
@@ -110,14 +119,43 @@ async function adoptTargets(params: Record<string, unknown>): Promise<{ adopted:
   return { adopted: ownedTargets.size - before };
 }
 
+async function forwardCdp(params: Record<string, unknown>): Promise<unknown> {
+  if (typeof params.method !== 'string' || params.method.length === 0 || params.method.length > 256) {
+    throw new Error('Invalid CDP method');
+  }
+  if (params.params !== undefined && (
+    !params.params || typeof params.params !== 'object' || Array.isArray(params.params)
+  )) {
+    throw new Error('Invalid CDP params');
+  }
+  if (params.sessionId !== undefined && (
+    typeof params.sessionId !== 'string' || params.sessionId.length === 0 || params.sessionId.length > 1024
+  )) {
+    throw new Error('Invalid CDP session ID');
+  }
+  return cdp.send(
+    params.method,
+    params.params as Record<string, unknown> | undefined,
+    params.sessionId as string | undefined,
+  );
+}
+
 async function handle(request: RequestMessage): Promise<void> {
   try {
     const result = request.method === 'create'
       ? await createTarget(request.params)
-      : await adoptTargets(request.params);
-    send({ id: request.id, result });
+      : request.method === 'adopt'
+        ? await adoptTargets(request.params)
+        : await forwardCdp(request.params);
+    emit({ id: request.id, result });
   } catch (error) {
-    send({ id: request.id, error: { code: 'janitor_error', message: boundedMessage(error) } });
+    emit({
+      id: request.id,
+      error: {
+        code: request.method === 'cdp.send' ? 'cdp_error' : 'janitor_error',
+        message: boundedMessage(error),
+      },
+    });
   }
 }
 
@@ -165,6 +203,12 @@ async function finish(cleanup: boolean, exitCode = 0): Promise<void> {
 async function main(): Promise<void> {
   process.stdout.on('error', () => { outputAvailable = false; });
   process.stderr.on('error', () => {});
+  process.stdin.on('end', () => { void commandTail.finally(() => finish(true)); });
+  process.stdin.on('error', () => { void finish(true, 1); });
+  process.on('disconnect', () => { void commandTail.finally(() => finish(true)); });
+  process.on('SIGTERM', () => { void finish(true); });
+  process.on('SIGINT', () => { void finish(true); });
+  process.stdin.resume();
   cdp.on('Target.targetCreated', params => {
     const info = params?.targetInfo;
     if (
@@ -176,45 +220,60 @@ async function main(): Promise<void> {
   });
   cdp.on('Target.targetDestroyed', params => {
     if (typeof params?.targetId !== 'string' || !ownedTargets.delete(params.targetId)) return;
-    send({ event: 'destroyed', targetId: params.targetId });
+    emit({ event: 'destroyed', targetId: params.targetId });
+  });
+  cdp.onAny((method, params, sessionId) => {
+    emit({ event: 'cdp', method, params, ...(sessionId ? { sessionId } : {}) });
   });
   cdp.onConnectionState(event => {
     if (event.state === 'disconnected' && !finishing) void finish(false, 1);
   });
   await cdp.connect(wsUrl);
   await cdp.send('Target.setDiscoverTargets', { discover: true });
-  send({ event: 'ready' });
+  emit({ event: 'ready' });
 
-  process.stdin.on('data', (value: Buffer | string) => {
-    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-    if (pending.length + chunk.length > MAX_LINE_BYTES * 2) {
-      void finish(true, 2);
+  const enqueue = (request: RequestMessage): void => {
+    if (request.method === 'cdp.send') {
+      void handle(request);
       return;
     }
-    pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
-    let newline = pending.indexOf(0x0a);
-    while (newline >= 0) {
-      const line = pending.subarray(0, newline);
-      pending = pending.subarray(newline + 1);
-      commandTail = commandTail.then(async () => {
+    commandTail = commandTail.then(() => handle(request));
+  };
+  if (typeof process.send === 'function') {
+    process.on('message', value => {
+      try {
+        enqueue(validateRequest(value));
+      } catch (error) {
+        process.stderr.write(`${boundedMessage(error)}\n`);
+        void finish(true, 2);
+      }
+    });
+  } else {
+    process.stdin.on('data', (value: Buffer | string) => {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      if (pending.length + chunk.length > MAX_LINE_BYTES * 2) {
+        void finish(true, 2);
+        return;
+      }
+      pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
+      let newline = pending.indexOf(0x0a);
+      while (newline >= 0) {
+        const line = pending.subarray(0, newline);
+        pending = pending.subarray(newline + 1);
         try {
-          await handle(parseRequest(line));
+          enqueue(parseRequest(line));
         } catch (error) {
           process.stderr.write(`${boundedMessage(error)}\n`);
-          await finish(true, 2);
+          void finish(true, 2);
+          return;
         }
-      });
-      newline = pending.indexOf(0x0a);
-    }
-  });
-  process.stdin.on('end', () => { void commandTail.finally(() => finish(true)); });
-  process.stdin.on('error', () => { void finish(true, 1); });
-  process.on('SIGTERM', () => { void finish(true); });
-  process.on('SIGINT', () => { void finish(true); });
-  process.stdin.resume();
+        newline = pending.indexOf(0x0a);
+      }
+    });
+  }
 }
 
 main().catch(error => {
-  process.stderr.write(`${boundedMessage(error)}\n`);
+  if (!finishing) process.stderr.write(`${boundedMessage(error)}\n`);
   void finish(false, 1);
 });

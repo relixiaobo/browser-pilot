@@ -5,6 +5,7 @@ import {
   processIsAlive,
   readBrokerLocatorSync,
   readBrokerPidSync,
+  readBrokerStartingSync,
   removeStaleBrokerFilesSync,
 } from './broker-locator.js';
 import {
@@ -37,6 +38,20 @@ async function startDaemon(browser: DiscoveredBrowser | null): Promise<DaemonCli
     if (await client.health()) return client;
     await new Promise(r => setTimeout(r, 200));
   }
+  if (child.pid && processIsAlive(child.pid)) {
+    throw new BrowserPilotError(
+      'browser_not_authorized',
+      'Browser Pilot is still waiting for Chrome remote debugging authorization',
+      {
+        retryable: true,
+        remediation: {
+          code: 'allow_remote_debugging',
+          message: 'Approve the existing Chrome authorization prompt, then retry. Browser Pilot will reuse the same Broker.',
+          actionRequired: true,
+        },
+      },
+    );
+  }
   throw new BrowserPilotError('browser_disconnected', 'Browser Pilot Broker did not become reachable', {
     retryable: true,
     remediation: {
@@ -67,6 +82,24 @@ function assertBrowserSelection(browserFilter: string | undefined, info: DaemonH
   });
 }
 
+async function waitForStartingDaemon(
+  pid: number,
+  browserFilter?: string,
+  timeoutMs = 60_000,
+): Promise<DaemonClient | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && processIsAlive(pid)) {
+    const client = new DaemonClient();
+    const info = await client.healthInfo();
+    if (info.ok) {
+      assertBrowserSelection(browserFilter, info);
+      return client;
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return undefined;
+}
+
 // ── Public API ──────────────────────────────────────
 
 /** Start or reuse the shared daemon for the selected browser. */
@@ -88,8 +121,25 @@ export async function connectDaemon(browserFilter?: string): Promise<DaemonClien
     }
 
     const locator = readBrokerLocatorSync();
-    const brokerPid = locator?.pid ?? readBrokerPidSync();
+    const starting = readBrokerStartingSync();
+    const brokerPid = locator?.pid ?? starting?.pid ?? readBrokerPidSync();
     if (brokerPid && processIsAlive(brokerPid)) {
+      if (starting?.pid === brokerPid) {
+        const started = await waitForStartingDaemon(brokerPid, browserFilter);
+        if (started) return started;
+        throw new BrowserPilotError(
+          'browser_not_authorized',
+          'Browser Pilot is still waiting for Chrome remote debugging authorization',
+          {
+            retryable: true,
+            remediation: {
+              code: 'allow_remote_debugging',
+              message: 'Approve the existing Chrome authorization prompt, then retry. Browser Pilot will reuse the same Broker.',
+              actionRequired: true,
+            },
+          },
+        );
+      }
       throw new BrowserPilotError('browser_disconnected', 'The Browser Pilot Broker process is alive but its endpoint is unresponsive', {
         retryable: true,
         remediation: {

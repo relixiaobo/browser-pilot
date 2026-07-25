@@ -33,6 +33,11 @@ Workflow:
   bp keyboard <text>                  # type via keyboard events (Google Docs etc.)
   bp press <key>                      # press key — returns updated snapshot
   bp read [selector]                  # extract page text content (search results, articles)
+  bp search <text>                    # find bounded visible text matches
+  bp find <selector>                  # inspect bounded DOM metadata
+  bp scroll down                      # scroll page/container and return fresh state
+  bp dropdown <ref>                   # list native or ARIA dropdown options
+  bp select <ref> <label>             # select and verify a dropdown option
   bp eval <js>                        # run JavaScript (escape hatch for anything)
 
 Refs:
@@ -60,11 +65,10 @@ Edge cases:
   bp dialogs                                           # list pending JavaScript dialogs
   bp dialog <id> --accept                              # explicitly accept a dialog
 
-Eval (replaces scroll, back, forward, extract, etc.):
+Eval (escape hatch for operations without a dedicated command):
   bp eval "history.back()"                           # go back
   bp eval "history.forward()"                        # go forward
   bp eval "location.reload()"                        # reload
-  bp eval "window.scrollBy(0, 500)"                  # scroll down
   bp eval "document.querySelector('h1').textContent"  # extract text
   bp eval "document.querySelector('div').innerHTML"   # extract HTML
   bp eval "JSON.stringify(localStorage)"              # read storage
@@ -121,12 +125,22 @@ function emitObservation(result: Record<string, JsonValue>): void {
       ok: true,
       title,
       url,
+      ...(result.page && typeof result.page === 'object' ? { page: result.page } : {}),
       elements,
       truncated,
       truncationReasons,
+      ...(Array.isArray(result.hints) ? { hints: result.hints } : {}),
+      ...(result.evidence && typeof result.evidence === 'object' ? { evidence: result.evidence } : {}),
     }));
   } else {
     const lines = [`[page] ${title} | ${url}`, ''];
+    const page = result.page && typeof result.page === 'object' && !Array.isArray(result.page)
+      ? result.page as Record<string, JsonValue>
+      : undefined;
+    if (page) {
+      lines.push(`[viewport] ${page.viewportWidth}x${page.viewportHeight} at ${page.scrollX},${page.scrollY} | ${page.pixelsBelow}px below`);
+      lines.push('');
+    }
     if (elements.length === 0) {
       lines.push('(no interactive elements)');
     } else {
@@ -189,6 +203,21 @@ function artifactFrom(result: Record<string, JsonValue>): ArtifactDescriptor {
     throw new BrowserPilotError('internal_error', 'Browser tool did not return an Artifact');
   }
   return result.artifact as unknown as ArtifactDescriptor;
+}
+
+async function cliElementAddress(
+  client: CompatibilityBrokerClient,
+  target: CompatibilityTarget,
+  raw: string,
+): Promise<Record<string, JsonValue>> {
+  if (/^[1-9]\d*$/.test(raw)) {
+    return {
+      observationId: await client.latestObservation(target.targetId),
+      ref: parseRef(raw),
+    };
+  }
+  if (!raw.trim()) throw new Error('Element target must not be empty');
+  return { selector: raw };
 }
 
 async function requireCompatibility(): Promise<CompatibilityBrokerClient> {
@@ -569,6 +598,166 @@ When to use which command:
     });
   }));
 
+// ─── search / find ─────────────────────────────────
+
+program.command('search <query>')
+  .description('Find visible page text without returning the entire page')
+  .option('--selector <selector>', 'limit search to a CSS-selected region')
+  .option('--case-sensitive', 'use case-sensitive matching')
+  .option('--whole-word', 'match complete words only')
+  .option('-l, --limit <n>', 'maximum matches to return', '20')
+  .addHelpText('after', '\nExamples:\n  bp search "invoice total"\n  bp search "error" --selector main --limit 50')
+  .action(action(async (query, opts) => {
+    const limit = parseLimit(opts.limit);
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.search', {
+        query,
+        ...(opts.selector ? { selector: opts.selector } : {}),
+        ...(opts.caseSensitive ? { caseSensitive: true } : {}),
+        ...(opts.wholeWord ? { wholeWord: true } : {}),
+        limit,
+      }, target.targetId);
+      if (useJson()) {
+        console.log(JSON.stringify({ ok: true, ...result }));
+        return;
+      }
+      const matches = Array.isArray(result.matches) ? result.matches : [];
+      console.log(`${result.title}\n${result.url}\n${'─'.repeat(60)}`);
+      if (matches.length === 0) console.log('(no matches)');
+      for (const match of matches) {
+        if (!match || typeof match !== 'object' || Array.isArray(match)) continue;
+        console.log(`[${match.index}] ${match.context}`);
+      }
+      if (result.truncated === true) console.log('... [truncated]');
+    });
+  }));
+
+program.command('find <selector>')
+  .description('Inspect bounded metadata for CSS-matched elements')
+  .option('-l, --limit <n>', 'maximum elements to return', '20')
+  .option('--attributes <names>', 'comma-separated attribute names')
+  .option('--no-shadow', 'do not query open shadow roots')
+  .addHelpText('after', '\nExamples:\n  bp find "[role=option]"\n  bp find "a.result" --attributes href,data-testid')
+  .action(action(async (selector, opts) => {
+    const limit = parseLimit(opts.limit);
+    const attributeNames = typeof opts.attributes === 'string'
+      ? opts.attributes.split(',').map((name: string) => name.trim()).filter(Boolean)
+      : undefined;
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.elements.find', {
+        selector,
+        limit,
+        ...(attributeNames ? { attributeNames } : {}),
+        ...(opts.shadow === false ? { pierceShadow: false } : {}),
+      }, target.targetId);
+      if (useJson()) {
+        console.log(JSON.stringify({ ok: true, ...result }));
+        return;
+      }
+      const elements = Array.isArray(result.elements) ? result.elements : [];
+      if (elements.length === 0) console.log('(no matching elements)');
+      for (const element of elements) {
+        if (!element || typeof element !== 'object' || Array.isArray(element)) continue;
+        const state = `${element.visible === true ? 'visible' : 'hidden'}, ${element.enabled === true ? 'enabled' : 'disabled'}`;
+        console.log(`[${element.index}] <${element.tagName}> ${element.role || ''} "${element.name || ''}" (${state})`);
+      }
+      if (result.truncated === true) console.log('... [truncated]');
+    });
+  }));
+
+// ─── scroll ────────────────────────────────────────
+
+program.command('scroll [direction]')
+  .description('Scroll the page, an element, or matching text')
+  .option('--amount <n>', 'distance in pixels or viewport units')
+  .option('--unit <unit>', 'pixels or viewport', 'viewport')
+  .option('--selector <selector>', 'scroll a CSS-selected container')
+  .option('--ref <ref>', 'scroll an element from the latest snapshot')
+  .option('--to <position>', 'scroll to start or end')
+  .option('--to-text <text>', 'scroll the first visible text match into view')
+  .option('--exact', 'require an exact text match with --to-text')
+  .option('-l, --limit <n>', 'max elements in returned snapshot', '50')
+  .addHelpText('after', `
+Examples:
+  bp scroll down
+  bp scroll up --amount 400 --unit pixels
+  bp scroll down --selector ".results"
+  bp scroll --ref 8 --to end
+  bp scroll --to-text "Payment details"`)
+  .action(action(async (direction, opts) => {
+    if (opts.selector && opts.ref) throw new Error('--selector and --ref are mutually exclusive');
+    const modes = [direction !== undefined, opts.to !== undefined, opts.toText !== undefined].filter(Boolean).length;
+    if (modes > 1) throw new Error('Use only one of direction, --to, or --to-text');
+    const validDirections = new Set(['up', 'down', 'left', 'right']);
+    if (direction !== undefined && !validDirections.has(direction)) throw new Error('direction must be up, down, left, or right');
+    if (opts.to !== undefined && !['start', 'end'].includes(opts.to)) throw new Error('--to must be start or end');
+    if (!['pixels', 'viewport'].includes(opts.unit)) throw new Error('--unit must be pixels or viewport');
+    const amount = opts.amount === undefined ? undefined : Number(opts.amount);
+    if (amount !== undefined && (!Number.isFinite(amount) || amount <= 0)) throw new Error('--amount must be a positive number');
+    const limit = parseLimit(opts.limit);
+    await withCliTarget(async (client, target) => {
+      const rawTarget = opts.selector ?? opts.ref;
+      const address = rawTarget ? await cliElementAddress(client, target, String(rawTarget)) : undefined;
+      const result = await client.callTool('browser.scroll', {
+        ...(address ? { target: address } : {}),
+        ...(direction ? { direction } : {}),
+        ...(amount !== undefined ? { amount } : {}),
+        unit: opts.unit,
+        ...(opts.to ? { position: opts.to } : {}),
+        ...(opts.toText ? { text: opts.toText, exact: opts.exact === true } : {}),
+        observationLimit: limit,
+      }, target.targetId);
+      emitObservation(result);
+    });
+  }));
+
+// ─── dropdowns ─────────────────────────────────────
+
+program.command('dropdown <target>')
+  .description('List native or ARIA dropdown options by ref or CSS selector')
+  .addHelpText('after', '\nExamples:\n  bp dropdown 4\n  bp dropdown "select[name=country]"')
+  .action(action(async (rawTarget) => {
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.dropdown.options', {
+        target: await cliElementAddress(client, target, rawTarget),
+      }, target.targetId);
+      if (useJson()) {
+        console.log(JSON.stringify({ ok: true, ...result }));
+        return;
+      }
+      const options = Array.isArray(result.options) ? result.options : [];
+      console.log(`[${result.kind}]${result.requiresOpen === true ? ' open required' : ''}`);
+      if (options.length === 0) console.log('(no exposed options)');
+      for (const option of options) {
+        if (!option || typeof option !== 'object' || Array.isArray(option)) continue;
+        console.log(`${option.selected === true ? '*' : ' '} ${option.index}  ${option.label}  value=${JSON.stringify(option.value)}`);
+      }
+      if (result.truncated === true) console.log('... [truncated]');
+    });
+  }));
+
+program.command('select <target> <option>')
+  .description('Select and verify a dropdown option')
+  .option('--by <mode>', 'match by label, value, or index', 'label')
+  .option('--contains', 'use case-insensitive substring matching')
+  .option('-l, --limit <n>', 'max elements in returned snapshot', '50')
+  .addHelpText('after', '\nExamples:\n  bp select 4 "United States"\n  bp select 4 us --by value\n  bp select 4 3 --by index')
+  .action(action(async (rawTarget, rawOption, opts) => {
+    if (!['label', 'value', 'index'].includes(opts.by)) throw new Error('--by must be label, value, or index');
+    const choice: Record<string, JsonValue> = opts.by === 'index'
+      ? { by: 'index', index: parseRef(rawOption) }
+      : { by: opts.by, [opts.by]: rawOption, exact: opts.contains !== true };
+    const limit = parseLimit(opts.limit);
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.dropdown.select', {
+        target: await cliElementAddress(client, target, rawTarget),
+        choice,
+        observationLimit: limit,
+      }, target.targetId);
+      emitObservation(result);
+    });
+  }));
+
 // ─── upload ─────────────────────────────────────────
 
 program.command('upload <filepath>')
@@ -601,12 +790,27 @@ program.command('screenshot [filename]')
   .description('Capture screenshot')
   .option('-f, --full', 'capture full page')
   .option('--selector <sel>', 'capture specific element')
-  .addHelpText('after', '\nExamples:\n  bp screenshot\n  bp screenshot page.png\n  bp screenshot --full\n  bp screenshot --selector ".chart"')
+  .option('--annotate [refs]', 'draw Observation ref boxes; optionally comma-separated refs')
+  .addHelpText('after', '\nExamples:\n  bp screenshot\n  bp screenshot page.png\n  bp screenshot --full\n  bp screenshot --selector ".chart"\n  bp screenshot page.png --annotate\n  bp screenshot page.png --annotate 1,3,8')
   .action(action(async (filename, opts) => {
+    if (opts.annotate !== undefined && (opts.full || opts.selector)) {
+      throw new Error('--annotate cannot be combined with --full or --selector');
+    }
     await withCliTarget(async (client, target) => {
+      let annotations: Record<string, JsonValue> | undefined;
+      if (opts.annotate !== undefined) {
+        const refs = typeof opts.annotate === 'string'
+          ? opts.annotate.split(',').map((value: string) => parseRef(value.trim()))
+          : undefined;
+        annotations = {
+          observationId: await client.latestObservation(target.targetId),
+          ...(refs ? { refs } : {}),
+        };
+      }
       const result = await client.callTool('browser.capture', {
         fullPage: opts.full,
         ...(opts.selector ? { selector: opts.selector } : {}),
+        ...(annotations ? { annotations } : {}),
         includeOriginal: true,
       }, target.targetId);
       const artifact = artifactFrom(result);
@@ -621,7 +825,11 @@ program.command('screenshot [filename]')
           await client.releaseArtifact(preview.id).catch(() => {});
         }
       }
-      emit({ ok: true, file: outputPath }, `\u2713 Screenshot saved to ${outputPath}`);
+      emit({
+        ok: true,
+        file: outputPath,
+        ...(typeof result.annotationCount === 'number' ? { annotationCount: result.annotationCount } : {}),
+      }, `\u2713 Screenshot saved to ${outputPath}`);
     });
   }));
 

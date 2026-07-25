@@ -15,6 +15,7 @@ import {
   OBSERVATION_V1_LIMITS,
   type ObservationElement,
   type ObservationTruncationReason,
+  type PageGeometry,
 } from './protocol/model.js';
 import { BrowserPilotError } from './protocol/errors.js';
 import type { Transport } from './transport.js';
@@ -22,7 +23,7 @@ import type { Transport } from './transport.js';
 const INTERACTIVE_ROLES = new Set([
   'button', 'link', 'textbox', 'searchbox', 'combobox', 'listbox',
   'checkbox', 'radio', 'spinbutton', 'slider', 'switch',
-  'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab',
+  'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'tab',
 ]);
 
 // Roles where an empty name is acceptable (unnamed inputs are still interactive)
@@ -98,6 +99,7 @@ export class MemoryRefStore implements RefStore {
 export interface SnapshotData {
   title: string;
   url: string;
+  page?: PageGeometry;
   // NOTE: elements are exposed to LLM agents — keep this lean.
   // backendNodeId remains internal to the in-memory Observation record.
   elements: ObservationElement[];
@@ -159,6 +161,17 @@ export async function takeSnapshot(
 
   const title = boundedText(pageInfo.title, OBSERVATION_V1_LIMITS.maxTitleCharacters);
   const url = boundedText(pageInfo.url, OBSERVATION_V1_LIMITS.maxUrlCharacters);
+  const rawPage = pageInfo.page && typeof pageInfo.page === 'object'
+    ? pageInfo.page as Record<string, unknown>
+    : undefined;
+  const pageKeys = [
+    'viewportWidth', 'viewportHeight', 'documentWidth', 'documentHeight',
+    'scrollX', 'scrollY', 'pixelsAbove', 'pixelsBelow', 'pixelsLeft',
+    'pixelsRight', 'scrollPercentX', 'scrollPercentY',
+  ] as const;
+  const page = rawPage && pageKeys.every(key => Number.isFinite(rawPage[key]) && Number(rawPage[key]) >= 0)
+    ? Object.fromEntries(pageKeys.map(key => [key, Number(rawPage[key])])) as unknown as PageGeometry
+    : undefined;
   const pageGuidance = pageInfo.guidance && typeof pageInfo.guidance === 'object'
     ? pageInfo.guidance as Record<string, unknown>
     : {};
@@ -198,7 +211,7 @@ export async function takeSnapshot(
   let eligibleCount = 0;
   const axClaimedBackendNodeIds = new Set<number>();
   const emittedBackendNodeIds = new Set<number>();
-  let serializedBytes = Buffer.byteLength(JSON.stringify({ title, url, elements: [] }), 'utf8');
+  let serializedBytes = Buffer.byteLength(JSON.stringify({ title, url, ...(page ? { page } : {}), elements: [] }), 'utf8');
   let byteBudgetExhausted = serializedBytes > OBSERVATION_V1_LIMITS.maxSerializedBytes;
   if (byteBudgetExhausted) truncation.add('byte_limit');
 
@@ -286,8 +299,10 @@ export async function takeSnapshot(
             : props.checked === false || props.checked === 'false'
               ? false
               : domFact ? domElementChecked(domFact) : undefined;
+          const nativeOption = semantic.role === 'option' && domFact?.nodeName === 'option';
           const blocked = props.disabled === true || props.disabled === 'true' ||
             props.readonly === true || props.readonly === 'true' ||
+            nativeOption ||
             (domState !== undefined && (!domState.visible || domState.disabled || domState.readonly || domState.inert));
           if (!blocked) {
             addElement({
@@ -350,7 +365,7 @@ export async function takeSnapshot(
   const truncated = truncationReasons.length > 0;
   return {
     text: lines.join('\n'),
-    data: { title, url, elements },
+    data: { title, url, ...(page ? { page } : {}), elements },
     guidance: {
       authenticationSurface: pageGuidance.authenticationSurface === true,
       modalCount,

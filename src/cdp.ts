@@ -11,6 +11,7 @@ export class CDPClient implements Transport {
   private nextId = 1;
   private callbacks = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private eventHandlers = new Map<string, Array<(params: any, sessionId?: string) => void>>();
+  private anyEventHandlers = new Set<(method: string, params: any, sessionId?: string) => void>();
   private connectionHandlers = new Set<(event: TransportConnectionEvent) => void>();
   private state: TransportConnectionState = 'disconnected';
   private closeRequested = false;
@@ -87,6 +88,9 @@ export class CDPClient implements Transport {
           for (const h of this.eventHandlers.get(msg.method) ?? []) {
             h(msg.params, msg.sessionId);
           }
+          for (const h of this.anyEventHandlers) {
+            h(msg.method, msg.params, msg.sessionId);
+          }
         }
       });
 
@@ -136,6 +140,11 @@ export class CDPClient implements Transport {
     const handlers = this.eventHandlers.get(method) ?? [];
     handlers.push(handler);
     this.eventHandlers.set(method, handlers);
+  }
+
+  onAny(handler: (method: string, params: any, sessionId?: string) => void): () => void {
+    this.anyEventHandlers.add(handler);
+    return () => this.anyEventHandlers.delete(handler);
   }
 
   onConnectionState(handler: (event: TransportConnectionEvent) => void): () => void {

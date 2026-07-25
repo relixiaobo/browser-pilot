@@ -217,6 +217,12 @@ test('tool arguments are validated from the same schemas returned by the manifes
     { fullPage: true, includeOriginal: true },
   );
   assert.deepEqual(
+    validateToolArguments('browser.capture', {
+      annotations: { observationId: 'observation:123', refs: [1, 3] },
+    }),
+    { annotations: { observationId: 'observation:123', refs: [1, 3] } },
+  );
+  assert.deepEqual(
     validateToolArguments('browser.click', { target: { observationId: 'obs:123', ref: 3 } }),
     { target: { observationId: 'obs:123', ref: 3 } },
   );
@@ -230,9 +236,48 @@ test('tool arguments are validated from the same schemas returned by the manifes
   );
   assert.deepEqual(validateToolArguments('browser.tabs.list', { scope: 'all' }), { scope: 'all' });
   assert.deepEqual(validateToolArguments('browser.tabs.release', {}), {});
+  assert.deepEqual(validateToolArguments('browser.search', {
+    query: 'invoice total', wholeWord: true, limit: 20,
+  }), {
+    query: 'invoice total', wholeWord: true, limit: 20,
+  });
+  assert.deepEqual(validateToolArguments('browser.elements.find', {
+    selector: '[role=option]', attributeNames: ['aria-selected'], pierceShadow: true,
+  }), {
+    selector: '[role=option]', attributeNames: ['aria-selected'], pierceShadow: true,
+  });
+  assert.deepEqual(validateToolArguments('browser.scroll', {
+    target: { observationId: 'observation:123', ref: 2 },
+    direction: 'down', amount: 0.8, unit: 'viewport',
+  }), {
+    target: { observationId: 'observation:123', ref: 2 },
+    direction: 'down', amount: 0.8, unit: 'viewport',
+  });
+  assert.deepEqual(validateToolArguments('browser.dropdown.select', {
+    target: { selector: '#country' }, choice: { by: 'value', value: 'us', exact: true },
+  }), {
+    target: { selector: '#country' }, choice: { by: 'value', value: 'us', exact: true },
+  });
+  assert.throws(
+    () => validateToolArguments('browser.dropdown.options', { target: { ref: 2 } }),
+    error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+  );
   assert.throws(
     () => validateToolArguments('browser.tabs.list', { scope: 'all_authorized' }),
     error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+  );
+});
+
+test('new page primitives expose bounded schemas through the canonical manifest', () => {
+  const tool = name => TOOL_DEFINITIONS.find(definition => definition.name === name);
+  assert.equal(tool('browser.search').outputSchema.properties.matches.maxItems, 200);
+  assert.equal(tool('browser.elements.find').outputSchema.properties.elements.maxItems, 200);
+  assert.equal(tool('browser.dropdown.options').outputSchema.properties.options.maxItems, 500);
+  assert.equal(tool('browser.scroll').mutating, true);
+  assert.equal(tool('browser.dropdown.select').idempotency, 'non_idempotent');
+  assert.deepEqual(
+    tool('browser.elements.find').sensitivity.output,
+    ['browser_data', 'credential'],
   );
 });
 

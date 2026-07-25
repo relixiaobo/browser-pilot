@@ -4,6 +4,7 @@ import http from 'node:http';
 import { access, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
+import { WebSocketServer } from 'ws';
 
 const CLI = join(process.cwd(), 'dist', 'cli.js');
 
@@ -97,6 +98,68 @@ async function stopDaemon(socketPath) {
   });
 }
 
+async function waitForFile(path, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
+async function startGatedCdpFixture() {
+  const server = http.createServer();
+  const websocket = new WebSocketServer({ noServer: true });
+  const upgrades = [];
+  let released = false;
+  let connectionCount = 0;
+  const accept = ({ request, socket, head }) => {
+    websocket.handleUpgrade(request, socket, head, client => {
+      websocket.emit('connection', client, request);
+    });
+  };
+  server.on('upgrade', (request, socket, head) => {
+    const upgrade = { request, socket, head };
+    socket.once('close', () => {
+      const index = upgrades.indexOf(upgrade);
+      if (index >= 0) upgrades.splice(index, 1);
+    });
+    if (released) accept(upgrade);
+    else upgrades.push(upgrade);
+  });
+  websocket.on('connection', socket => {
+    connectionCount += 1;
+    socket.on('message', bytes => {
+      const message = JSON.parse(bytes.toString());
+      socket.send(JSON.stringify({ id: message.id, result: {} }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/gated`,
+    get connectionCount() { return connectionCount; },
+    get pendingUpgradeCount() { return upgrades.length; },
+    release() {
+      if (released) return;
+      released = true;
+      for (const upgrade of upgrades.splice(0)) accept(upgrade);
+    },
+    async close() {
+      this.release();
+      for (const socket of websocket.clients) socket.terminate();
+      await new Promise(resolve => websocket.close(resolve));
+      await new Promise(resolve => server.close(resolve));
+    },
+  };
+}
+
 function startLiveBridge(root, instanceId) {
   const child = spawn(process.execPath, [CLI, 'bridge', '--stdio'], {
     env: { ...process.env, HOME: root, PATH: '' },
@@ -174,6 +237,93 @@ test('simultaneous bridge processes start and reuse exactly one per-user Broker'
     recovered.messages[0].result.brokerProcessIdentity,
     locator.brokerProcessIdentity,
   );
+});
+
+test('clients reuse a Broker that is still waiting for browser authorization', async t => {
+  const root = await mkdtemp('/tmp/bp-starting-broker-');
+  const stateDir = join(root, '.browser-pilot');
+  const socketPath = join(stateDir, 'daemon.sock');
+  const profile = join(root, 'profile');
+  await mkdir(profile, { recursive: true });
+  const cdp = await startGatedCdpFixture();
+  const daemon = spawn(process.execPath, [
+    join(process.cwd(), 'dist', 'daemon.js'),
+    cdp.wsUrl,
+    'Chrome',
+    profile,
+  ], {
+    env: { ...process.env, HOME: root, PATH: '' },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  daemon.stderr.on('data', bytes => { stderr += bytes.toString(); });
+  t.after(async () => {
+    await stopDaemon(socketPath).catch(() => {});
+    if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGTERM');
+    await cdp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const pidFile = join(stateDir, 'daemon.pid');
+  await waitForFile(pidFile);
+  const starting = JSON.parse(await readFile(pidFile, 'utf8'));
+  assert.equal(starting.state, 'starting');
+  assert.equal(starting.pid, daemon.pid);
+
+  const bridge = runBridge(root, 'startup:authorization-wait');
+  await waitForFile(join(stateDir, 'startup.lock'));
+  cdp.release();
+  const result = await bridge;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.messages[0].error, undefined);
+
+  const locator = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
+  assert.equal(locator.pid, daemon.pid);
+  assert.equal(cdp.connectionCount, 1);
+  assert.equal(stderr, '');
+});
+
+test('terminating an authorization-pending Broker removes its worker and starting record', async t => {
+  const root = await mkdtemp('/tmp/bp-stopping-broker-');
+  const stateDir = join(root, '.browser-pilot');
+  const profile = join(root, 'profile');
+  await mkdir(profile, { recursive: true });
+  const cdp = await startGatedCdpFixture();
+  const daemon = spawn(process.execPath, [
+    join(process.cwd(), 'dist', 'daemon.js'),
+    cdp.wsUrl,
+    'Chrome',
+    profile,
+  ], {
+    env: { ...process.env, HOME: root, PATH: '' },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  daemon.stderr.on('data', bytes => { stderr += bytes.toString(); });
+  t.after(async () => {
+    if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGKILL');
+    await cdp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const pidFile = join(stateDir, 'daemon.pid');
+  await waitForFile(pidFile);
+  daemon.kill('SIGTERM');
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Authorization-pending Broker did not exit')), 10_000);
+    daemon.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  const deadline = Date.now() + 5_000;
+  while (cdp.pendingUpgradeCount > 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+
+  await assert.rejects(access(pidFile));
+  assert.equal(cdp.pendingUpgradeCount, 0);
+  assert.equal(stderr, '');
 });
 
 test('incompatible clients fail without replacing the running Broker', async t => {

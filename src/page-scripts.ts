@@ -426,8 +426,26 @@ export const READ_FILE_INPUT_STATE = `function() {
   };
 }`;
 
-/** Return bounded page identity and guidance signals without page text or field values. */
-export const PAGE_INFO = `JSON.stringify({title:document.title,url:location.href,guidance:(()=>{
+/** Return bounded page identity, geometry, and guidance signals without field values. */
+export const PAGE_INFO = `JSON.stringify({title:document.title,url:location.href,page:(()=>{
+  const root=document.documentElement;
+  const body=document.body;
+  const viewportWidth=Math.max(0,Math.round(window.innerWidth||root?.clientWidth||0));
+  const viewportHeight=Math.max(0,Math.round(window.innerHeight||root?.clientHeight||0));
+  const documentWidth=Math.max(viewportWidth,Math.round(root?.scrollWidth||0),Math.round(body?.scrollWidth||0));
+  const documentHeight=Math.max(viewportHeight,Math.round(root?.scrollHeight||0),Math.round(body?.scrollHeight||0));
+  const scrollX=Math.max(0,Math.round(window.scrollX||root?.scrollLeft||0));
+  const scrollY=Math.max(0,Math.round(window.scrollY||root?.scrollTop||0));
+  const maxX=Math.max(0,documentWidth-viewportWidth);
+  const maxY=Math.max(0,documentHeight-viewportHeight);
+  return{
+    viewportWidth,viewportHeight,documentWidth,documentHeight,scrollX,scrollY,
+    pixelsAbove:scrollY,pixelsBelow:Math.max(0,maxY-scrollY),
+    pixelsLeft:scrollX,pixelsRight:Math.max(0,maxX-scrollX),
+    scrollPercentX:maxX>0?Math.round(scrollX/maxX*1000)/10:0,
+    scrollPercentY:maxY>0?Math.round(scrollY/maxY*1000)/10:0,
+  };
+})(),guidance:(()=>{
   const result={authenticationSurface:false,blockingModalCount:0,explicitAutocompleteCount:0,explicitFilterCount:0};
   const roots=[document];
   let visited=0;

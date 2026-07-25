@@ -1,6 +1,6 @@
 # Browser Capability and Reliability Evolution Plan
 
-Status: **Approved, ready to run in parallel after shared contract A0**  
+Status: **Implemented through B7**
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`  
 Workstream: B
 
@@ -26,6 +26,11 @@ Adopt or adapt:
 - Remaining-action cancellation after page, frame, focus, or document change.
 - Typed browser watchdog events.
 - Guidance for autocomplete, modals, filters, 403 responses, and loops.
+- Multiple bounded page representations: interactive refs, readable text,
+  targeted text search, DOM metadata, and annotated screenshots.
+- First-class page/container scrolling and verified native/custom dropdown
+  operations.
+- Repeated-action detection that also checks whether bounded page state changed.
 
 Do not copy:
 
@@ -80,9 +85,11 @@ Preserve Browser Pilot advantages:
     capability fixtures through Browser Pilot Observations, including selected
     same-process and OOPIF frames. The recorded v1 baseline is 10/10 actionable
     target recall, 2/12 false interactable refs, 2/2 expected action failures
-    detected, 2/2 same-document stale refs detected, and a 208-byte maximum
-    normalized Observation sample. Ground truth uses only public role/name
-    pairs; ephemeral origins, selectors, and CDP identity are excluded.
+    detected, 2/2 same-document stale refs detected, and an initial 208-byte
+    maximum normalized Observation sample. B7 intentionally added bounded page
+    geometry and re-baselined that maximum at 426 bytes, still far below the
+    2 MiB protocol budget. Ground truth uses only public role/name pairs;
+    ephemeral origins, selectors, and CDP identity are excluded.
 
 ### B1. Build the observation engine
 
@@ -342,6 +349,43 @@ Preserve Browser Pilot advantages:
     interactable rate may decrease. Corpus drift, unclassified refs, any metric
     regression, output growth beyond the recorded maximum, or violation of the
     protocol byte budget fails the gate.
+
+### B7. Add adaptive page primitives from browser-use
+
+- [x] **B7.1** Add bounded visible-text search and bounded CSS element
+  inspection as distinct page representations.
+  - Complete: `browser.search` returns at most 200 visible matches with nearby
+    context and viewport geometry. `browser.elements.find` returns at most 200
+    safe metadata records and only explicitly requested attributes. Both can
+    traverse open Shadow DOM, expose no DOM/CDP handles, and use the existing
+    `observation.read` capability.
+- [x] **B7.2** Add first-class scrolling with fresh page state.
+  - Complete: `browser.scroll` supports page, selector, Observation ref, text,
+    relative distance, and start/end boundaries. It returns typed evidence and
+    a fresh Observation whose optional `page` block reports viewport/document
+    dimensions, scroll position, remaining pixels, and percentages.
+- [x] **B7.3** Add native and ARIA dropdown inspection and selection.
+  - Complete: native selects enumerate bounded options, emit input/change, and
+    verify browser state. Custom controls use trusted ref clicks, refresh the
+    Observation after opening, and select only an option ref from that fresh
+    state. No framework-specific selectors or persistent handles were added.
+- [x] **B7.4** Add screenshot annotations without changing the page.
+  - Complete: viewport capture can revalidate up to 200 refs from one
+    Observation, read live geometry, and draw numbered boxes on an unattached
+    canvas in a Chrome isolated world. Screenshot bytes are never evaluated in
+    the page's default world. Full-page/selector combinations fail explicitly,
+    output remains a protected Artifact, and tests assert the page DOM is unchanged.
+- [x] **B7.5** Detect repeated identical actions against stagnant page state.
+  - Complete: action signatures and bounded page fingerprints remain internal.
+    Three repeated actions without a fingerprint change emit the existing
+    `watchdog.no_progress` event and `repeated_action` hint with reason
+    `stagnant_page`; action parameters, typed values, page text, and hashes are
+    not exposed.
+- [x] **B7.6** Keep the additions Agent-neutral and backward compatible.
+  - Complete: one-shot CLI commands and Broker `tools/list` share the canonical
+    implementations. The tools reuse existing capabilities and are additive
+    for protocol 1.0/1.1. Multi-action queues, LLM extraction, planning, and
+    memory remain Host-Agent responsibilities.
 
 ## Parallel Work Rules
 

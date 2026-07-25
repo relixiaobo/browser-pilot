@@ -534,6 +534,7 @@ test('capability metrics do not regress from the versioned Chrome baseline', asy
       protocolBudgetBytes: OBSERVATION_V1_LIMITS.maxSerializedBytes,
     },
   };
+  t.diagnostic(`browser capability metrics: ${JSON.stringify(report)}`);
   const baseline = JSON.parse(await readFile(
     new URL('./baselines/browser-capability.v1.json', import.meta.url),
     'utf8',
@@ -584,5 +585,4 @@ test('capability metrics do not regress from the versioned Chrome baseline', asy
     maxNormalizedObservationBytes <= OBSERVATION_V1_LIMITS.maxSerializedBytes,
     'normalized Observation output exceeded the protocol budget',
   );
-  t.diagnostic(`browser capability metrics: ${JSON.stringify(report)}`);
 });

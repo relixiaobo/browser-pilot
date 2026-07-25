@@ -80,6 +80,14 @@ export interface BrokerStartupLock {
   release(): void;
 }
 
+export interface BrokerStartingRecord {
+  schemaVersion: 2;
+  pid: number;
+  startedAt: number;
+  brokerProcessIdentity: string;
+  state: 'starting';
+}
+
 export interface AcquireBrokerStartupLockOptions {
   paths?: BrowserPilotPaths;
   timeoutMs?: number;
@@ -289,6 +297,49 @@ function atomicWriteJson(path: string, value: object): void {
     renameSync(temporary, path);
   } finally {
     try { unlinkSync(temporary); } catch { /* renamed or absent */ }
+  }
+}
+
+export function writeBrokerStartingSync(
+  record: Omit<BrokerStartingRecord, 'schemaVersion' | 'state'>,
+  paths: BrowserPilotPaths = BROWSER_PILOT_PATHS,
+): void {
+  if (
+    !isSafePid(record.pid) ||
+    !isSafeTimestamp(record.startedAt) ||
+    typeof record.brokerProcessIdentity !== 'string' ||
+    record.brokerProcessIdentity.length === 0 ||
+    record.brokerProcessIdentity.length > 256
+  ) {
+    throw new Error('Invalid starting Broker record');
+  }
+  atomicWriteJson(paths.pidFile, {
+    schemaVersion: 2,
+    ...record,
+    state: 'starting',
+  } satisfies BrokerStartingRecord);
+}
+
+export function readBrokerStartingSync(
+  paths: BrowserPilotPaths = BROWSER_PILOT_PATHS,
+): BrokerStartingRecord | undefined {
+  if (!existsSync(paths.pidFile) || existsSync(paths.locatorFile)) return undefined;
+  try {
+    const value = parseJsonFile(paths.pidFile);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    if (
+      record.schemaVersion !== 2 ||
+      record.state !== 'starting' ||
+      !isSafePid(record.pid) ||
+      !isSafeTimestamp(record.startedAt) ||
+      typeof record.brokerProcessIdentity !== 'string' ||
+      record.brokerProcessIdentity.length === 0 ||
+      record.brokerProcessIdentity.length > 256
+    ) return undefined;
+    return record as unknown as BrokerStartingRecord;
+  } catch {
+    return undefined;
   }
 }
 

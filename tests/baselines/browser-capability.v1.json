@@ -23,7 +23,7 @@
   },
   "outputSize": {
     "samples": 10,
-    "maxNormalizedObservationBytes": 208,
+    "maxNormalizedObservationBytes": 426,
     "protocolBudgetBytes": 2097152
   }
 }

@@ -16,7 +16,9 @@ async function startCdpFixture() {
     ['user-tab', { targetId: 'user-tab', type: 'page', title: 'User', url: 'https://user.test/' }],
   ]);
   const closed = [];
+  let connectionCount = 0;
   server.on('connection', socket => {
+    connectionCount += 1;
     socket.on('message', bytes => {
       const message = JSON.parse(bytes.toString());
       const result = value => socket.send(JSON.stringify({ id: message.id, result: value }));
@@ -55,6 +57,7 @@ async function startCdpFixture() {
     wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/crash`,
     targets,
     closed,
+    get connectionCount() { return connectionCount; },
     async close() {
       for (const socket of server.clients) socket.terminate();
       await new Promise(resolve => server.close(resolve));
@@ -163,6 +166,7 @@ test('daemon SIGKILL reclaims managed targets without closing user tabs', async 
     },
   });
   assert.equal(cdp.targets.has('managed-crash'), true);
+  assert.equal(cdp.connectionCount, 1, 'daemon and crash janitor must share one browser connection');
 
   daemon.kill('SIGKILL');
   await new Promise(resolve => daemon.once('exit', resolve));

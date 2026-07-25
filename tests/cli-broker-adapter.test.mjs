@@ -79,6 +79,37 @@ async function startFakeDaemon(root) {
           elementCount: 1,
         };
       case 'browser.click': return observation({ observationId: 'observation:after-click' });
+      case 'browser.search':
+        return {
+          workspaceId: 'workspace:cli', leaseId: 'lease:cli', targetId: 'target:managed',
+          url: 'https://example.test/form', title: 'Example Form', totalMatches: 1,
+          matches: [{ index: 1, text: 'Submit', context: 'Submit this form', tagName: 'button', visible: true, x: 10, y: 20, width: 80, height: 30 }],
+          truncated: false,
+        };
+      case 'browser.elements.find':
+        return {
+          workspaceId: 'workspace:cli', leaseId: 'lease:cli', targetId: 'target:managed',
+          url: 'https://example.test/form', title: 'Example Form', totalMatches: 1,
+          elements: [{ index: 1, tagName: 'button', role: 'button', name: 'Submit', text: 'Submit', visible: true, enabled: true, x: 10, y: 20, width: 80, height: 30, attributes: [] }],
+          truncated: false,
+        };
+      case 'browser.scroll':
+        return observation({
+          observationId: 'observation:after-scroll',
+          page: { viewportWidth: 800, viewportHeight: 600, documentWidth: 800, documentHeight: 1800, scrollX: 0, scrollY: 480, pixelsAbove: 480, pixelsBelow: 720, pixelsLeft: 0, pixelsRight: 0, scrollPercentX: 0, scrollPercentY: 40 },
+          evidence: { action: 'scroll', status: 'verified', mode: 'relative', target: 'page', moved: true, deltaX: 0, deltaY: 480, beforeX: 0, beforeY: 0, afterX: 0, afterY: 480 },
+        });
+      case 'browser.dropdown.options':
+        return {
+          workspaceId: 'workspace:cli', leaseId: 'lease:cli', targetId: 'target:managed',
+          url: 'https://example.test/form', kind: 'native', expanded: true, multiple: false,
+          requiresOpen: false, options: [{ index: 1, label: 'China', value: 'cn', selected: false, disabled: false }], truncated: false,
+        };
+      case 'browser.dropdown.select':
+        return observation({
+          observationId: 'observation:after-select',
+          evidence: { action: 'select', status: 'verified', kind: 'native', selected: [{ index: 1, label: 'China', value: 'cn', selected: true, disabled: false }] },
+        });
       case 'browser.upload': return observation({ observationId: 'observation:after-upload' });
       case 'browser.capture':
         return {
@@ -87,6 +118,7 @@ async function startFakeDaemon(root) {
           targetId: 'target:managed',
           url: 'https://example.test/form',
           artifact: artifact('artifact:screenshot', 'screenshot', 'image/png', 'capture.png'),
+          ...(args.annotations ? { annotationCount: Array.isArray(args.annotations.refs) ? args.annotations.refs.length : 1 } : {}),
         };
       case 'browser.network.requests':
         return {
@@ -261,12 +293,50 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
     observationLimit: 7,
   });
 
+  const searched = await runCli(root, ['search', 'Submit', '--whole-word']);
+  assert.equal(searched.matches[0].context, 'Submit this form');
+  const found = await runCli(root, ['find', 'button', '--attributes', 'id,data-testid']);
+  assert.equal(found.elements[0].role, 'button');
+
+  const scrolled = await runCli(root, ['scroll', 'down', '--amount', '0.8']);
+  assert.equal(scrolled.evidence.action, 'scroll');
+  assert.equal(scrolled.page.scrollY, 480);
+  const scrollCall = calls.find(call => call.body?.params?.name === 'browser.scroll');
+  assert.deepEqual(scrollCall.body.params.arguments, {
+    direction: 'down',
+    amount: 0.8,
+    unit: 'viewport',
+    observationLimit: 50,
+  });
+
+  const dropdown = await runCli(root, ['dropdown', '1']);
+  assert.equal(dropdown.options[0].value, 'cn');
+  const selected = await runCli(root, ['select', '1', 'China']);
+  assert.equal(selected.evidence.status, 'verified');
+  const selectCall = calls.find(call => call.body?.params?.name === 'browser.dropdown.select');
+  assert.deepEqual(selectCall.body.params.arguments, {
+    target: { observationId: 'observation:current', ref: 1 },
+    choice: { by: 'label', label: 'China', exact: true },
+    observationLimit: 50,
+  });
+
   const screenshotPath = join(root, 'capture.png');
   const captured = await runCli(root, ['screenshot', screenshotPath]);
   assert.equal(captured.file, screenshotPath);
   assert.equal(await readFile(screenshotPath, 'utf8'), 'screenshot-bytes');
   const exportCall = calls.find(call => call.body?.method === 'artifacts/export');
   assert.equal(exportCall.body.params.overwrite, true);
+
+  const annotatedPath = join(root, 'annotated.png');
+  const annotated = await runCli(root, ['screenshot', annotatedPath, '--annotate', '1']);
+  assert.equal(annotated.annotationCount, 1);
+  const annotationCall = calls.find(call => (
+    call.body?.params?.name === 'browser.capture' && call.body.params.arguments.annotations
+  ));
+  assert.deepEqual(annotationCall.body.params.arguments.annotations, {
+    observationId: 'observation:current',
+    refs: [1],
+  });
 
   const uploadPath = join(root, 'upload.txt');
   await writeFile(uploadPath, 'upload-source');

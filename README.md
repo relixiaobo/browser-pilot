@@ -63,6 +63,8 @@ The agent will use `bp` commands automatically. Your real login sessions are pre
 - **Real login sessions** — Operates your actual browser profile. Cookies, extensions, logins all intact
 - **CLI-native** — Any agent with bash access can use it. No MCP protocol, no SDK integration needed
 - **Auto-snapshot** — Every action returns page state with numbered `[ref]` elements, so the agent always knows what's on screen
+- **Adaptive page views** — Bounded read, text search, DOM metadata, page geometry, and annotated screenshots let an agent choose the smallest useful representation
+- **Verified page primitives** — Scroll and dropdown tools return fresh state and typed evidence instead of requiring ad hoc JavaScript
 - **Lightweight npm install** — About 200KB as an npm tarball. No bundled Chromium (unlike Playwright's 400MB+)
 - **Rich editor support** — Works with contenteditable editors (Draft.js, ProseMirror, Quill, Slate) and Shadow DOM elements out of the box
 
@@ -96,10 +98,11 @@ CLI Process ──── HTTP/Unix Socket ──── Daemon Process (persisten
                                        └── Pilot window (agent operates here)
 ```
 
-The Broker maintains the browser connection and isolated state for each Agent.
-An independent private janitor owns only Browser Pilot-created tabs so it can
-clean them after a Broker crash without touching user-opened tabs. A pulsing
-blue glow around a Pilot window indicates Agent activity.
+The Broker maintains isolated state for each Agent. A private connection
+supervisor owns the Broker's single browser-level CDP WebSocket and proxies it
+to the daemon. It also owns only Browser Pilot-created tabs so it can clean them
+after a Broker crash without touching user-opened tabs. A pulsing blue glow
+around a Pilot window indicates Agent activity.
 
 ## Platform Evolution
 
@@ -135,10 +138,17 @@ dispatch, event replay, protected Artifacts, and protocol 1.1 transport limit
 negotiation are implemented. Browser disconnect/reconnect handling, scoped
 download Artifacts, Workspace resource isolation, and typed watchdog events for
 stalled navigation, selected-frame detach, pending dialogs, and repeated
-browser-observable no-progress actions are also implemented. An internal
-managed-target janitor owns Broker-created tabs through a separate CDP
-connection and closes only those tabs and their managed popup descendants if
-the daemon exits or crashes; it does not persist target IDs or close user tabs.
+browser-observable no-progress actions are also implemented. Bounded page
+search, DOM metadata lookup, scrolling, native/ARIA dropdown operations,
+Observation page geometry, and viewport screenshot annotations adapt the most
+useful browser-use inspection patterns to the same scoped Broker contract. An
+internal managed-target janitor is the sole owner of the browser-level CDP
+connection, proxies daemon traffic over private IPC, and closes only
+Broker-created tabs and their managed popup descendants if the daemon exits or
+crashes. It does not persist target IDs or close user tabs. A starting Broker
+writes an owner-only process record before Chrome authorization, so a timed-out
+or retried client waits for that same process instead of opening another
+authorization request.
 Compatible Agent products reuse one per-user Broker through protocol
 negotiation. Protected shutdown cannot terminate live embedded clients, and an
 incompatible product must explicitly select a separate `BROWSER_PILOT_HOME`.
@@ -189,6 +199,12 @@ an incompatible isolated Broker.
 |---------|---------|-------------|
 | `bp open <url>` | snapshot | Navigate to URL |
 | `bp snapshot` | snapshot | Get interactive elements |
+| `bp read [selector]` | text | Get bounded readable page/region content |
+| `bp search <text>` | matches | Find bounded visible text and nearby context |
+| `bp find <selector>` | elements | Inspect bounded DOM metadata and requested attributes |
+| `bp scroll [direction]` | snapshot | Scroll page/element/text and return fresh state |
+| `bp dropdown <target>` | options | List native or exposed ARIA dropdown options |
+| `bp select <target> <option>` | snapshot | Select and verify a dropdown option |
 | `bp click <ref>` | snapshot | Click element by ref number (`--double`, `--right`) |
 | `bp click --xy x,y` | snapshot | Click at viewport coordinates (canvas, maps) |
 | `bp locate <selector>` | coords | Get element center x,y + size (for `click --xy`) |
@@ -201,7 +217,7 @@ an incompatible isolated Broker.
 
 | Command | Description |
 |---------|-------------|
-| `bp screenshot [file]` | Capture screenshot (`--full`, `--selector`) |
+| `bp screenshot [file]` | Capture screenshot (`--full`, `--selector`, `--annotate [refs]`) |
 | `bp pdf [file]` | Save page as PDF (`--landscape`) |
 | `bp cookies [domain]` | View cookies (includes HttpOnly) |
 
@@ -263,7 +279,10 @@ Action commands return a snapshot of interactive elements, each with a `[ref]` n
 
 Use the number in subsequent commands: `bp click 1`, `bp type 2 "hello"`.
 
-Refs are scoped to the current page — they refresh automatically after every action. Elements inside Shadow DOM are included automatically.
+Refs are scoped to the current page — they refresh automatically after every
+action. Elements inside Shadow DOM are included automatically. Snapshot JSON
+may also include a `page` block with viewport/document size, scroll position,
+remaining pixels, and scroll percentages.
 
 Across one-shot CLI processes, active target, frame, and refs live only in the
 daemon's keyed compatibility Workspace and renewable Lease. They are never
@@ -275,7 +294,7 @@ observe again. `bp disconnect` explicitly clears the compatibility Workspace.
 **JSON by default** when piped (for LLM/script consumption). Human-readable when run in a terminal.
 
 ```json
-{"ok":true, "title":"Example", "url":"https://example.com", "elements":[{"ref":1, "role":"link", "name":"More info"}]}
+{"ok":true,"title":"Example","url":"https://example.com","page":{"viewportWidth":1280,"viewportHeight":720,"documentWidth":1280,"documentHeight":1800,"scrollX":0,"scrollY":0,"pixelsAbove":0,"pixelsBelow":1080,"pixelsLeft":0,"pixelsRight":0,"scrollPercentX":0,"scrollPercentY":0},"elements":[{"ref":1,"role":"link","name":"More info"}]}
 ```
 
 Errors include hints:
@@ -291,6 +310,12 @@ Artifacts, explicitly exported to that path, then released from Broker storage.
 `bp upload <file>` similarly imports a protected copy and releases it after the
 browser receives the file; the source file is never removed.
 
+After `bp snapshot`, `bp screenshot page.png --annotate` draws up to the first
+200 current refs on a viewport image; pass a comma-separated list such as
+`--annotate 1,3,8` to limit it. Annotation does not inject elements into the
+page, runs in an isolated JavaScript world, and cannot be combined with full-page
+or selector capture.
+
 ## Eval
 
 `eval` is the escape hatch — anything JavaScript can do:
@@ -299,12 +324,15 @@ browser receives the file; the source file is never removed.
 bp eval "history.back()"                            # go back
 bp eval "history.forward()"                         # go forward
 bp eval "location.reload()"                         # reload
-bp eval "window.scrollBy(0, 500)"                   # scroll down
 bp eval "document.querySelector('h1').textContent"   # extract text
 bp eval "document.querySelector('div').innerHTML"    # extract HTML
 bp eval "JSON.stringify(localStorage)"               # read storage
 echo 'complex js here' | bp eval                    # stdin for complex JS
 ```
+
+Prefer `bp read`, `bp search`, `bp find`, `bp scroll`, `bp dropdown`, and
+`bp select` for their bounded output, scoped state, and verification. Use
+`eval` only when no dedicated command represents the operation.
 
 ## File Upload
 

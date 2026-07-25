@@ -317,9 +317,12 @@ atomic owner-recorded startup lock surrounds discovery and daemon launch. Every
 contender health-checks before and after the lock; therefore exactly one
 process starts the Broker and all others reuse it.
 A lock whose owner is dead can be reclaimed; a live owner is never displaced
-merely because startup is slow. A dead locator/socket is removed without
-signaling its recorded PID. If the PID is alive but the endpoint is
-unresponsive, Browser Pilot returns structured
+merely because startup is slow. Before browser authorization begins, the daemon
+writes an owner-only `starting` process record. If the launcher exits or times
+out, later contenders wait for that same PID and reuse its endpoint after it
+becomes ready; they never create a second Chrome authorization request. A dead
+locator/socket is removed without signaling its recorded PID. If a ready PID is
+alive but its endpoint is unresponsive, Browser Pilot returns structured
 restart remediation and never silently kills or replaces the process.
 
 ## Primary Flows
@@ -604,15 +607,15 @@ and explicit user configuration may persist. DOM snapshots, refs, cookies,
 passwords, network bodies, and transient control state never persist.
 
 Broker-created targets cross one additional private ownership boundary. A
-janitor child process uses an independent root CDP connection to create and
-track only managed targets plus popup descendants with a verified managed
-opener chain. Its parent pipe is the liveness signal: daemon EOF, including
-`SIGKILL`, causes bounded descendant-first target cleanup. User targets are
-never adopted merely because they share a browser window. If the janitor exits
-while the daemon remains live, its replacement adopts the still-live IDs held
-in daemon memory. Browser disconnect clears that transient ownership before a
-new connection generation is exposed. No janitor method or raw target ID is
-part of the CLI or stdio protocol, and no ownership record is written to disk.
+janitor child process is the sole owner of the root CDP WebSocket and proxies
+all daemon CDP requests, results, and events over private IPC. The same process
+creates and tracks only managed targets plus popup descendants with a verified
+managed opener chain. Its parent pipe is the liveness signal: daemon EOF,
+including `SIGKILL`, causes bounded descendant-first target cleanup. User
+targets are never adopted merely because they share a browser window. Browser
+disconnect clears that transient ownership before a new connection generation
+is exposed. No janitor method or raw target ID is part of the CLI or stdio
+protocol, and no ownership record is written to disk.
 
 ## Observation and Ref Semantics
 

@@ -73,10 +73,13 @@ async function verifyJanitor(path) {
     server.once('listening', resolveListen);
     server.once('error', reject);
   });
+  let connectionCount = 0;
   server.on('connection', socket => {
+    connectionCount += 1;
     socket.on('message', bytes => {
       const message = JSON.parse(bytes.toString());
-      if (message.id !== undefined) socket.send(JSON.stringify({ id: message.id, result: {} }));
+      const result = message.method === 'Target.getTargets' ? { targetInfos: [] } : {};
+      if (message.id !== undefined) socket.send(JSON.stringify({ id: message.id, result }));
     });
   });
   const port = server.address().port;
@@ -84,14 +87,26 @@ async function verifyJanitor(path) {
     '--browser-pilot-internal=janitor',
     `ws://127.0.0.1:${port}/devtools/browser/release-test`,
   ], {
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
+    serialization: 'advanced',
     windowsHide: true,
   });
-  let stdout = '';
   let stderr = '';
-  child.stdout.on('data', value => {
-    stdout += value.toString();
-    if (stdout.includes('"ready"')) child.stdin.end();
+  let ready = false;
+  let proxied = false;
+  child.on('message', message => {
+    if (message?.event === 'ready') {
+      ready = true;
+      child.send({
+        id: 1,
+        method: 'cdp.send',
+        params: { method: 'Target.getTargets' },
+      });
+    } else if (message?.id === 1) {
+      assert.deepEqual(message.result, { targetInfos: [] });
+      proxied = true;
+      child.stdin.end();
+    }
   });
   child.stderr.on('data', value => { stderr += value.toString(); });
   let result;
@@ -116,7 +131,9 @@ async function verifyJanitor(path) {
     await new Promise(resolveClose => server.close(resolveClose));
   }
   assert.equal(result.code, 0, stderr);
-  assert.match(stdout, /"event":"ready"/);
+  assert.equal(ready, true);
+  assert.equal(proxied, true);
+  assert.equal(connectionCount, 1);
 }
 
 const manifest = JSON.parse(await readFile(join(bundle, 'manifest.json'), 'utf8'));

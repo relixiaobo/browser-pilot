@@ -163,10 +163,11 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     Target, auth, network, frame, Observation, Artifact, and partial download
     cleanup is connected. Browser connection loss now rejects tools, invalidates
     sessions/refs, rediscovers the selected profile, and advances generation on
-    restoration. A private child janitor creates managed targets over an
-    independent CDP connection, tracks verified popup descendants, and closes
-    them on daemon-pipe EOF, including `SIGKILL`, without persisting target IDs
-    or grouping by browser window. Process-level tests prove user tabs survive.
+    restoration. A private child janitor solely owns the browser-level CDP
+    connection, proxies daemon traffic over IPC, tracks verified managed popup
+    descendants, and closes them on daemon-pipe EOF, including `SIGKILL`,
+    without persisting target IDs or grouping by browser window. Process-level
+    tests prove user tabs survive and only one browser WebSocket is opened.
 - [x] **A3.3** Implement command accepted/dispatched/completed,
   `unknown_outcome`, deadline, cancellation, and duplicate-call behavior.
   - Covers: BR-8 through BR-12, AC-5.
@@ -257,9 +258,10 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     deterministic short runtime path when required; Windows uses a per-user
     named pipe. State/runtime directories and metadata are owner-only. An
     atomic startup lock plus a post-lock health check makes concurrent launch a
-    single-winner operation. Dead owners are reclaimed without killing a PID;
-    live but unresponsive Brokers fail with explicit remediation and are never
-    silently replaced.
+    single-winner operation. A pre-authorization starting record lets clients
+    survive launcher timeout and reuse the same daemon PID. Dead owners are
+    reclaimed without killing a PID; live but unresponsive ready Brokers fail
+    with explicit remediation and are never silently replaced.
 - [x] **A6.3** Implement executable/protocol negotiation, live-client upgrade
   protection, rollback metadata, and deliberate version isolation.
   - Covers: AC-7, NFR-2.

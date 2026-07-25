@@ -181,6 +181,41 @@ const uploadEvidenceSchema = objectSchema({
   ] }),
 }, ['action', 'status', 'expectedFileCount']);
 
+const scrollEvidenceSchema = objectSchema({
+  action: stringSchema({ const: 'scroll' }),
+  status: stringSchema({ enum: ['verified', 'mismatch'] }),
+  mode: stringSchema({ enum: ['relative', 'position', 'text'] }),
+  target: stringSchema({ enum: ['page', 'element', 'text'] }),
+  moved: booleanSchema(),
+  deltaX: numberSchema(),
+  deltaY: numberSchema(),
+  beforeX: numberSchema({ minimum: 0 }),
+  beforeY: numberSchema({ minimum: 0 }),
+  afterX: numberSchema({ minimum: 0 }),
+  afterY: numberSchema({ minimum: 0 }),
+  matchedText: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+  reason: stringSchema({ enum: ['at_boundary', 'text_not_found'] }),
+}, [
+  'action', 'status', 'mode', 'target', 'moved', 'deltaX', 'deltaY',
+  'beforeX', 'beforeY', 'afterX', 'afterY',
+]);
+
+const dropdownOptionSchema = objectSchema({
+  index: integerSchema({ minimum: 1, maximum: 500 }),
+  label: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+  value: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+  selected: booleanSchema(),
+  disabled: booleanSchema(),
+}, ['index', 'label', 'value', 'selected', 'disabled']);
+
+const selectEvidenceSchema = objectSchema({
+  action: stringSchema({ const: 'select' }),
+  status: stringSchema({ enum: ['verified', 'mismatch', 'unavailable'] }),
+  kind: stringSchema({ enum: ['native', 'aria'] }),
+  selected: arraySchema(dropdownOptionSchema, { maxItems: 500 }),
+  reason: stringSchema({ enum: ['option_not_found', 'selection_mismatch', 'selection_not_exposed'] }),
+}, ['action', 'status', 'kind', 'selected']);
+
 const artifactSchema = objectSchema({
   id: opaqueIdSchema,
   workspaceId: opaqueIdSchema,
@@ -296,19 +331,71 @@ function resultSchema(
 const observationOutput = resultSchema('target', {
   observationId: opaqueIdSchema,
   title: sensitive(stringSchema({ maxLength: OBSERVATION_V1_LIMITS.maxTitleCharacters }), 'browser_data'),
+  page: objectSchema({
+    viewportWidth: integerSchema({ minimum: 0 }),
+    viewportHeight: integerSchema({ minimum: 0 }),
+    documentWidth: integerSchema({ minimum: 0 }),
+    documentHeight: integerSchema({ minimum: 0 }),
+    scrollX: integerSchema({ minimum: 0 }),
+    scrollY: integerSchema({ minimum: 0 }),
+    pixelsAbove: integerSchema({ minimum: 0 }),
+    pixelsBelow: integerSchema({ minimum: 0 }),
+    pixelsLeft: integerSchema({ minimum: 0 }),
+    pixelsRight: integerSchema({ minimum: 0 }),
+    scrollPercentX: numberSchema({ minimum: 0, maximum: 100 }),
+    scrollPercentY: numberSchema({ minimum: 0, maximum: 100 }),
+  }, [
+    'viewportWidth', 'viewportHeight', 'documentWidth', 'documentHeight',
+    'scrollX', 'scrollY', 'pixelsAbove', 'pixelsBelow', 'pixelsLeft',
+    'pixelsRight', 'scrollPercentX', 'scrollPercentY',
+  ]),
   elements: arraySchema(elementSchema, { maxItems: OBSERVATION_V1_LIMITS.maxElements }),
   truncated: booleanSchema(),
   truncationReasons: arraySchema(stringSchema({
     enum: [...OBSERVATION_TRUNCATION_REASONS],
   }), { uniqueItems: true }),
   hints: arraySchema(agentHintSchema, { maxItems: 16 }),
-  evidence: { oneOf: [inputEvidenceSchema, clickEvidenceSchema, pressEvidenceSchema, uploadEvidenceSchema] },
+  evidence: { oneOf: [
+    inputEvidenceSchema,
+    clickEvidenceSchema,
+    pressEvidenceSchema,
+    uploadEvidenceSchema,
+    scrollEvidenceSchema,
+    selectEvidenceSchema,
+  ] },
 }, ['observationId', 'title', 'elements', 'truncated', 'truncationReasons']);
 
 const artifactOutput = resultSchema('target', {
   artifact: artifactSchema,
   preview: artifactSchema,
+  annotationCount: integerSchema({ minimum: 0, maximum: 200 }),
 }, ['artifact']);
+
+const elementAddressSchema: JsonSchema = {
+  oneOf: [
+    objectSchema({
+      observationId: opaqueIdSchema,
+      ref: integerSchema({ minimum: 1 }),
+    }, ['observationId', 'ref']),
+    objectSchema({ selector: boundedSelector }, ['selector']),
+  ],
+};
+
+const dropdownChoiceSchema: JsonSchema = {
+  oneOf: [
+    objectSchema({ by: stringSchema({ const: 'index' }), index: integerSchema({ minimum: 1, maximum: 500 }) }, ['by', 'index']),
+    objectSchema({
+      by: stringSchema({ const: 'label' }),
+      label: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+      exact: booleanSchema(),
+    }, ['by', 'label']),
+    objectSchema({
+      by: stringSchema({ const: 'value' }),
+      value: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+      exact: booleanSchema(),
+    }, ['by', 'value']),
+  ],
+};
 
 function tool(definition: ToolDefinition): ToolDefinition {
   return definition;
@@ -464,6 +551,149 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     artifactKinds: [],
   }),
   tool({
+    name: 'browser.search',
+    title: 'Search page text',
+    description: 'Find bounded visible text matches without returning the entire page.',
+    context: 'target',
+    inputSchema: objectSchema({
+      query: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+      selector: boundedSelector,
+      caseSensitive: booleanSchema(),
+      wholeWord: booleanSchema(),
+      limit: integerSchema({ minimum: 1, maximum: 200 }),
+    }, ['query']),
+    outputSchema: resultSchema('target', {
+      title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+      totalMatches: integerSchema({ minimum: 0 }),
+      matches: arraySchema(objectSchema({
+        index: integerSchema({ minimum: 1 }),
+        text: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+        context: sensitive(stringSchema({ maxLength: 500 }), 'browser_data'),
+        tagName: stringSchema({ maxLength: 64 }),
+        visible: booleanSchema(),
+        x: numberSchema(),
+        y: numberSchema(),
+        width: numberSchema({ minimum: 0 }),
+        height: numberSchema({ minimum: 0 }),
+      }, ['index', 'text', 'context', 'tagName', 'visible', 'x', 'y', 'width', 'height']), { maxItems: 200 }),
+      truncated: booleanSchema(),
+    }, ['title', 'totalMatches', 'matches', 'truncated']),
+    requiredCapabilities: ['observation.read'],
+    mutating: false,
+    idempotency: 'read_only',
+    cancellation: 'best_effort',
+    sensitivity: { input: ['browser_data'], output: ['browser_data'] },
+    artifactKinds: [],
+  }),
+  tool({
+    name: 'browser.elements.find',
+    title: 'Find DOM elements',
+    description: 'Run a bounded CSS query and return safe element metadata without exposing DOM handles.',
+    context: 'target',
+    inputSchema: objectSchema({
+      selector: boundedSelector,
+      limit: integerSchema({ minimum: 1, maximum: 200 }),
+      attributeNames: arraySchema(
+        sensitive(stringSchema({ minLength: 1, maxLength: 128, pattern: '^[A-Za-z_:][A-Za-z0-9_.:-]*$' }), 'browser_data'),
+        { maxItems: 20, uniqueItems: true },
+      ),
+      pierceShadow: booleanSchema(),
+    }, ['selector']),
+    outputSchema: resultSchema('target', {
+      title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+      totalMatches: integerSchema({ minimum: 0 }),
+      elements: arraySchema(objectSchema({
+        index: integerSchema({ minimum: 1 }),
+        tagName: stringSchema({ maxLength: 64 }),
+        role: stringSchema({ maxLength: 128 }),
+        name: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+        text: sensitive(stringSchema({ maxLength: 500 }), 'browser_data'),
+        visible: booleanSchema(),
+        enabled: booleanSchema(),
+        x: numberSchema(),
+        y: numberSchema(),
+        width: numberSchema({ minimum: 0 }),
+        height: numberSchema({ minimum: 0 }),
+        attributes: arraySchema(objectSchema({
+          name: sensitive(stringSchema({ maxLength: 128 }), 'browser_data'),
+          value: sensitive(stringSchema({ maxLength: 2048 }), 'browser_data', 'credential'),
+        }, ['name', 'value']), { maxItems: 20 }),
+      }, [
+        'index', 'tagName', 'role', 'name', 'text', 'visible', 'enabled',
+        'x', 'y', 'width', 'height', 'attributes',
+      ]), { maxItems: 200 }),
+      truncated: booleanSchema(),
+    }, ['title', 'totalMatches', 'elements', 'truncated']),
+    requiredCapabilities: ['observation.read'],
+    mutating: false,
+    idempotency: 'read_only',
+    cancellation: 'best_effort',
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
+    artifactKinds: [],
+  }),
+  tool({
+    name: 'browser.scroll',
+    title: 'Scroll page or element',
+    description: 'Scroll the page, a ref, a CSS-selected container, or visible text and return a fresh Observation.',
+    context: 'target',
+    inputSchema: objectSchema({
+      target: elementAddressSchema,
+      direction: stringSchema({ enum: ['up', 'down', 'left', 'right'] }),
+      amount: numberSchema({ minimum: 0.01, maximum: 100_000 }),
+      unit: stringSchema({ enum: ['pixels', 'viewport'] }),
+      position: stringSchema({ enum: ['start', 'end'] }),
+      text: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+      exact: booleanSchema(),
+      observationLimit: integerSchema({ minimum: 1, maximum: OBSERVATION_V1_LIMITS.maxElements }),
+    }),
+    outputSchema: observationOutput,
+    requiredCapabilities: ['action.input', 'observation.read'],
+    mutating: true,
+    idempotency: 'non_idempotent',
+    cancellation: 'best_effort',
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
+    artifactKinds: [],
+  }),
+  tool({
+    name: 'browser.dropdown.options',
+    title: 'List dropdown options',
+    description: 'Enumerate bounded native or currently exposed ARIA dropdown options.',
+    context: 'target',
+    inputSchema: objectSchema({ target: elementAddressSchema }, ['target']),
+    outputSchema: resultSchema('target', {
+      kind: stringSchema({ enum: ['native', 'aria'] }),
+      expanded: booleanSchema(),
+      multiple: booleanSchema(),
+      requiresOpen: booleanSchema(),
+      options: arraySchema(dropdownOptionSchema, { maxItems: 500 }),
+      truncated: booleanSchema(),
+    }, ['kind', 'expanded', 'multiple', 'requiresOpen', 'options', 'truncated']),
+    requiredCapabilities: ['observation.read'],
+    mutating: false,
+    idempotency: 'read_only',
+    cancellation: 'best_effort',
+    sensitivity: { input: ['browser_data'], output: ['browser_data'] },
+    artifactKinds: [],
+  }),
+  tool({
+    name: 'browser.dropdown.select',
+    title: 'Select dropdown option',
+    description: 'Select and verify a native or ARIA dropdown option, opening custom controls when needed.',
+    context: 'target',
+    inputSchema: objectSchema({
+      target: elementAddressSchema,
+      choice: dropdownChoiceSchema,
+      observationLimit: integerSchema({ minimum: 1, maximum: OBSERVATION_V1_LIMITS.maxElements }),
+    }, ['target', 'choice']),
+    outputSchema: observationOutput,
+    requiredCapabilities: ['action.input', 'observation.read'],
+    mutating: true,
+    idempotency: 'non_idempotent',
+    cancellation: 'best_effort',
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
+    artifactKinds: [],
+  }),
+  tool({
     name: 'browser.click',
     title: 'Click element',
     description: 'Click an Observation ref or viewport coordinates after interactability checks.',
@@ -557,6 +787,10 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       fullPage: booleanSchema(),
       selector: boundedSelector,
       includeOriginal: booleanSchema(),
+      annotations: objectSchema({
+        observationId: opaqueIdSchema,
+        refs: arraySchema(integerSchema({ minimum: 1 }), { maxItems: 200, uniqueItems: true }),
+      }, ['observationId']),
     }),
     outputSchema: artifactOutput,
     requiredCapabilities: ['artifact.read'],

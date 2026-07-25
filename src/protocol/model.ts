@@ -395,6 +395,21 @@ export interface ObservationElement {
   checked?: boolean;
 }
 
+export interface PageGeometry {
+  viewportWidth: number;
+  viewportHeight: number;
+  documentWidth: number;
+  documentHeight: number;
+  scrollX: number;
+  scrollY: number;
+  pixelsAbove: number;
+  pixelsBelow: number;
+  pixelsLeft: number;
+  pixelsRight: number;
+  scrollPercentX: number;
+  scrollPercentY: number;
+}
+
 export interface ObservationDescriptor {
   id: ObservationId;
   workspaceId: BrowserWorkspaceId;

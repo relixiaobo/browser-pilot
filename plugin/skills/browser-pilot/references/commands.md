@@ -56,6 +56,20 @@ Return cleaned readable text for the main page or a CSS selector. The default
 text limit is 3000 characters. Use this for articles, search results, lists,
 prices, and other content not represented by interactive refs.
 
+### `bp search <query> [--selector <selector>] [--case-sensitive] [--whole-word] [--limit <n>]`
+
+Return bounded visible-text matches with nearby context and viewport geometry.
+Use this for a targeted lookup when returning an entire page with `read` would
+waste context. Open Shadow DOM is searched. The default limit is 20 and the
+maximum is 200.
+
+### `bp find <selector> [--limit <n>] [--attributes <name,...>] [--no-shadow]`
+
+Run a bounded CSS query and return safe metadata: tag, role, accessible name,
+text, visibility, enabled state, viewport geometry, and explicitly requested
+attributes. This does not return DOM/CDP handles or actionable refs. Open Shadow
+DOM is included unless `--no-shadow` is supplied.
+
 ### `bp locate <selector>`
 
 Return an element's viewport center and bounding box. Use it only when a canvas,
@@ -88,6 +102,27 @@ identity changes during the composite action.
 Press a key or combination and return the resulting snapshot. Examples include
 `Enter`, `Escape`, `Tab`, `ArrowDown`, `Control+a`, and `Meta+b`.
 
+### `bp scroll [up|down|left|right] [--amount <n>] [--unit pixels|viewport] [--selector <selector>|--ref <ref>] [--to start|end] [--to-text <text>] [--exact] [--limit <n>]`
+
+Scroll the page or one scrollable element and return a fresh snapshot plus
+typed scroll evidence. The default is down by 0.8 viewport. `--to-text` reveals
+the first visible text match, while `--to start|end` moves to a boundary. A ref
+uses the latest snapshot and becomes stale after the returned state replaces it.
+
+### `bp dropdown <target>`
+
+List bounded options for a native `<select>` or an exposed ARIA combobox/listbox.
+`target` may be a current ref or CSS selector. A closed custom control can
+report `open required`; use `select` with a ref so Browser Pilot can open it and
+continue from fresh state.
+
+### `bp select <target> <option> [--by label|value|index] [--contains] [--limit <n>]`
+
+Select an option and return a fresh snapshot with verification evidence. Native
+selects emit `input` and `change` and are read back. Custom/ARIA controls require
+an Observation ref and use trusted clicks; selector targets are supported only
+for native selects.
+
 ## Frames and Dialogs
 
 ### `bp frame [index]`
@@ -107,11 +142,15 @@ Use `--prompt` only when accepting a prompt dialog.
 
 ## Files and Capture
 
-### `bp screenshot [filename] [--full] [--selector <selector>]`
+### `bp screenshot [filename] [--full] [--selector <selector>] [--annotate [refs]]`
 
 Write a PNG and return `{ "ok": true, "file": "..." }`. `--full` captures the
 full scrollable page; `--selector` captures one matching element. Without a
 filename, the CLI writes a timestamped PNG in the current working directory.
+`--annotate` draws boxes and numbered labels for the latest snapshot's refs;
+pass comma-separated refs to limit them. Annotation is viewport-only and cannot
+be combined with `--full` or `--selector`. Drawing runs in an isolated world and
+does not expose bytes to page scripts or mutate the page DOM.
 
 ### `bp pdf [filename] [--landscape]`
 
@@ -192,10 +231,12 @@ Clear the compatibility request journal.
 
 ## JSON Results and Failures
 
-Successful snapshots contain `title`, `url`, and `elements`; content reads also
-include `text`, `length`, and `truncated`. Capture commands return a local
-`file` path. Failed one-shot commands return `ok: false`, an English `error`,
-and sometimes a recovery `hint`, then exit nonzero.
+Successful snapshots contain `title`, `url`, `elements`, and may include `page`,
+`hints`, and typed action `evidence`; content reads also include `text`,
+`length`, and `truncated`. Capture commands return a local `file` path and
+annotated captures include `annotationCount`. Failed one-shot commands return
+`ok: false`, an English `error`, and sometimes a recovery `hint`, then exit
+nonzero.
 
 The one-shot error shape is intentionally smaller than the embedded bridge
 contract. Do not infer that a partially completed mutation was rolled back from

@@ -58,9 +58,11 @@ The executable owns Broker discovery and startup. Hosts must not read PID
 files, locator metadata, Unix socket paths, or Windows named-pipe names. Two
 products that launch concurrently serialize through the per-user startup lock,
 then both reuse the winning compatible Broker. A dead locator is recovered on
-the next launch. A live process with an unresponsive endpoint is not killed or
-replaced; launch returns `browser_disconnected` with
-`restart_unresponsive_broker` remediation.
+the next launch. While Chrome authorization is pending, an owner-only starting
+record lets later launches wait for and reuse the same Broker PID instead of
+creating another authorization prompt. A ready live process with an
+unresponsive endpoint is not killed or replaced; launch returns
+`browser_disconnected` with `restart_unresponsive_broker` remediation.
 
 The default is one shared Broker per OS user. Protocol-compatible clients reuse
 it even when different Agent products or product versions launched their
@@ -271,6 +273,34 @@ be ignored. The field is additive for protocol 1.0 and 1.1 and introduces no
 new capability; its data is covered by the tool or event's existing
 sensitivity and granted capability.
 
+### Observation representations
+
+The browser tools expose complementary bounded representations rather than one
+unbounded page dump:
+
+- `browser.observe` creates semantic elements and scoped refs for actions.
+- `browser.read` returns broad readable text from the page or one CSS region.
+- `browser.search` returns visible text matches, nearby context, and viewport
+  geometry, including open Shadow DOM, with at most 200 results.
+- `browser.elements.find` returns bounded safe metadata for a CSS query,
+  optionally across open Shadow DOM. It never exposes DOM/CDP handles and its
+  results are not action refs.
+- `browser.capture` may draw Observation ref boxes for spatial reasoning without
+  injecting an overlay into the page.
+
+Observations may include an additive `page` object containing viewport and
+document dimensions, scroll coordinates, pixels remaining in each direction,
+and horizontal/vertical scroll percentages. Hosts must tolerate its absence
+when talking to an older compatible Broker.
+
+`browser.scroll` moves the page, an Observation ref, a CSS-selected container,
+or a visible text match, then returns a fresh Observation and typed evidence.
+`browser.dropdown.options` enumerates native or currently exposed ARIA options.
+`browser.dropdown.select` verifies native value changes or uses fresh
+Observation refs for custom controls. These tools reuse `observation.read` and
+`action.input`; they are additive manifest entries, not a protocol-version
+fork. Discover them through `tools/list`.
+
 `browser.type` and `browser.keyboard` also return bounded evidence after the
 page has had time to apply a controlled-field update:
 
@@ -362,8 +392,11 @@ sensitive detail explicitly through the scoped tools.
 `network.response` adds an `access_blocked` hint only for a main-document 403 or
 429, not for failed images, scripts, XHR, or fetches. The threshold
 `watchdog.no_progress` event and the action result that reaches the threshold
-both contain the same `repeated_action` hint. Change strategy instead of
-automatically repeating the same action or navigation.
+both contain the same `repeated_action` hint. The reason is either repeated
+observable failure or `stagnant_page`, where the same action signature was
+repeated while the bounded page fingerprint stayed unchanged. Fingerprints and
+action parameters never leave the Broker. Change representation and strategy
+instead of automatically repeating the same action or navigation.
 
 `connection.lost` keeps the last connection generation and causes later browser
 tools to fail with retryable `browser_disconnected`. The daemon repeatedly reads
@@ -398,10 +431,12 @@ Watchdog events are advisory browser-state signals, not autonomous recovery:
 - `watchdog.dialog_unhandled` is emitted once when a dialog remains pending for
   15 seconds. It does not accept or dismiss the dialog.
 - `watchdog.no_progress` is emitted once after three consecutive completed
-  actions on the same Lease and target have browser-observable mismatch or no
-  supported effect. Verified progress, navigation, frame/session changes, and
-  cleanup reset the streak. Coordinate/canvas actions whose effects cannot be
-  observed do not count.
+  actions on the same Lease and target either have browser-observable mismatch
+  or repeat the same action while the bounded page state remains stagnant.
+  Observable success resets the mismatch detector; a changed action or page
+  state resets the repetition detector. Navigation, frame/session changes, and
+  cleanup reset both. Coordinate/canvas actions whose effects cannot be observed
+  do not count as mismatch-only failures.
 
 Browser Pilot never automatically retries, repeats, stops, accepts, or dismisses
 an action because of a watchdog event. The host or Agent must inspect current
@@ -425,6 +460,20 @@ Large screenshots default to a model-sized preview. Pass
 `includeOriginal: true` to receive both the original descriptor and a preview
 descriptor whose `previewOf` points to the original. The adapter reads the
 selected file and converts it to its Agent runtime's native image/file content.
+
+For spatial reasoning, a viewport-only `browser.capture` call may provide:
+
+```json
+{"annotations":{"observationId":"observation:...","refs":[1,3,8]}}
+```
+
+Omitting `refs` requests up to the first 200 refs in that Observation. The
+Broker revalidates each ref, clips live geometry to the viewport, draws on an
+unattached canvas in a Chrome isolated world, and returns `annotationCount`.
+Screenshot bytes are not evaluated in the page's default world. Annotation
+cannot be combined with `fullPage` or `selector`. A page can still move itself
+between geometry sampling and capture, so hosts should use a recent Observation
+and treat the image as visual context rather than durable element identity.
 
 For upload, first call `artifacts/import` with the owning Workspace, active
 Lease, and an absolute client-authorized path:
@@ -472,12 +521,13 @@ Workspaces are also reclaimed by bounded daemon sweeps. Releasing a Workspace
 will eventually close only its Broker-managed targets. It must never close a
 user tab merely because a client disconnected or a Workspace expired.
 
-The daemon also starts a private managed-target janitor with an independent CDP
-connection. It creates and tracks only Broker-managed targets and their managed
-popup descendants. Daemon EOF, including an ungraceful process exit, makes the
-janitor perform bounded cleanup without consulting disk or grouping tabs by
-browser window. This internal process is not a public SDK, tool, or transport;
-embedded clients still launch only `browser-pilot bridge --stdio`.
+The daemon also starts a private managed-target janitor that solely owns the
+browser-level CDP WebSocket and proxies daemon CDP traffic over private IPC. It
+creates and tracks only Broker-managed targets and their managed popup
+descendants. Daemon EOF, including an ungraceful process exit, makes the janitor
+perform bounded cleanup without consulting disk or grouping tabs by browser
+window. This internal process is not a public SDK, tool, or transport; embedded
+clients still launch only `browser-pilot bridge --stdio`.
 
 The stdio `shutdown` method exits only that bridge and disconnects its Broker
 Connection. The human `bp disconnect` command separately releases the one-shot
@@ -537,10 +587,11 @@ and stale tools cannot continue issuing calls.
 `tools/list` is generated from the canonical schemas used for argument and
 result validation, and production filtering prevents unwired tools from being
 advertised. The current bridge supports discovery, connect, open, all-tab
-inventory, observe/read, core actions, scoped frames, explicit dialogs, cookies,
-auth, network observation/rules, eval, screenshot, PDF, protected upload import,
-scoped download Artifacts, Artifact access, command recovery, browser reconnect,
-and event replay. Broker startup serialization, executable/protocol negotiation,
+inventory, observe/read/search/find, scroll and dropdown actions, annotated
+screenshots, core actions, scoped frames, explicit dialogs, cookies, auth,
+network observation/rules, eval, PDF, protected upload import, scoped download
+Artifacts, Artifact access, command recovery, browser reconnect, and event
+replay. Broker startup serialization, executable/protocol negotiation,
 live-client shutdown protection, bounded version history, and deliberate
 version isolation are covered by process tests. Packed global npm, local
 npm/npx, and product-bundled absolute-path launches are also exercised as

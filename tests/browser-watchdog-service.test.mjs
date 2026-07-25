@@ -124,6 +124,36 @@ test('dialog watchdog emits once without handling the dialog and cancels on clea
   assert.equal(events.length, 1);
 });
 
+test('action watchdog detects repeated signatures on a stagnant page without exposing fingerprints', () => {
+  const events = [];
+  const watchdogs = new BrowserWatchdogService(event => events.push(event), {
+    noProgressThreshold: 3,
+  });
+  const evidence = {
+    action: 'click',
+    status: 'verified',
+    effects: ['focus_changed'],
+  };
+  const state = { actionSignature: 'sha256:action', pageFingerprint: 'sha256:page' };
+
+  watchdogs.actionCompleted(context, evidence, state);
+  watchdogs.actionCompleted(context, evidence, state);
+  const hint = watchdogs.actionCompleted(context, evidence, state);
+
+  assert.equal(hint.reason, 'stagnant_page');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].payload.reason, 'stagnant_page');
+  assert.equal(JSON.stringify(events).includes('sha256:action'), false);
+  assert.equal(JSON.stringify(events).includes('sha256:page'), false);
+
+  watchdogs.actionCompleted(context, evidence, {
+    actionSignature: 'sha256:action',
+    pageFingerprint: 'sha256:changed-page',
+  });
+  watchdogs.actionCompleted(context, evidence, state);
+  assert.equal(events.length, 1);
+});
+
 test('navigation and frame watchdogs expose only stable public context', () => {
   const events = [];
   const watchdogs = new BrowserWatchdogService(event => events.push(event));

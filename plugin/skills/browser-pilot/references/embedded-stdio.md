@@ -33,11 +33,34 @@ For complete envelopes and schemas, use the installed package's
 Maintain Workspace, Lease, target, frame, Observation, Command, Artifact, and
 event cursor identities as opaque values. Never derive or reuse a raw CDP ID.
 
+## Representation Decisions
+
+Choose the smallest representation that answers the current question:
+
+| Need | Tool | Use |
+| --- | --- | --- |
+| Interactive controls | `browser.observe` | Create scoped numbered refs for semantic actions. |
+| Broad readable content | `browser.read` | Return bounded article, list, result, or region text. |
+| One phrase or fact location | `browser.search` | Return bounded visible matches, context, and geometry without a page dump. |
+| DOM metadata | `browser.elements.find` | Inspect a bounded CSS result set without exposing handles or creating refs. |
+| Spatial or visual state | `browser.capture` with `annotations` | Draw selected Observation refs on a viewport screenshot for native image input. |
+
+Use `browser.scroll` for page/container movement and `browser.dropdown.options`
+plus `browser.dropdown.select` for selects and exposed ARIA controls. Do not
+reimplement these through `browser.eval`. Search and find traverse open Shadow
+DOM; every result remains bounded. The optional Observation `page` block gives
+viewport/document size, scroll position, remaining pixels, and percentages.
+
 ## Action Decisions
 
 Every Observation-producing action returns a new Observation. Replace previous
 refs immediately. Use `observationId + ref` together; neither is a durable
 selector.
+
+For a custom/ARIA dropdown, use an Observation ref. Browser Pilot may click it
+open, discard the old refs, locate the requested option in the resulting
+Observation, and click that fresh ref. Native selects may also be addressed by
+selector and are verified by browser value readback.
 
 Interpret `evidence.status` as follows:
 
@@ -65,7 +88,7 @@ success. Ignore unknown hint codes and unknown response fields.
 | `authentication_surface` | Inspect whether the session entered, remains on, or left authentication UI. |
 | `access_blocked` | For main-document 403/429, avoid repeating the same navigation. |
 | `download` | Wait on `started`; inspect the Artifact on `completed`; inspect bounded failure state otherwise. |
-| `repeated_action` | Stop the same action loop, refresh state, and change strategy. |
+| `repeated_action` | On repeated mismatch or `stagnant_page`, change representation, refresh state, and change strategy. |
 
 Do not synthesize hints from framework names or English page text. Follow only
 the structured hint and current browser state.
@@ -127,7 +150,10 @@ simulate transfer by closing a user tab.
 
 `browser.capture` and `browser.pdf` return descriptors rather than base64 or
 internal paths. Large screenshots normally return a model-sized preview; ask
-for the original only when the task needs it.
+for the original only when the task needs it. Viewport captures may include an
+`annotations` request with an `observationId` and optional refs. The returned
+`annotationCount` reports boxes actually drawn; full-page and selector captures
+cannot be annotated.
 
 - Use `artifacts/get` to read a protected local path while the Workspace and
   Lease are active.

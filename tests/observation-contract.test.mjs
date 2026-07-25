@@ -227,6 +227,37 @@ test('Observation snapshots bound fields and report element, text, and depth tru
   assert.deepEqual(deep.truncationReasons, ['depth_limit']);
 });
 
+test('Observation snapshots expose bounded viewport, document, and scroll geometry', async () => {
+  const page = {
+    viewportWidth: 1280,
+    viewportHeight: 720,
+    documentWidth: 1440,
+    documentHeight: 3000,
+    scrollX: 10,
+    scrollY: 900,
+    pixelsAbove: 900,
+    pixelsBelow: 1380,
+    pixelsLeft: 10,
+    pixelsRight: 150,
+    scrollPercentX: 6.3,
+    scrollPercentY: 39.5,
+  };
+  const result = await new ObservationService(
+    snapshotTransport(
+      { title: 'Geometry', url: 'https://example.test/geometry', page, guidance: {} },
+      axTree([]),
+    ),
+    'session:geometry',
+    'target:geometry',
+  ).observe();
+
+  assert.deepEqual(result.data.page, page);
+  assert.deepEqual(
+    tool('browser.observe').outputSchema.properties.page.required,
+    Object.keys(page),
+  );
+});
+
 test('Observation snapshots enforce a UTF-8 serialized byte budget', async () => {
   const elements = Array.from({ length: 600 }, (_, index) => ({
     name: `${index}:${'\u754c'.repeat(4_096)}`,
@@ -285,6 +316,29 @@ test('Observation fuses AX semantics with DOM layout, state, names, and form val
     { ref: 4, role: 'button', name: 'DOM Command' },
   ]);
   assert.deepEqual(refs.load('target:fusion').map(ref => ref.backendNodeId), [101, 104, 105, 200]);
+});
+
+test('Observation exposes ARIA options as refs but excludes native option elements', async () => {
+  const result = await new ObservationService(
+    snapshotTransport(
+      { title: 'Dropdown', url: 'https://example.test/dropdown', guidance: {} },
+      axTree([
+        { name: 'ARIA choice', role: 'option' },
+        { name: 'Native choice', role: 'option' },
+      ]),
+      domSnapshotFixture([
+        { backendNodeId: 1, nodeName: 'DIV', attributes: { role: 'option' }, text: 'ARIA choice' },
+        { backendNodeId: 2, nodeName: 'OPTION', text: 'Native choice' },
+      ]),
+    ),
+    'session:dropdown',
+    'target:dropdown',
+    { refStore: new MemoryRefStore(), frameId: 'frame:test' },
+  ).observe(20);
+
+  assert.deepEqual(result.data.elements, [
+    { ref: 1, role: 'option', name: 'ARIA choice' },
+  ]);
 });
 
 test('Observation store validates full internal identity and reports same-context invalidation reasons', () => {

@@ -44,6 +44,20 @@ class BrowserFixtureTransport {
   extraAxButtons = [];
   extraAxNodes = [];
   pageGuidance = {};
+  pageGeometry = {
+    viewportWidth: 1280,
+    viewportHeight: 720,
+    documentWidth: 1280,
+    documentHeight: 2400,
+    scrollX: 0,
+    scrollY: 0,
+    pixelsAbove: 0,
+    pixelsBelow: 1680,
+    pixelsLeft: 0,
+    pixelsRight: 0,
+    scrollPercentX: 0,
+    scrollPercentY: 0,
+  };
   pointerTargetState = {
     status: 'ready',
     x: 100,
@@ -54,6 +68,7 @@ class BrowserFixtureTransport {
   editableState;
   nextInputClear = false;
   selectedFileName;
+  ariaSelected = false;
   pressStates = [];
   pressReadIndex = 0;
   continuityFocusChanged = false;
@@ -127,6 +142,13 @@ class BrowserFixtureTransport {
           },
         };
       case 'Runtime.evaluate': {
+        if (String(params.expression).includes('createImageBitmap')) {
+          return {
+            result: {
+              value: `data:image/png;base64,${Buffer.from('annotated-screenshot-bytes').toString('base64')}`,
+            },
+          };
+        }
         if (String(params.expression).includes('browser-pilot.action-continuity.v1')) {
           if (String(params.expression).includes('state.focus !==') && this.continuityFocusChanged) {
             return { result: { value: 'focus_changed' } };
@@ -159,9 +181,49 @@ class BrowserFixtureTransport {
         if (String(params.expression).startsWith('JSON.stringify({title:document.title')) {
           return {
             result: {
-              value: JSON.stringify({ title: target.title, url: target.url, guidance: this.pageGuidance }),
+              value: JSON.stringify({ title: target.title, url: target.url, page: this.pageGeometry, guidance: this.pageGuidance }),
             },
           };
+        }
+        if (String(params.expression).includes('totalMatches,matches,truncated:scanTruncated')) {
+          return { result: { value: JSON.stringify({
+            ok: true,
+            title: target.title,
+            url: target.url,
+            totalMatches: 1,
+            matches: [{
+              index: 1, text: 'Submit', context: 'Submit this form', tagName: 'button',
+              visible: true, x: 10, y: 20, width: 100, height: 30,
+            }],
+            truncated: false,
+          }) } };
+        }
+        if (String(params.expression).includes('requestedAttributes=') && String(params.expression).includes('elements:matches')) {
+          return { result: { value: JSON.stringify({
+            ok: true,
+            title: target.title,
+            url: target.url,
+            totalMatches: 1,
+            elements: [{
+              index: 1, tagName: 'button', role: 'button', name: 'Submit', text: 'Submit',
+              visible: true, enabled: true, x: 10, y: 20, width: 100, height: 30,
+              attributes: [{ name: 'data-testid', value: 'submit' }],
+            }],
+            truncated: false,
+          }) } };
+        }
+        if (String(params.expression).includes("action:'scroll'") && String(params.expression).includes('document.scrollingElement')) {
+          this.pageGeometry = {
+            ...this.pageGeometry,
+            scrollY: 576,
+            pixelsAbove: 576,
+            pixelsBelow: 1104,
+            scrollPercentY: 34.3,
+          };
+          return { result: { value: {
+            ok: true, action: 'scroll', status: 'verified', mode: 'relative', target: 'page',
+            moved: true, deltaX: 0, deltaY: 576, beforeX: 0, beforeY: 0, afterX: 0, afterY: 576,
+          } } };
         }
         return { result: { value: undefined } };
       }
@@ -217,11 +279,12 @@ class BrowserFixtureTransport {
       case 'Accessibility.getPartialAXTree': {
         const backendNodeId = Number(String(params.objectId).split(':').at(-1));
         const primaryButtonName = this.buttonNamesByTarget.get(targetId) ?? 'Submit';
+        const explicitNode = this.extraAxNodes.find(node => node.backendDOMNodeId === backendNodeId);
         const extraName = backendNodeId >= 100
           ? this.extraAxButtons[backendNodeId - 100]
           : undefined;
-        const role = backendNodeId === 43 ? 'textbox' : 'button';
-        const name = backendNodeId === 43 ? 'Query' : extraName ?? primaryButtonName;
+        const role = explicitNode?.role?.value ?? (backendNodeId === 43 ? 'textbox' : 'button');
+        const name = explicitNode?.name?.value ?? (backendNodeId === 43 ? 'Query' : extraName ?? primaryButtonName);
         return { nodes: [{
           backendDOMNodeId: backendNodeId,
           ignored: false,
@@ -254,6 +317,22 @@ class BrowserFixtureTransport {
         if (String(params.functionDeclaration).includes('browser-pilot.ref-revalidation.v1')) {
           return { result: { value: true } };
         }
+        if (String(params.functionDeclaration).includes('optionElements.indexOf(option)')) {
+          const optionObjectId = params.arguments?.[0]?.objectId;
+          if (params.objectId !== 'object:302' || optionObjectId !== 'object:304') {
+            return { result: { value: null } };
+          }
+          return { result: { value: {
+            index: 1,
+            label: 'Shanghai',
+            value: 'sha',
+            selected: this.ariaSelected,
+            disabled: false,
+          } } };
+        }
+        if (String(params.functionDeclaration).includes('this.getBoundingClientRect()')) {
+          return { result: { value: { x: 10, y: 20, width: 100, height: 30 } } };
+        }
         if (String(params.functionDeclaration).includes('valueToken') && this.pressStates.length > 0) {
           const { backendNodeId: _backendNodeId, ...value } = this.pressStates[this.pressReadIndex];
           this.pressReadIndex += 1;
@@ -282,6 +361,46 @@ class BrowserFixtureTransport {
             status: 'ready',
             fileCount: this.selectedFileName ? 1 : 0,
             ...(this.selectedFileName ? { firstFileName: this.selectedFileName } : {}),
+          } } };
+        }
+        if (String(params.functionDeclaration).includes('Target is not a native or ARIA dropdown')) {
+          if (params.objectId === 'object:302') {
+            return { result: { value: {
+              ok: true,
+              kind: 'aria',
+              expanded: true,
+              multiple: false,
+              requiresOpen: false,
+              options: [{
+                index: 1,
+                label: 'Shanghai',
+                value: 'sha',
+                selected: this.ariaSelected,
+                disabled: false,
+              }],
+              truncated: false,
+            } } };
+          }
+          return { result: { value: {
+            ok: true,
+            kind: 'native',
+            expanded: true,
+            multiple: false,
+            requiresOpen: false,
+            options: [
+              { index: 1, label: 'Choose one', value: '', selected: true, disabled: false },
+              { index: 2, label: 'China', value: 'cn', selected: false, disabled: false },
+            ],
+            truncated: false,
+          } } };
+        }
+        if (String(params.functionDeclaration).includes('HTMLSelectElement.prototype')) {
+          return { result: { value: {
+            ok: true,
+            action: 'select',
+            status: 'verified',
+            kind: 'native',
+            selected: [{ index: 2, label: 'China', value: 'cn', selected: true, disabled: false }],
           } } };
         }
         return { result: { value: undefined } };
@@ -539,6 +658,121 @@ test('latest Observation and locate are available through canonical Browser tool
   assert.deepEqual(
     { x: located.x, y: located.y, top: located.top, left: located.left, width: located.width, height: located.height },
     { x: 60, y: 35, top: 20, left: 10, width: 100, height: 30 },
+  );
+});
+
+test('page search, element queries, scrolling, and native dropdowns work through public tools', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.extraAxNodes = [{
+    nodeId: 'country',
+    parentId: 'root',
+    ignored: false,
+    role: { value: 'combobox' },
+    name: { value: 'Country' },
+    properties: [],
+    backendDOMNodeId: 202,
+  }];
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding, { loadWaiter: async () => {} }),
+  });
+  const client = await createClient(runtime, 'bridge:page-primitives', 'com.example.agent', 'instance:page-primitives');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(observed.page.documentHeight, 2400);
+  const dropdownRef = observed.elements.find(element => element.name === 'Country').ref;
+
+  const searched = await tool(runtime, client, 'browser.search', {
+    query: 'Submit', wholeWord: true, limit: 10,
+  }, targetId);
+  assert.equal(searched.totalMatches, 1);
+  assert.equal(searched.matches[0].context, 'Submit this form');
+
+  const found = await tool(runtime, client, 'browser.elements.find', {
+    selector: 'button', attributeNames: ['data-testid'], limit: 10,
+  }, targetId);
+  assert.equal(found.elements[0].attributes[0].value, 'submit');
+
+  const scrolled = await tool(runtime, client, 'browser.scroll', {
+    direction: 'down', amount: 0.8, unit: 'viewport', observationLimit: 10,
+  }, targetId);
+  assert.equal(scrolled.evidence.status, 'verified');
+  assert.equal(scrolled.page.scrollY, 576);
+  assert.match(scrolled.observationId, /^observation:/);
+
+  const refreshed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const options = await tool(runtime, client, 'browser.dropdown.options', {
+    target: { observationId: refreshed.observationId, ref: dropdownRef },
+  }, targetId);
+  assert.deepEqual(options.options.map(option => option.label), ['Choose one', 'China']);
+
+  const selected = await tool(runtime, client, 'browser.dropdown.select', {
+    target: { observationId: refreshed.observationId, ref: dropdownRef },
+    choice: { by: 'value', value: 'cn', exact: true },
+    observationLimit: 10,
+  }, targetId);
+  assert.equal(selected.evidence.action, 'select');
+  assert.equal(selected.evidence.status, 'verified', JSON.stringify(selected.evidence));
+  assert.equal(selected.evidence.selected[0].value, 'cn');
+});
+
+test('ARIA dropdown selection scopes duplicate option labels to the controlled list', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.extraAxNodes = [
+    {
+      nodeId: 'city', parentId: 'root', ignored: false,
+      role: { value: 'combobox' }, name: { value: 'City' },
+      properties: [{ name: 'expanded', value: { value: true } }],
+      backendDOMNodeId: 302,
+    },
+    {
+      nodeId: 'unrelated-option', parentId: 'root', ignored: false,
+      role: { value: 'option' }, name: { value: 'Shanghai' }, properties: [],
+      backendDOMNodeId: 303,
+    },
+    {
+      nodeId: 'owned-option', parentId: 'root', ignored: false,
+      role: { value: 'option' }, name: { value: 'Shanghai' }, properties: [],
+      backendDOMNodeId: 304,
+    },
+  ];
+  transport.onMouseReleased = () => { transport.ariaSelected = true; };
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding, { loadWaiter: async () => {} }),
+  });
+  const client = await createClient(runtime, 'bridge:aria-select', 'com.example.agent', 'instance:aria-select');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const dropdownRef = observed.elements.find(element => element.name === 'City').ref;
+
+  const selected = await tool(runtime, client, 'browser.dropdown.select', {
+    target: { observationId: observed.observationId, ref: dropdownRef },
+    choice: { by: 'label', label: 'Shanghai', exact: true },
+    observationLimit: 10,
+  }, targetId);
+
+  const ownershipChecks = transport.calls.filter(call => (
+    call.method === 'Runtime.callFunctionOn' &&
+    String(call.params.functionDeclaration).includes('optionElements.indexOf(option)')
+  ));
+  assert.equal(selected.evidence.status, 'verified', JSON.stringify({
+    evidence: selected.evidence,
+    observed: observed.elements,
+    ownershipChecks: ownershipChecks.map(call => ({
+      target: call.params.objectId,
+      option: call.params.arguments[0].objectId,
+    })),
+  }));
+  assert.equal(selected.evidence.kind, 'aria');
+  assert.equal(selected.evidence.selected[0].value, 'sha');
+  assert.deepEqual(
+    ownershipChecks.map(call => call.params.arguments[0].objectId),
+    ['object:303', 'object:304'],
   );
 });
 
@@ -1801,6 +2035,26 @@ test('screenshot and PDF tools return protected Artifacts that can be read, expo
   assert.equal(captured.artifact.byteSize, Buffer.byteLength('screenshot-bytes'));
   assert.equal('path' in captured.artifact, false);
   assert.equal(JSON.stringify(captured).includes(Buffer.from('screenshot-bytes').toString('base64')), false);
+
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const annotated = await tool(runtime, client, 'browser.capture', {
+    annotations: { observationId: observed.observationId, refs: [1] },
+  }, targetId);
+  assert.equal(annotated.annotationCount, 1);
+  const annotatedAccess = await runtime.call(client.bridge, 'artifacts/get', {
+    workspaceId: client.workspace.id,
+    leaseId: client.lease.id,
+    artifactId: annotated.artifact.id,
+  });
+  assert.deepEqual(await readFile(annotatedAccess.path), Buffer.from('annotated-screenshot-bytes'));
+  assert.ok(transport.calls.some(call => (
+    call.method === 'Page.createIsolatedWorld' &&
+    call.params.worldName === 'browser-pilot.screenshot-annotation.v1'
+  )));
+  assert.ok(transport.calls.some(call => (
+    call.method === 'Runtime.evaluate' && call.params.contextId === 77 &&
+    String(call.params.expression).includes('createImageBitmap')
+  )));
 
   const accessed = await runtime.call(client.bridge, 'artifacts/get', {
     workspaceId: client.workspace.id,

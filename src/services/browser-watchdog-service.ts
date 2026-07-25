@@ -22,10 +22,15 @@ export interface BrowserWatchdogContext {
 }
 
 export interface WatchdogActionEvidence {
-  action: 'click' | 'type' | 'keyboard' | 'press' | 'upload';
+  action: 'click' | 'type' | 'keyboard' | 'press' | 'upload' | 'scroll' | 'select';
   status: 'verified' | 'mismatch' | 'unavailable';
   reason?: string;
   effects?: readonly string[];
+}
+
+export interface WatchdogActionState {
+  actionSignature: string;
+  pageFingerprint: string;
 }
 
 export interface BrowserWatchdogServiceOptions {
@@ -43,8 +48,11 @@ interface PendingDialogWatchdog extends BrowserWatchdogContext {
 }
 
 interface NoProgressStreak extends BrowserWatchdogContext {
-  count: number;
+  mismatchCount: number;
+  repetitionCount: number;
   emitted: boolean;
+  actionSignature?: string;
+  pageFingerprint?: string;
 }
 
 const OBSERVABLE_NO_PROGRESS_REASONS = new Set([
@@ -53,6 +61,10 @@ const OBSERVABLE_NO_PROGRESS_REASONS = new Set([
   'file_name_mismatch',
   'no_observable_effect',
   'value_mismatch',
+  'at_boundary',
+  'text_not_found',
+  'option_not_found',
+  'selection_mismatch',
 ]);
 
 function targetKey(leaseId: ControlLeaseId, targetId: ControlledTargetId): string {
@@ -152,27 +164,59 @@ export class BrowserWatchdogService {
     this.dialogs.delete(dialogId);
   }
 
-  actionCompleted(context: BrowserWatchdogContext, evidence: WatchdogActionEvidence): AgentHint | undefined {
+  actionCompleted(
+    context: BrowserWatchdogContext,
+    evidence: WatchdogActionEvidence,
+    state?: WatchdogActionState,
+  ): AgentHint | undefined {
     const key = targetKey(context.leaseId, context.targetId);
-    if (evidence.status === 'verified') {
-      this.noProgress.delete(key);
-      return undefined;
+    const streak = this.noProgress.get(key) ?? {
+      ...context,
+      mismatchCount: 0,
+      repetitionCount: 0,
+      emitted: false,
+    };
+    let repeated = false;
+    if (state) {
+      repeated = streak.actionSignature === state.actionSignature &&
+        streak.pageFingerprint === state.pageFingerprint;
+      streak.repetitionCount = repeated ? streak.repetitionCount + 1 : 1;
+      streak.actionSignature = state.actionSignature;
+      streak.pageFingerprint = state.pageFingerprint;
     }
     const reason = evidence.reason;
     const observableNoProgress = evidence.status === 'mismatch' || (
       reason !== undefined && OBSERVABLE_NO_PROGRESS_REASONS.has(reason)
     );
-    if (!observableNoProgress) {
+    if (observableNoProgress) {
+      streak.mismatchCount += 1;
+    } else {
+      streak.mismatchCount = 0;
+    }
+
+    const threshold = observableNoProgress && streak.mismatchCount >= this.noProgressThreshold
+      ? { count: streak.mismatchCount, reason: reason ?? 'observable_mismatch' }
+      : repeated && streak.repetitionCount >= this.noProgressThreshold
+        ? { count: streak.repetitionCount, reason: 'stagnant_page' }
+        : undefined;
+    if (!observableNoProgress && !repeated) streak.emitted = false;
+    if (!state && !observableNoProgress) {
       this.noProgress.delete(key);
       return undefined;
     }
-
-    const streak = this.noProgress.get(key) ?? { ...context, count: 0, emitted: false };
-    streak.count += 1;
     this.noProgress.set(key, streak);
-    if (streak.emitted || streak.count < this.noProgressThreshold) return undefined;
+    if (!threshold || streak.emitted) return undefined;
     streak.emitted = true;
-    const hint = repeatedActionAgentHint(streak.count, reason ?? 'observable_mismatch');
+    return this.emitNoProgress(context, evidence, threshold.count, threshold.reason);
+  }
+
+  private emitNoProgress(
+    context: BrowserWatchdogContext,
+    evidence: WatchdogActionEvidence,
+    count: number,
+    reason: string,
+  ): AgentHint {
+    const hint = repeatedActionAgentHint(count, reason);
     this.publish({
       ...context,
       type: 'watchdog.no_progress',
@@ -180,8 +224,8 @@ export class BrowserWatchdogService {
       payload: {
         action: evidence.action,
         evidenceStatus: evidence.status,
-        reason: reason ?? 'observable_mismatch',
-        streak: streak.count,
+        reason,
+        streak: count,
         threshold: this.noProgressThreshold,
         hints: [hint],
       },

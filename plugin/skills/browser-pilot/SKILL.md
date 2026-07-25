@@ -58,12 +58,22 @@ command succeeds.
    - Run `bp snapshot` for controls and numbered refs.
    - Run `bp read [selector]` for article text, search results, lists, prices,
      and other non-interactive content.
+   - Run `bp search <text>` when only the locations and nearby context of a
+     specific phrase are needed; this avoids returning the whole page.
+   - Run `bp find <selector>` for bounded DOM metadata such as visibility,
+     geometry, role, or explicitly requested attributes. It does not create
+     actionable refs.
+   - Use `bp screenshot --annotate` after a snapshot when visual position,
+     overlapping UI, a canvas, or layout matters. The numbered boxes refer to
+     that snapshot.
    - If `bp read` reports `truncated`, increase its `--limit`. If an expected
      control is absent from a bounded snapshot, refresh with a larger
      `--limit`; do not infer that omitted content is absent.
 3. Act on fresh state.
    - Prefer `bp click <ref>` and `bp type <ref> <text>` over selectors or
      coordinates.
+   - Prefer `bp scroll`, `bp dropdown`, and `bp select` over scripting common
+     page movement or dropdown behavior with `eval`.
    - Treat refs as belonging only to the current tab, frame, and latest page
      state. After navigation, tab/frame changes, or a stale-ref error, obtain a
      new snapshot and choose a new ref.
@@ -78,7 +88,8 @@ command succeeds.
    - On failure after possible input/navigation, inspect current state before
      retrying. Never blindly repeat a mutating action.
 5. Use `bp eval` only as an escape hatch for a value or operation unavailable
-   through `tabs`, `snapshot`, `read`, `click`, `type`, `press`, or `keyboard`.
+   through the dedicated tab, observation, search, scroll, dropdown, capture,
+   or action commands.
 
 ## Core Commands
 
@@ -89,6 +100,12 @@ bp open "https://example.com" --new  # create an independent managed tab
 bp snapshot                          # interactive controls with refs
 bp read                              # readable page content
 bp read "main" --limit 10000         # bounded region text
+bp search "invoice total"            # targeted visible-text matches
+bp find "a.result" --attributes href # bounded DOM metadata
+bp scroll down                       # move 0.8 viewport; return fresh state
+bp scroll --to-text "Payment details" # reveal matching text
+bp dropdown 4                        # enumerate dropdown options
+bp select 4 "United States"          # select and verify an option
 bp click 3                           # click current ref 3
 bp type 5 "hello" --clear            # replace a text control
 bp type 5 "query" --submit           # type, then press Enter
@@ -105,14 +122,19 @@ is known, but do not replace a user-opened form or draft merely to save steps.
   or rebuild text extraction.
 - Prefer returned refs for semantic controls. Empty-name textboxes and
   contenteditable elements are still valid controls.
+- Treat the `page` block returned with snapshots as navigation context: it
+  reports viewport/document size, scroll position, remaining pixels, and
+  scroll percentages.
 - After typing, confirm the displayed/effective value when the task depends on
   exact input. Frameworks may sanitize or reject input.
 - For an autocomplete field, type first, inspect the updated snapshot, then
   select the intended suggestion. Do not assume typed text selected an item.
 - If a modal or dialog blocks the page, resolve it before interacting with the
   content behind it.
-- If repeated actions produce no visible progress, stop repeating them. Refresh
-  state and change strategy.
+- If a `repeated_action` hint reports either repeated mismatch or
+  `stagnant_page`, stop repeating it. Switch representation (`snapshot`,
+  `read`, `search`, or annotated screenshot), inspect fresh state, and change
+  strategy.
 - Treat a main-document 403/429 as an access state. Do not loop the same
   navigation; inspect login state, rate limits, or an alternate user-approved
   path.
@@ -148,11 +170,17 @@ an explicit absolute or task-owned path when a later step must find it:
 bp screenshot /absolute/path/page.png
 bp screenshot /absolute/path/full.png --full
 bp screenshot /absolute/path/chart.png --selector ".chart"
+bp snapshot
+bp screenshot /absolute/path/annotated.png --annotate 1,3,8
 bp pdf /absolute/path/report.pdf --landscape
 ```
 
 Without a filename, Browser Pilot creates a timestamped file in the current
 working directory. Confirm the returned `file` before opening or attaching it.
+Annotations support viewport screenshots only and require the latest live
+snapshot; omit the ref list to annotate up to the first 200 refs. They are drawn
+in an isolated JavaScript world on an off-page canvas and never expose bytes to
+page scripts or inject overlay elements into the user's document.
 
 Upload only a path the user or host has authorized:
 

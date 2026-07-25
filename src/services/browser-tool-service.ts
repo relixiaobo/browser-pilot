@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import {
   OBSERVATION_V1_LIMITS,
@@ -56,6 +56,13 @@ import {
 import { CookieService } from './cookie-service.js';
 import { CaptureService } from './capture-service.js';
 import {
+  DropdownService,
+  type DropdownChoice,
+  type DropdownInfo,
+  type DropdownOption,
+  type SelectVerificationEvidence,
+} from './dropdown-service.js';
+import {
   FrameService,
   type FrameTargetAttachment,
   type FrameTargetInfo,
@@ -64,7 +71,18 @@ import {
 import { MemoryObservationStore, type StoredObservation } from './observation-store.js';
 import { ObservationService } from './observation-service.js';
 import { PageContentService } from './page-content-service.js';
+import { PageInspectionService } from './page-inspection-service.js';
 import { RefRevalidationService } from './ref-revalidation-service.js';
+import {
+  ScrollService,
+  type ElementScrollInput,
+  type ScrollEvidence,
+} from './scroll-service.js';
+import {
+  ScreenshotAnnotationService,
+  type ScreenshotAnnotation,
+  type ScreenshotViewport,
+} from './screenshot-annotation-service.js';
 import {
   TransportManagedTargetLifecycle,
   type ManagedTargetLifecycle,
@@ -90,6 +108,11 @@ export const BASE_BROWSER_TOOL_NAMES = [
   'browser.observation.latest',
   'browser.locate',
   'browser.read',
+  'browser.search',
+  'browser.elements.find',
+  'browser.scroll',
+  'browser.dropdown.options',
+  'browser.dropdown.select',
   'browser.click',
   'browser.type',
   'browser.keyboard',
@@ -180,6 +203,10 @@ interface ActionServiceHarness {
   observation(): CreatedObservation | undefined;
 }
 
+type ElementAddress =
+  | { observationId: ObservationId; ref: number }
+  | { selector: string };
+
 interface ActionSignalSnapshot {
   loaderId: string;
   url?: string;
@@ -220,6 +247,14 @@ interface PopupSignal {
 }
 
 const DIALOG_TYPES = new Set<DialogType>(['alert', 'confirm', 'prompt', 'beforeunload']);
+const READ_ANNOTATION_RECT = `function() {
+  if(!this||this.nodeType!==1||!this.isConnected)return null;
+  const style=getComputedStyle(this);
+  if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return null;
+  const rect=this.getBoundingClientRect();
+  if(!Number.isFinite(rect.x)||!Number.isFinite(rect.y)||rect.width<=0||rect.height<=0)return null;
+  return{x:rect.x,y:rect.y,width:rect.width,height:rect.height};
+}`;
 
 function asRecord(value: JsonValue): Record<string, JsonValue> {
   return value as Record<string, JsonValue>;
@@ -227,6 +262,35 @@ function asRecord(value: JsonValue): Record<string, JsonValue> {
 
 function asJson(value: unknown): JsonValue {
   return value as JsonValue;
+}
+
+function stateFingerprint(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value) ?? 'undefined').digest('hex');
+}
+
+function elementAddress(value: JsonValue): ElementAddress {
+  const record = asRecord(value);
+  if (typeof record.selector === 'string') return { selector: record.selector };
+  return {
+    observationId: record.observationId as ObservationId,
+    ref: Number(record.ref),
+  };
+}
+
+function dropdownChoice(value: JsonValue): DropdownChoice {
+  const record = asRecord(value);
+  if (record.by === 'index') return { by: 'index', index: Number(record.index) };
+  if (record.by === 'label') {
+    return { by: 'label', label: String(record.label), exact: record.exact !== false };
+  }
+  return { by: 'value', value: String(record.value), exact: record.exact !== false };
+}
+
+function optionMatches(option: Pick<DropdownOption, 'index' | 'label' | 'value'>, choice: DropdownChoice): boolean {
+  if (choice.by === 'index') return option.index === choice.index;
+  const actual = (choice.by === 'label' ? option.label : option.value).trim().toLocaleLowerCase();
+  const expected = (choice.by === 'label' ? choice.label : choice.value).trim().toLocaleLowerCase();
+  return choice.exact ? actual === expected : actual.includes(expected);
 }
 
 function sessionKey(leaseId: ControlLeaseId, targetId: ControlledTargetId): string {
@@ -469,6 +533,11 @@ export class BrowserToolService implements BrowserToolExecutor {
       case 'browser.observation.latest': return this.latestObservation(context);
       case 'browser.locate': return this.locate(context, args);
       case 'browser.read': return this.read(context, args);
+      case 'browser.search': return this.search(context, args);
+      case 'browser.elements.find': return this.findElements(context, args);
+      case 'browser.scroll': return this.scroll(context, args);
+      case 'browser.dropdown.options': return this.dropdownOptions(context, args);
+      case 'browser.dropdown.select': return this.selectDropdown(context, args);
       case 'browser.click': return this.click(context, args);
       case 'browser.type': return this.type(context, args);
       case 'browser.keyboard': return this.keyboard(context, args);
@@ -909,6 +978,207 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
   }
 
+  private async search(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const result = await new PageInspectionService(
+      this.transport,
+      this.activeCdpSessionId(session),
+    ).search(args.query as string, {
+      selector: args.selector as string | undefined,
+      caseSensitive: args.caseSensitive as boolean | undefined,
+      wholeWord: args.wholeWord as boolean | undefined,
+      limit: args.limit as number | undefined,
+      context: session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {},
+    });
+    return asJson({
+      ...this.targetResult(context, targetId, result.url),
+      title: result.title,
+      totalMatches: result.totalMatches,
+      matches: result.matches,
+      truncated: result.truncated,
+    });
+  }
+
+  private async findElements(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const result = await new PageInspectionService(
+      this.transport,
+      this.activeCdpSessionId(session),
+    ).find(args.selector as string, {
+      limit: args.limit as number | undefined,
+      attributeNames: args.attributeNames as string[] | undefined,
+      pierceShadow: args.pierceShadow as boolean | undefined,
+      context: session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {},
+    });
+    return asJson({
+      ...this.targetResult(context, targetId, result.url),
+      title: result.title,
+      totalMatches: result.totalMatches,
+      elements: result.elements,
+      truncated: result.truncated,
+    });
+  }
+
+  private async scroll(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'page.interact');
+    const modes = [args.direction !== undefined, args.position !== undefined, args.text !== undefined]
+      .filter(Boolean).length;
+    if (modes > 1) {
+      throw invalidArgument('Use only one of direction, position, or text', 'arguments');
+    }
+    if (args.text !== undefined && args.target !== undefined) {
+      throw invalidArgument('Text scrolling cannot also specify an element target', 'target');
+    }
+    const scroll = new ScrollService(
+      this.transport,
+      this.activeCdpSessionId(session),
+      session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {},
+    );
+    let evidence: ScrollEvidence;
+    let actionSignature: unknown;
+    if (args.text !== undefined) {
+      actionSignature = { action: 'scroll', text: args.text, exact: args.exact === true };
+      this.markDispatched(context);
+      evidence = await scroll.text(args.text as string, args.exact === true);
+    } else {
+      const input: ElementScrollInput = args.position !== undefined
+        ? { mode: 'position', position: args.position as 'start' | 'end' }
+        : {
+          mode: 'relative',
+          direction: (args.direction ?? 'down') as 'up' | 'down' | 'left' | 'right',
+          amount: Number(args.amount ?? 0.8),
+          unit: (args.unit ?? 'viewport') as 'pixels' | 'viewport',
+        };
+      const address = args.target === undefined ? undefined : elementAddress(args.target);
+      if (!address) {
+        actionSignature = { action: 'scroll', target: 'page', input };
+        this.markDispatched(context);
+        evidence = await scroll.page(input);
+      } else if ('selector' in address) {
+        actionSignature = { action: 'scroll', target: { selector: address.selector }, input };
+        this.markDispatched(context);
+        evidence = await scroll.selector(address.selector, input);
+      } else {
+        evidence = await this.withElementObject(context, targetId, session, address, async (objectId, observation) => {
+          actionSignature = {
+            action: 'scroll',
+            target: { backendNodeId: observation.refs[address.ref - 1].backendNodeId },
+            input,
+          };
+          this.markDispatched(context);
+          return scroll.object(objectId, input);
+        });
+      }
+    }
+    const next = await this.createObservation(
+      context,
+      targetId,
+      session,
+      Number(args.observationLimit ?? OBSERVATION_V1_LIMITS.defaultElements),
+      true,
+    );
+    const hint = this.recordActionEvidence(context, targetId, evidence, actionSignature, next);
+    return this.observationResult(context, targetId, next, evidence, hint ? [hint] : []);
+  }
+
+  private async dropdownOptions(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const service = this.dropdownService(session);
+    const address = elementAddress(args.target);
+    const result = 'selector' in address
+      ? await service.inspectSelector(address.selector)
+      : await this.withElementObject(
+        context,
+        targetId,
+        session,
+        address,
+        objectId => service.inspectObject(objectId),
+      );
+    const record = this.registry.get(this.inventoryContext(context), targetId);
+    return asJson({ ...this.targetResult(context, targetId, record.url), ...result });
+  }
+
+  private async selectDropdown(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'page.interact');
+    const service = this.dropdownService(session);
+    const address = elementAddress(args.target);
+    const choice = dropdownChoice(args.choice);
+    const limit = Number(args.observationLimit ?? OBSERVATION_V1_LIMITS.defaultElements);
+    let info: DropdownInfo;
+    let initialObservation: StoredObservation | undefined;
+    if ('selector' in address) {
+      info = await service.inspectSelector(address.selector);
+    } else {
+      initialObservation = await this.resolveObservation(
+        context,
+        targetId,
+        session,
+        address.observationId,
+        address.ref,
+      );
+      info = await this.withElementObject(
+        context,
+        targetId,
+        session,
+        address,
+        objectId => service.inspectObject(objectId),
+      );
+    }
+
+    if (info.kind === 'native') {
+      const evidence = 'selector' in address
+        ? await (async () => {
+          this.markDispatched(context);
+          return service.selectNativeSelector(address.selector, choice);
+        })()
+        : await this.withElementObject(context, targetId, session, address, async objectId => {
+          this.markDispatched(context);
+          return service.selectNativeObject(objectId, choice);
+        });
+      const next = await this.createObservation(context, targetId, session, limit, true);
+      const hint = this.recordActionEvidence(context, targetId, evidence, {
+        action: 'select',
+        target: 'selector' in address
+          ? { selector: address.selector }
+          : { backendNodeId: initialObservation?.refs[address.ref - 1]?.backendNodeId },
+        choice,
+      }, next);
+      this.publishDocumentChanged(context, targetId, next);
+      return this.observationResult(context, targetId, next, evidence, hint ? [hint] : []);
+    }
+
+    if ('selector' in address || !initialObservation) {
+      throw invalidArgument('ARIA dropdown selection requires an Observation ref', 'target');
+    }
+    return this.selectAriaDropdown(
+      context,
+      targetId,
+      session,
+      initialObservation,
+      address.ref,
+      info,
+      choice,
+      limit,
+    );
+  }
+
   private async click(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.interact');
@@ -921,7 +1191,12 @@ export class BrowserToolService implements BrowserToolExecutor {
         target.observationId as ObservationId,
         Number(target.ref),
       );
-      return this.runClickAction(context, targetId, session, observation, service => service.click(
+      return this.runClickAction(context, targetId, session, observation, {
+        action: 'click',
+        backendNodeId: observation.refs[Number(target.ref) - 1].backendNodeId,
+        button: args.button ?? 'left',
+        clickCount: args.clickCount ?? 1,
+      }, service => service.click(
         { kind: 'ref', ref: String(target.ref) },
         {
           button: args.button as 'left' | 'right' | undefined,
@@ -930,7 +1205,13 @@ export class BrowserToolService implements BrowserToolExecutor {
         },
       ));
     }
-    return this.runClickAction(context, targetId, session, undefined, service => service.click({
+    return this.runClickAction(context, targetId, session, undefined, {
+      action: 'click',
+      x: Number(target.x),
+      y: Number(target.y),
+      button: args.button ?? 'left',
+      clickCount: args.clickCount ?? 1,
+    }, service => service.click({
       kind: 'coordinates',
       x: Number(target.x),
       y: Number(target.y),
@@ -951,7 +1232,13 @@ export class BrowserToolService implements BrowserToolExecutor {
       args.observationId as ObservationId,
       Number(args.ref),
     );
-    return this.runInputAction(context, targetId, session, observation, service => service.type(
+    return this.runInputAction(context, targetId, session, observation, {
+      action: 'type',
+      backendNodeId: observation.refs[Number(args.ref) - 1].backendNodeId,
+      textLength: String(args.text).length,
+      clear: args.clear === true,
+      submit: args.submit === true,
+    }, service => service.type(
       String(args.ref),
       args.text as string,
       {
@@ -966,7 +1253,13 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async keyboard(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.interact');
-    return this.runInputAction(context, targetId, session, undefined, service => service.keyboard(
+    return this.runInputAction(context, targetId, session, undefined, {
+      action: 'keyboard',
+      textLength: String(args.text).length,
+      focusSelector: args.focusSelector ?? null,
+      clear: args.clear === true,
+      submit: args.submit === true,
+    }, service => service.keyboard(
       args.text as string,
       {
         clear: args.clear as boolean | undefined,
@@ -986,6 +1279,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       context,
       targetId,
       session,
+      { action: 'press', key: args.key },
       service => service.press(
         args.key as string,
         Number(args.observationLimit ?? OBSERVATION_V1_LIMITS.defaultElements),
@@ -1050,7 +1344,12 @@ export class BrowserToolService implements BrowserToolExecutor {
         : {}),
     });
     if (!next) throw new BrowserPilotError('internal_error', 'Upload did not produce an Observation');
-    const hint = this.recordActionEvidence(context, targetId, result.evidence);
+    const hint = this.recordActionEvidence(context, targetId, result.evidence, {
+      action: 'upload',
+      artifactId: artifact.descriptor.id,
+      backendNodeId: backendNodeId ?? null,
+      inputIndex: args.inputIndex ?? null,
+    }, next);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, result.evidence, hint ? [hint] : []);
   }
@@ -1058,12 +1357,26 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async capture(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.capture');
+    const annotationRequest = args.annotations as Record<string, JsonValue> | undefined;
+    if (annotationRequest && (args.fullPage === true || args.selector !== undefined)) {
+      throw invalidArgument('Annotated screenshots support viewport capture only', 'annotations');
+    }
+    const annotationPlan = annotationRequest
+      ? await this.screenshotAnnotations(context, targetId, session, annotationRequest)
+      : undefined;
     const capture = new CaptureService(this.transport, this.activeCdpSessionId(session));
     const options = {
       fullPage: args.fullPage as boolean | undefined,
       selector: args.selector as string | undefined,
     };
-    const media = await capture.screenshot(options);
+    let media = await capture.screenshot(options);
+    if (annotationPlan) {
+      media = await new ScreenshotAnnotationService(this.transport, session.sessionId).annotate(
+        media,
+        annotationPlan.annotations,
+        annotationPlan.viewport,
+      );
+    }
     const scale = this.previewScale(media.width, media.height);
     const record = this.registry.get(this.inventoryContext(context), targetId);
     if (scale === undefined) {
@@ -1074,10 +1387,21 @@ export class BrowserToolService implements BrowserToolExecutor {
         ...(media.width !== undefined ? { width: media.width } : {}),
         ...(media.height !== undefined ? { height: media.height } : {}),
       });
-      return asJson({ ...this.targetResult(context, targetId, record.url), artifact });
+      return asJson({
+        ...this.targetResult(context, targetId, record.url),
+        artifact,
+        ...(annotationPlan ? { annotationCount: annotationPlan.annotations.length } : {}),
+      });
     }
 
-    const previewMedia = await capture.screenshot({ ...options, scale });
+    let previewMedia = await capture.screenshot({ ...options, scale });
+    if (annotationPlan) {
+      previewMedia = await new ScreenshotAnnotationService(this.transport, session.sessionId).annotate(
+        previewMedia,
+        annotationPlan.annotations,
+        annotationPlan.viewport,
+      );
+    }
     if (args.includeOriginal !== true) {
       const artifact = await this.createArtifact(context, {
         kind: 'screenshot_preview',
@@ -1086,7 +1410,11 @@ export class BrowserToolService implements BrowserToolExecutor {
         ...(previewMedia.width !== undefined ? { width: previewMedia.width } : {}),
         ...(previewMedia.height !== undefined ? { height: previewMedia.height } : {}),
       });
-      return asJson({ ...this.targetResult(context, targetId, record.url), artifact });
+      return asJson({
+        ...this.targetResult(context, targetId, record.url),
+        artifact,
+        ...(annotationPlan ? { annotationCount: annotationPlan.annotations.length } : {}),
+      });
     }
 
     const artifact = await this.createArtifact(context, {
@@ -1105,7 +1433,12 @@ export class BrowserToolService implements BrowserToolExecutor {
         ...(previewMedia.height !== undefined ? { height: previewMedia.height } : {}),
         previewOf: artifact.id,
       });
-      return asJson({ ...this.targetResult(context, targetId, record.url), artifact, preview });
+      return asJson({
+        ...this.targetResult(context, targetId, record.url),
+        artifact,
+        preview,
+        ...(annotationPlan ? { annotationCount: annotationPlan.annotations.length } : {}),
+      });
     } catch (error) {
       await this.artifactStore!.release(context.workspace!.id, artifact.id);
       throw error;
@@ -1466,7 +1799,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     targetId: ControlledTargetId,
     session: TargetSession,
     observationId: ObservationId,
-    ref: number,
+    ref?: number,
   ): Promise<StoredObservation> {
     const cdpSessionId = this.activeCdpSessionId(session);
     const identity = await this.observationContextIdentity(session);
@@ -1484,6 +1817,289 @@ export class BrowserToolService implements BrowserToolExecutor {
       ref,
     });
     return observation;
+  }
+
+  private async screenshotAnnotations(
+    context: BrokerToolCallContext,
+    targetId: ControlledTargetId,
+    session: TargetSession,
+    request: Record<string, JsonValue>,
+  ): Promise<{ annotations: ScreenshotAnnotation[]; viewport: ScreenshotViewport }> {
+    const observation = await this.resolveObservation(
+      context,
+      targetId,
+      session,
+      request.observationId as ObservationId,
+    );
+    const requestedRefs = Array.isArray(request.refs)
+      ? request.refs.map(Number)
+      : observation.refs.slice(0, 200).map((_, index) => index + 1);
+    for (const ref of requestedRefs) {
+      if (!Number.isSafeInteger(ref) || ref < 1 || ref > observation.refs.length) {
+        throw new BrowserPilotError('stale_ref', 'Screenshot annotation ref is outside the Observation', {
+          context: { targetId, observationId: observation.id, ref },
+        });
+      }
+    }
+    const metrics = await this.transport.send('Page.getLayoutMetrics', {}, session.sessionId);
+    const viewportData = metrics?.cssVisualViewport ?? metrics?.cssLayoutViewport;
+    if (
+      !viewportData || !Number.isFinite(viewportData.clientWidth) || !Number.isFinite(viewportData.clientHeight) ||
+      Number(viewportData.clientWidth) <= 0 || Number(viewportData.clientHeight) <= 0
+    ) throw new BrowserPilotError('internal_error', 'Chrome returned invalid screenshot viewport metrics');
+    const viewport = {
+      width: Number(viewportData.clientWidth),
+      height: Number(viewportData.clientHeight),
+    };
+    const offset = await this.activeFramePointerOffset(session);
+    const annotations: ScreenshotAnnotation[] = [];
+    const cdpSessionId = this.activeCdpSessionId(session);
+    const validator = new RefRevalidationService(this.transport, cdpSessionId);
+    for (const ref of requestedRefs) {
+      const entry = observation.refs[ref - 1];
+      let objectId: string | undefined;
+      try {
+        const { object } = await this.transport.send('DOM.resolveNode', {
+          backendNodeId: entry.backendNodeId,
+        }, cdpSessionId);
+        if (typeof object?.objectId !== 'string' || !object.objectId) {
+          throw new BrowserPilotError('stale_ref', 'Screenshot annotation ref no longer resolves', {
+            context: { targetId, observationId: observation.id, ref },
+          });
+        }
+        const resolvedObjectId = object.objectId;
+        objectId = resolvedObjectId;
+        await validator.validateResolved(resolvedObjectId, entry, {
+          workspaceId: context.workspace!.id,
+          leaseId: context.lease!.id,
+          targetId,
+          observationId: observation.id,
+          ref,
+        });
+        const { result } = await this.transport.send('Runtime.callFunctionOn', {
+          objectId: resolvedObjectId,
+          functionDeclaration: READ_ANNOTATION_RECT,
+          returnByValue: true,
+        }, cdpSessionId);
+        const rect = result?.value as Record<string, unknown> | null | undefined;
+        if (!rect) continue;
+        const left = Math.max(0, Number(rect.x) + offset.x);
+        const top = Math.max(0, Number(rect.y) + offset.y);
+        const right = Math.min(viewport.width, Number(rect.x) + offset.x + Number(rect.width));
+        const bottom = Math.min(viewport.height, Number(rect.y) + offset.y + Number(rect.height));
+        if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) continue;
+        annotations.push({ ref, x: left, y: top, width: right - left, height: bottom - top });
+      } finally {
+        if (objectId) {
+          await this.transport.send('Runtime.releaseObject', { objectId }, cdpSessionId).catch(() => {});
+        }
+      }
+    }
+    return { annotations, viewport };
+  }
+
+  private dropdownService(session: TargetSession): DropdownService {
+    return new DropdownService(
+      this.transport,
+      this.activeCdpSessionId(session),
+      session.activeFrame?.executionContextId !== undefined
+        ? { executionContextId: session.activeFrame.executionContextId }
+        : {},
+    );
+  }
+
+  private async withElementObject<T>(
+    context: BrokerToolCallContext,
+    targetId: ControlledTargetId,
+    session: TargetSession,
+    address: Extract<ElementAddress, { observationId: ObservationId }>,
+    operation: (objectId: string, observation: StoredObservation) => Promise<T>,
+  ): Promise<T> {
+    const observation = await this.resolveObservation(
+      context,
+      targetId,
+      session,
+      address.observationId,
+      address.ref,
+    );
+    const entry = observation.refs[address.ref - 1];
+    const cdpSessionId = this.activeCdpSessionId(session);
+    let objectId: string | undefined;
+    try {
+      const { object } = await this.transport.send('DOM.resolveNode', {
+        backendNodeId: entry.backendNodeId,
+      }, cdpSessionId);
+      if (typeof object?.objectId !== 'string' || !object.objectId) {
+        throw new BrowserPilotError('stale_ref', 'Ref no longer resolves to the observed element', {
+          context: { targetId, observationId: observation.id, ref: address.ref },
+        });
+      }
+      const resolvedObjectId = object.objectId;
+      objectId = resolvedObjectId;
+      await new RefRevalidationService(this.transport, cdpSessionId).validateResolved(
+        resolvedObjectId,
+        entry,
+        {
+          workspaceId: context.workspace!.id,
+          leaseId: context.lease!.id,
+          targetId,
+          observationId: observation.id,
+          ref: address.ref,
+        },
+      );
+      return await operation(resolvedObjectId, observation);
+    } finally {
+      if (objectId) {
+        await this.transport.send('Runtime.releaseObject', { objectId }, cdpSessionId).catch(() => {});
+      }
+    }
+  }
+
+  private async selectAriaDropdown(
+    context: BrokerToolCallContext,
+    targetId: ControlledTargetId,
+    session: TargetSession,
+    initial: StoredObservation,
+    targetRef: number,
+    info: DropdownInfo,
+    choice: DropdownChoice,
+    limit: number,
+  ): Promise<JsonValue> {
+    const originalEntry = initial.refs[targetRef - 1];
+    let current: CreatedObservation;
+    let openedControl = false;
+    if (!info.expanded || info.requiresOpen) {
+      const openHarness = this.createActionHarness(context, targetId, session, initial);
+      await openHarness.service.click({ kind: 'ref', ref: String(targetRef) }, { observationLimit: limit });
+      const opened = openHarness.observation();
+      if (!opened) throw new BrowserPilotError('internal_error', 'Opening dropdown did not produce an Observation');
+      current = opened;
+      openedControl = true;
+    } else {
+      current = await this.createObservation(context, targetId, session, limit, true);
+    }
+
+    const currentRecord = current.record;
+    const refreshedTargetIndex = currentRecord.refs.findIndex(entry => (
+      entry.backendNodeId === originalEntry.backendNodeId
+    ));
+    if (refreshedTargetIndex < 0) {
+      throw new BrowserPilotError('stale_ref', 'ARIA dropdown is absent from the refreshed Observation', {
+        context: { targetId, observationId: currentRecord.id, ref: targetRef },
+      });
+    }
+    const candidateRefs = currentRecord.refs
+      .map((entry, index) => ({ entry, ref: index + 1 }))
+      .filter(({ entry }) => ['option', 'menuitemradio'].includes(entry.role));
+    const candidates = await this.withElementObject(
+      context,
+      targetId,
+      session,
+      { observationId: currentRecord.id, ref: refreshedTargetIndex + 1 },
+      async targetObjectId => {
+        const scoped: Array<{ ref: number; option: DropdownOption }> = [];
+        for (const candidate of candidateRefs) {
+          const option = await this.withElementObject(
+            context,
+            targetId,
+            session,
+            { observationId: currentRecord.id, ref: candidate.ref },
+            optionObjectId => this.dropdownService(session).inspectOwnedAriaOption(
+              targetObjectId,
+              optionObjectId,
+            ),
+          );
+          if (option) scoped.push({ ref: candidate.ref, option });
+        }
+        return scoped;
+      },
+    );
+    const selectedCandidate = candidates.find(candidate => (
+      !candidate.option.disabled && optionMatches(candidate.option, choice)
+    ));
+    if (!selectedCandidate) {
+      const evidence: SelectVerificationEvidence = {
+        action: 'select',
+        status: 'mismatch',
+        kind: 'aria',
+        selected: [],
+        reason: 'option_not_found',
+      };
+      const hint = this.recordActionEvidence(context, targetId, evidence, {
+        action: 'select',
+        backendNodeId: originalEntry.backendNodeId,
+        choice,
+      }, current);
+      if (openedControl) this.publishDocumentChanged(context, targetId, current);
+      return this.observationResult(context, targetId, current, evidence, hint ? [hint] : []);
+    }
+
+    const selectHarness = this.createActionHarness(context, targetId, session, currentRecord);
+    const clickResult = await selectHarness.service.click(
+      { kind: 'ref', ref: String(selectedCandidate.ref) },
+      { observationLimit: limit },
+    );
+    const next = selectHarness.observation();
+    if (!next) throw new BrowserPilotError('internal_error', 'Dropdown selection did not produce an Observation');
+
+    let selected: DropdownOption[] = [];
+    const selectedTargetIndex = next.record.refs.findIndex(entry => (
+      entry.backendNodeId === originalEntry.backendNodeId
+    ));
+    if (selectedTargetIndex >= 0) {
+      try {
+        const refreshed = await this.withElementObject(
+          context,
+          targetId,
+          session,
+          { observationId: next.record.id, ref: selectedTargetIndex + 1 },
+          objectId => this.dropdownService(session).inspectObject(objectId),
+        );
+        selected = refreshed.options.filter(option => option.selected);
+      } catch (error) {
+        if (!(error instanceof BrowserPilotError) || error.code !== 'stale_ref') throw error;
+      }
+    }
+
+    const refreshedTargetValue = selectedTargetIndex >= 0
+      ? next.snapshot.data.elements[selectedTargetIndex]?.value
+      : undefined;
+    const expectedText = choice.by === 'index'
+      ? selectedCandidate.option.label
+      : choice.by === 'label' ? choice.label : choice.value;
+    const exposedValueMatches = typeof refreshedTargetValue === 'string' && (
+      choice.by === 'index'
+        ? refreshedTargetValue.trim().toLocaleLowerCase().includes(expectedText.trim().toLocaleLowerCase())
+        : optionMatches({
+          index: selectedCandidate.option.index,
+          label: refreshedTargetValue,
+          value: refreshedTargetValue,
+        }, choice)
+    );
+    const verified = selected.some(option => optionMatches(option, choice)) ||
+      exposedValueMatches ||
+      (clickResult.evidence.status === 'verified' && clickResult.evidence.effects.includes('selected_changed'));
+    if (verified && selected.length === 0) {
+      selected = [{ ...selectedCandidate.option, selected: true }];
+    }
+    const evidence: SelectVerificationEvidence = clickResult.evidence.status === 'mismatch'
+      ? {
+        action: 'select',
+        status: 'mismatch',
+        kind: 'aria',
+        selected,
+        reason: 'selection_mismatch',
+      }
+      : verified
+        ? { action: 'select', status: 'verified', kind: 'aria', selected }
+        : DropdownService.unavailableAriaSelection();
+    const hint = this.recordActionEvidence(context, targetId, evidence, {
+      action: 'select',
+      backendNodeId: initial.refs[targetRef - 1].backendNodeId,
+      choice,
+    }, next);
+    this.publishDocumentChanged(context, targetId, next);
+    return this.observationResult(context, targetId, next, evidence, hint ? [hint] : []);
   }
 
   private async captureActionSignals(
@@ -1530,6 +2146,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     targetId: ControlledTargetId,
     session: TargetSession,
     observation: StoredObservation | undefined,
+    actionSignature: unknown,
     action: (service: ActionService) => Promise<ClickActionResult>,
   ): Promise<JsonValue> {
     const before = await this.captureActionSignals(session, observation);
@@ -1539,7 +2156,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (!next) throw new BrowserPilotError('internal_error', 'Click did not produce an Observation');
     const extraEffects = this.collectActionSignalEffects(session, before, next, observation);
     const evidence = this.mergeClickEvidence(result.evidence, extraEffects);
-    const hint = this.recordActionEvidence(context, targetId, evidence);
+    const hint = this.recordActionEvidence(context, targetId, evidence, actionSignature, next);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, evidence, hint ? [hint] : []);
   }
@@ -1548,6 +2165,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     context: BrokerToolCallContext,
     targetId: ControlledTargetId,
     session: TargetSession,
+    actionSignature: unknown,
     action: (service: ActionService) => Promise<PressActionResult>,
   ): Promise<JsonValue> {
     const before = await this.captureActionSignals(session);
@@ -1557,7 +2175,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (!next) throw new BrowserPilotError('internal_error', 'Key action did not produce an Observation');
     const extraEffects = this.collectActionSignalEffects(session, before, next);
     const evidence = this.mergePressEvidence(result.evidence, extraEffects);
-    const hint = this.recordActionEvidence(context, targetId, evidence);
+    const hint = this.recordActionEvidence(context, targetId, evidence, actionSignature, next);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, evidence, hint ? [hint] : []);
   }
@@ -1567,13 +2185,14 @@ export class BrowserToolService implements BrowserToolExecutor {
     targetId: ControlledTargetId,
     session: TargetSession,
     observation: StoredObservation | undefined,
+    actionSignature: unknown,
     action: (service: ActionService) => Promise<{ observation: SnapshotResult; evidence: InputVerificationEvidence }>,
   ): Promise<JsonValue> {
     const harness = this.createActionHarness(context, targetId, session, observation);
     const result = await action(harness.service);
     const next = harness.observation();
     if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
-    const hint = this.recordActionEvidence(context, targetId, result.evidence);
+    const hint = this.recordActionEvidence(context, targetId, result.evidence, actionSignature, next);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, result.evidence, hint ? [hint] : []);
   }
@@ -1685,13 +2304,16 @@ export class BrowserToolService implements BrowserToolExecutor {
       | InputVerificationEvidence
       | ClickVerificationEvidence
       | PressVerificationEvidence
-      | UploadVerificationEvidence,
+      | UploadVerificationEvidence
+      | ScrollEvidence
+      | SelectVerificationEvidence,
     additionalHints: readonly AgentHint[] = [],
   ): JsonValue {
     return asJson({
       ...this.targetResult(context, targetId, created.snapshot.data.url),
       observationId: created.record.id,
       title: created.snapshot.data.title,
+      ...(created.snapshot.data.page ? { page: created.snapshot.data.page } : {}),
       elements: created.snapshot.data.elements,
       truncated: created.record.truncated,
       truncationReasons: created.record.truncationReasons,
@@ -2395,14 +3017,21 @@ export class BrowserToolService implements BrowserToolExecutor {
       | InputVerificationEvidence
       | ClickVerificationEvidence
       | PressVerificationEvidence
-      | UploadVerificationEvidence,
+      | UploadVerificationEvidence
+      | ScrollEvidence
+      | SelectVerificationEvidence,
+    actionSignature?: unknown,
+    observation?: CreatedObservation,
   ): AgentHint | undefined {
     return this.watchdogs.actionCompleted({
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
       targetId,
       browserConnectionGeneration: context.browser.instance.connectionGeneration,
-    }, evidence);
+    }, evidence, actionSignature !== undefined && observation ? {
+      actionSignature: stateFingerprint(actionSignature),
+      pageFingerprint: stateFingerprint(observation.snapshot.data),
+    } : undefined);
   }
 
   private selectedFrameDetached(session: TargetSession, frameId: FrameId): void {
