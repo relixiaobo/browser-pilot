@@ -1,22 +1,41 @@
 import http from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
-import { SOCKET_PATH, PID_FILE } from './paths.js';
+import { readBrokerLocatorSync, processIsAlive } from './broker-locator.js';
+import { BROWSER_PILOT_PATHS } from './paths.js';
 import type { Transport } from './transport.js';
 import { browserPilotErrorFromJsonRpc } from './protocol/errors.js';
 import type { JsonRpcErrorObject, JsonRpcNotification, JsonValue } from './protocol/model.js';
 
 export function isDaemonRunning(): boolean {
-  if (!existsSync(PID_FILE)) return false;
-  const pid = parseInt(readFileSync(PID_FILE, 'utf-8').trim(), 10);
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  const locator = readBrokerLocatorSync();
+  if (locator) return processIsAlive(locator.pid);
+  if (!existsSync(BROWSER_PILOT_PATHS.pidFile)) return false;
+  try {
+    const raw = readFileSync(BROWSER_PILOT_PATHS.pidFile, 'utf-8').trim();
+    const parsed: unknown = raw.startsWith('{') ? JSON.parse(raw) : Number.parseInt(raw, 10);
+    const pid = typeof parsed === 'number'
+      ? parsed
+      : parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? Number((parsed as Record<string, unknown>).pid)
+        : Number.NaN;
+    return processIsAlive(pid);
+  } catch {
+    return false;
+  }
 }
 
 export class DaemonClient implements Transport {
+  private readonly endpoint: string;
+
+  constructor() {
+    this.endpoint = readBrokerLocatorSync()?.endpoint ?? BROWSER_PILOT_PATHS.endpoint;
+  }
+
   private request(path: string, body?: any, signal?: AbortSignal): Promise<any> {
     return new Promise((resolve, reject) => {
       const req = http.request(
         {
-          socketPath: SOCKET_PATH,
+          socketPath: this.endpoint,
           path,
           method: body !== undefined ? 'POST' : 'GET',
           headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
@@ -61,6 +80,7 @@ export class DaemonClient implements Transport {
     ok: boolean;
     wsUrl?: string;
     brokerProtocol?: number;
+    brokerProcessIdentity?: string;
     browser?: {
       id?: string;
       product: string;

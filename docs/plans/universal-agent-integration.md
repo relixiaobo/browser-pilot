@@ -249,9 +249,17 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     candidates in place after setup, and route ready browser instances by
     `browserId`. Selection is explicit (`--browser`/`browserId`) or stable-order
     deterministic and remains daemon-memory state only.
-- [ ] **A6.2** Define the per-user Broker locator, socket/pipe permissions,
+- [x] **A6.2** Define the per-user Broker locator, socket/pipe permissions,
   startup locking, stale process recovery, and platform-specific paths.
   - Covers: FR-7, CON-5.
+  - Complete: a versioned, owner-only locator records the per-user endpoint and
+    Broker process identity. Unix uses a mode-`0600` domain socket with a
+    deterministic short runtime path when required; Windows uses a per-user
+    named pipe. State/runtime directories and metadata are owner-only. An
+    atomic startup lock plus a post-lock health check makes concurrent launch a
+    single-winner operation. Dead owners are reclaimed without killing a PID;
+    live but unresponsive Brokers fail with explicit remediation and are never
+    silently replaced.
 - [ ] **A6.3** Implement executable/protocol negotiation, live-client upgrade
   protection, rollback metadata, and deliberate version isolation.
   - Covers: AC-7, NFR-2.

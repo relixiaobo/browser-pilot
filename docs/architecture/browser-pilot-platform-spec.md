@@ -259,7 +259,7 @@ browser-pilot
   tool list
   tool call
   artifact export|release
-  connect|disconnect|open|snapshot|click|type|keyboard|press
+  browsers|connect|disconnect|open|snapshot|click|type|keyboard|press
   read|eval|upload|screenshot|pdf|cookies|frame|auth|tabs|tab|close|net
 ```
 
@@ -271,6 +271,32 @@ Three distribution modes are equivalent:
 
 Embedded products must not import `src/*`, depend on daemon socket details, or
 parse human-readable output.
+
+### Broker Locator and Startup
+
+The executable, not an embedding Host, resolves the per-user Broker endpoint.
+On Unix it uses an owner-only domain socket and falls back to a deterministic
+short owner-specific runtime directory when the state path would exceed
+portable socket limits. On Windows it uses a named pipe derived from the OS
+user identity. Persistent state defaults to the Browser Pilot user directory
+(`%LOCALAPPDATA%\\Browser Pilot` on Windows); an explicit
+`BROWSER_PILOT_HOME` is an installation-level isolation override on Unix.
+
+State/runtime directories are mode `0700` and regular metadata files are mode
+`0600` where POSIX modes apply. The socket is mode `0600`; Windows relies on the
+creating user's process-token DACL for its local named pipe. Symlinked final
+directories and metadata, foreign ownership, unexpected file types, and
+overly-permissive metadata are rejected.
+
+The versioned locator records only PID, endpoint/transport, start time, and
+Broker process identity. An atomic owner-recorded startup lock surrounds
+discovery and daemon launch. Every contender health-checks before and after the
+lock; therefore exactly one process starts the Broker and all others reuse it.
+A lock whose owner is dead can be reclaimed; a live owner is never displaced
+merely because startup is slow. A dead locator/socket is removed without
+signaling its recorded PID. If the PID is alive but the endpoint is
+unresponsive, Browser Pilot returns structured
+restart remediation and never silently kills or replaces the process.
 
 ## Primary Flows
 

@@ -31,6 +31,14 @@ choice in memory; it does not write target or profile selection state to disk.
 Create pipes for stdin, stdout, and stderr. Stdout is protocol-only. Treat each
 stderr line as a diagnostic and never parse it as protocol data.
 
+The executable owns Broker discovery and startup. Hosts must not read PID
+files, locator metadata, Unix socket paths, or Windows named-pipe names. Two
+products that launch concurrently serialize through the per-user startup lock,
+then both reuse the winning compatible Broker. A dead locator is recovered on
+the next launch. A live process with an unresponsive endpoint is not killed or
+replaced; launch returns `browser_disconnected` with
+`restart_unresponsive_broker` remediation.
+
 ## Framing
 
 The transport is JSON-RPC 2.0 over newline-delimited UTF-8 JSON:

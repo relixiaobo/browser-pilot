@@ -1,8 +1,96 @@
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { homedir, platform, tmpdir, userInfo } from 'node:os';
+import { isAbsolute, join, win32 } from 'node:path';
 
-export const STATE_DIR = join(homedir(), '.browser-pilot');
-export const SOCKET_PATH = join(STATE_DIR, 'daemon.sock');
-export const PID_FILE = join(STATE_DIR, 'daemon.pid');
-export const ARTIFACT_DIR = join(STATE_DIR, 'artifacts');
-export const DOWNLOAD_DIR = join(STATE_DIR, 'downloads');
+export type BrokerTransportKind = 'unix_socket' | 'windows_pipe';
+
+export interface BrowserPilotPaths {
+  stateDir: string;
+  runtimeDir: string;
+  endpoint: string;
+  transport: BrokerTransportKind;
+  locatorFile: string;
+  pidFile: string;
+  startupLockFile: string;
+  artifactDir: string;
+  downloadDir: string;
+}
+
+export interface BrowserPilotPathOptions {
+  platform?: NodeJS.Platform;
+  homeDir?: string;
+  tempDir?: string;
+  env?: NodeJS.ProcessEnv;
+  uid?: number;
+  username?: string;
+}
+
+const MAX_PORTABLE_UNIX_SOCKET_BYTES = 96;
+
+function identityDigest(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+export function resolveBrowserPilotPaths(options: BrowserPilotPathOptions = {}): BrowserPilotPaths {
+  const os = options.platform ?? platform();
+  const home = options.homeDir ?? homedir();
+  const env = options.env ?? process.env;
+  if (os === 'win32') {
+    const localAppData = env.LOCALAPPDATA ?? win32.join(home, 'AppData', 'Local');
+    const stateDir = win32.join(localAppData, 'Browser Pilot');
+    const username = options.username ?? (() => {
+      try { return userInfo().username; } catch { return home; }
+    })();
+    const identity = identityDigest(`${username.toLowerCase()}\0${home.toLowerCase()}`);
+    return {
+      stateDir,
+      runtimeDir: stateDir,
+      endpoint: `\\\\.\\pipe\\browser-pilot-${identity}`,
+      transport: 'windows_pipe',
+      locatorFile: win32.join(stateDir, 'broker-locator.json'),
+      pidFile: win32.join(stateDir, 'daemon.pid'),
+      startupLockFile: win32.join(stateDir, 'startup.lock'),
+      artifactDir: win32.join(stateDir, 'artifacts'),
+      downloadDir: win32.join(stateDir, 'downloads'),
+    };
+  }
+
+  const stateDir = env.BROWSER_PILOT_HOME ?? join(home, '.browser-pilot');
+  const defaultEndpoint = join(stateDir, 'daemon.sock');
+  const uid = options.uid ?? process.getuid?.() ?? 0;
+  const useShortRuntimePath = Buffer.byteLength(defaultEndpoint) > MAX_PORTABLE_UNIX_SOCKET_BYTES;
+  let runtimeDir = useShortRuntimePath
+    ? join(options.tempDir ?? tmpdir(), `browser-pilot-${uid}-${identityDigest(stateDir)}`)
+    : stateDir;
+  let endpoint = join(runtimeDir, 'daemon.sock');
+  if (Buffer.byteLength(endpoint) > MAX_PORTABLE_UNIX_SOCKET_BYTES) {
+    runtimeDir = join('/tmp', `browser-pilot-${uid}-${identityDigest(stateDir)}`);
+    endpoint = join(runtimeDir, 'daemon.sock');
+  }
+  if (Buffer.byteLength(endpoint) > MAX_PORTABLE_UNIX_SOCKET_BYTES) {
+    throw new Error('Browser Pilot cannot resolve a portable Unix socket path');
+  }
+  if (!isAbsolute(endpoint)) throw new Error('Browser Pilot endpoint must be absolute');
+  return {
+    stateDir,
+    runtimeDir,
+    endpoint,
+    transport: 'unix_socket',
+    locatorFile: join(stateDir, 'broker-locator.json'),
+    pidFile: join(stateDir, 'daemon.pid'),
+    startupLockFile: join(stateDir, 'startup.lock'),
+    artifactDir: join(stateDir, 'artifacts'),
+    downloadDir: join(stateDir, 'downloads'),
+  };
+}
+
+export const BROWSER_PILOT_PATHS = resolveBrowserPilotPaths();
+export const STATE_DIR = BROWSER_PILOT_PATHS.stateDir;
+export const RUNTIME_DIR = BROWSER_PILOT_PATHS.runtimeDir;
+export const SOCKET_PATH = BROWSER_PILOT_PATHS.endpoint;
+export const BROKER_TRANSPORT = BROWSER_PILOT_PATHS.transport;
+export const LOCATOR_FILE = BROWSER_PILOT_PATHS.locatorFile;
+export const PID_FILE = BROWSER_PILOT_PATHS.pidFile;
+export const STARTUP_LOCK_FILE = BROWSER_PILOT_PATHS.startupLockFile;
+export const ARTIFACT_DIR = BROWSER_PILOT_PATHS.artifactDir;
+export const DOWNLOAD_DIR = BROWSER_PILOT_PATHS.downloadDir;

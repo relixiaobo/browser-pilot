@@ -1,9 +1,14 @@
 import http from 'node:http';
-import { writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { unlinkSync, chmodSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { STATE_DIR, SOCKET_PATH, PID_FILE } from './paths.js';
+import { BROKER_TRANSPORT, STATE_DIR, SOCKET_PATH } from './paths.js';
+import {
+  ensureBrokerDirectoriesSync,
+  removeBrokerLocatorSync,
+  writeBrokerLocatorSync,
+} from './broker-locator.js';
 import { CDPClient } from './cdp.js';
 import { asBrowserPilotError, invalidArgument } from './protocol/errors.js';
 import type { BrowserInstanceId, JsonValue } from './protocol/model.js';
@@ -29,16 +34,19 @@ const PKG_VERSION: string = require('../package.json').version;
 const initialWsUrl = process.argv[2] || undefined;
 const browserProduct = process.argv[3] || '';
 const browserProfile = process.argv[4] || '';
-if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-else try { chmodSync(STATE_DIR, 0o700); } catch { /* ignore */ }
+ensureBrokerDirectoriesSync();
 for (const legacyFile of ['state.json', 'refs.json']) {
   try { unlinkSync(join(STATE_DIR, legacyFile)); } catch { /* absent or already removed */ }
 }
-try { unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
+if (BROKER_TRANSPORT === 'unix_socket') {
+  try { unlinkSync(SOCKET_PATH); } catch { /* absent */ }
+}
 
-function cleanup() {
-  try { unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
-  try { unlinkSync(PID_FILE); } catch { /* ignore */ }
+function cleanup(brokerProcessIdentity: string) {
+  if (BROKER_TRANSPORT === 'unix_socket') {
+    try { unlinkSync(SOCKET_PATH); } catch { /* absent */ }
+  }
+  removeBrokerLocatorSync(brokerProcessIdentity);
 }
 
 function readBody(req: http.IncomingMessage, maxBytes = 5 * 1024 * 1024): Promise<string> {
@@ -158,6 +166,7 @@ async function main() {
   let currentWsUrl = initialWsUrl;
   let terminating = false;
   const startedAt = Date.now();
+  const brokerProcessIdentity = `${process.pid}:${startedAt}`;
   const discoveredBrowsers = await discoverBrowserCandidates();
   const knownSelection = discoveredBrowsers.find(browser => (
     browser.dataDir === browserProfile &&
@@ -312,7 +321,7 @@ async function main() {
   const broker = new MemoryBrokerRuntime({
     serviceVersion: PKG_VERSION,
     executableVersion: PKG_VERSION,
-    brokerProcessIdentity: `${process.pid}:${startedAt}`,
+    brokerProcessIdentity,
     browsers: browserBindings,
     toolExecutor: toolRouter,
     artifactStore,
@@ -596,6 +605,7 @@ async function main() {
           ok: true,
           wsUrl: currentWsUrl,
           brokerProtocol: 1,
+          brokerProcessIdentity,
           ...(selectedBrowser ? { browser: {
             id: browserBinding.candidate.id,
             product: selectedProduct,
@@ -716,7 +726,7 @@ async function main() {
           for (const controller of additionalControllers) controller.cdp.close();
           cdp.close();
           await artifactStore.clear().catch(() => {});
-          cleanup();
+          cleanup(brokerProcessIdentity);
           process.exit(0);
         }, 50); return;
       }
@@ -825,8 +835,17 @@ async function main() {
   });
 
   server.listen(SOCKET_PATH, () => {
-    try { chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
-    writeFileSync(PID_FILE, String(process.pid), { mode: 0o600 });
+    if (BROKER_TRANSPORT === 'unix_socket') {
+      try { chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
+    }
+    writeBrokerLocatorSync({
+      schemaVersion: 1,
+      pid: process.pid,
+      endpoint: SOCKET_PATH,
+      transport: BROKER_TRANSPORT,
+      startedAt,
+      brokerProcessIdentity,
+    });
   });
   const terminate = async () => {
     if (terminating) return;
@@ -840,7 +859,7 @@ async function main() {
     for (const controller of additionalControllers) controller.cdp.close();
     cdp.close();
     await artifactStore.clear().catch(() => {});
-    cleanup();
+    cleanup(brokerProcessIdentity);
     process.exit(0);
   };
   process.on('SIGTERM', () => { void terminate(); });

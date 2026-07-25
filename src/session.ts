@@ -1,6 +1,13 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { DaemonClient, isDaemonRunning } from './client.js';
+import { DaemonClient } from './client.js';
+import {
+  acquireBrokerStartupLock,
+  processIsAlive,
+  readBrokerLocatorSync,
+  readBrokerPidSync,
+  removeStaleBrokerFilesSync,
+} from './broker-locator.js';
 import {
   discoverBrowserCandidates,
   type DiscoveredBrowser,
@@ -40,80 +47,83 @@ async function startDaemon(browser: DiscoveredBrowser | null): Promise<DaemonCli
   });
 }
 
-async function getDaemon(browser: DiscoveredBrowser | null): Promise<DaemonClient> {
-  if (isDaemonRunning()) {
-    const client = new DaemonClient();
-    const info = await client.healthInfo();
-    if (info.ok) {
-      if (
-        (browser?.endpoint && info.wsUrl === browser.endpoint.wsUrl) ||
-        (
-          browser &&
-          info.browser?.profile === browser.dataDir &&
-          info.browser.product.toLowerCase() === browser.candidate.product.toLowerCase()
-        )
-      ) {
-        return client;
-      }
-      throw new BrowserPilotError('browser_not_found', 'The shared daemon is connected to a different browser profile', {
-        remediation: {
-          code: 'select_running_browser_pilot',
-          message: 'Use the browser profile already owned by the shared daemon, or stop it explicitly before selecting another profile.',
-          actionRequired: true,
-        },
-      });
-    }
-  }
-  return startDaemon(browser);
+type DaemonHealth = Awaited<ReturnType<DaemonClient['healthInfo']>>;
+
+function browserMatchesHealth(browserFilter: string | undefined, info: DaemonHealth): boolean {
+  if (!browserFilter) return true;
+  const filter = browserFilter.toLowerCase();
+  return [info.browser?.id, info.browser?.product, info.browser?.channel]
+    .some(value => value?.toLowerCase().includes(filter));
+}
+
+function assertBrowserSelection(browserFilter: string | undefined, info: DaemonHealth): void {
+  if (browserMatchesHealth(browserFilter, info)) return;
+  throw new BrowserPilotError('browser_not_found', 'The shared Broker is using a different browser preference', {
+    remediation: {
+      code: 'select_running_browser_pilot',
+      message: 'Use the running Broker browser, select its browserId in workspaces/create, or stop it before changing the default preference.',
+      actionRequired: true,
+    },
+  });
 }
 
 // ── Public API ──────────────────────────────────────
 
 /** Start or reuse the shared daemon for the selected browser. */
 export async function connectDaemon(browserFilter?: string): Promise<DaemonClient> {
-  if (isDaemonRunning()) {
-    const existing = new DaemonClient();
-    const info = await existing.healthInfo();
-    if (
-      info.ok &&
-      (
-        !browserFilter ||
-        [info.browser?.id, info.browser?.product, info.browser?.channel]
-          .some(value => value?.toLowerCase().includes(browserFilter.toLowerCase()))
-      )
-    ) {
-      return existing;
+  const existing = new DaemonClient();
+  const existingInfo = await existing.healthInfo();
+  if (existingInfo.ok) {
+    assertBrowserSelection(browserFilter, existingInfo);
+    return existing;
+  }
+
+  const startupLock = await acquireBrokerStartupLock();
+  try {
+    const winner = new DaemonClient();
+    const winnerInfo = await winner.healthInfo();
+    if (winnerInfo.ok) {
+      assertBrowserSelection(browserFilter, winnerInfo);
+      return winner;
     }
-    if (info.ok && browserFilter) {
-      throw new BrowserPilotError('browser_not_found', 'The shared daemon is connected to a different browser product', {
+
+    const locator = readBrokerLocatorSync();
+    const brokerPid = locator?.pid ?? readBrokerPidSync();
+    if (brokerPid && processIsAlive(brokerPid)) {
+      throw new BrowserPilotError('browser_disconnected', 'The Browser Pilot Broker process is alive but its endpoint is unresponsive', {
+        retryable: true,
         remediation: {
-          code: 'select_running_browser_pilot',
-          message: 'Use the browser already owned by the shared daemon, or stop it explicitly before selecting another browser.',
+          code: 'restart_unresponsive_broker',
+          message: 'Stop the unresponsive Browser Pilot Broker explicitly, then retry. Live processes are never replaced automatically.',
           actionRequired: true,
         },
       });
     }
-  }
-  const candidates = await discoverBrowserCandidates();
-  const filter = browserFilter?.toLowerCase();
-  const matches = candidates.filter(({ candidate }) => (
-    !filter || [candidate.id, candidate.product, candidate.channel]
-      .some(value => value?.toLowerCase().includes(filter))
-  ));
-  if (browserFilter && matches.length === 0) {
-    throw new BrowserPilotError('browser_not_found',
-      'No installed supported browser matches the requested selection.',
-      {
-        remediation: {
-          code: 'select_supported_browser',
-          message: 'Run browser discovery and select one of the returned browser IDs or product names.',
-          actionRequired: true,
+    removeStaleBrokerFilesSync();
+
+    const candidates = await discoverBrowserCandidates();
+    const filter = browserFilter?.toLowerCase();
+    const matches = candidates.filter(({ candidate }) => (
+      !filter || [candidate.id, candidate.product, candidate.channel]
+        .some(value => value?.toLowerCase().includes(filter))
+    ));
+    if (browserFilter && matches.length === 0) {
+      throw new BrowserPilotError('browser_not_found',
+        'No installed supported browser matches the requested selection.',
+        {
+          remediation: {
+            code: 'select_supported_browser',
+            message: 'Run browser discovery and select one of the returned browser IDs or product names.',
+            actionRequired: true,
+          },
         },
-      },
-    );
+      );
+    }
+    const selected = matches.find(browser => browser.candidate.state === 'ready') ?? matches[0] ?? null;
+    return await startDaemon(selected);
+  } finally {
+    startupLock.release();
   }
-  const selected = matches.find(browser => browser.candidate.state === 'ready') ?? matches[0] ?? null;
-  return getDaemon(selected);
 }
 
 export class PageLoadTimeoutError extends Error {

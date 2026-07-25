@@ -41,5 +41,12 @@ export {
   type ChromeInfo,
   type DiscoveredBrowser,
 } from '../chrome.js';
+export * from '../broker-locator.js';
+export {
+  resolveBrowserPilotPaths,
+  type BrowserPilotPathOptions,
+  type BrowserPilotPaths,
+  type BrokerTransportKind,
+} from '../paths.js';
 export { PageLoadTimeoutError } from '../session.js';
 export { MemoryRefStore, type RefStore } from '../snapshot.js';
