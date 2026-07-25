@@ -189,42 +189,54 @@ export class PageLoadTimeoutError extends Error {
  *  or anti-bot challenges where 'complete' never fires but the DOM is interactive).
  *  Only throws if we never even reach 'interactive'. */
 export async function waitForLoad(transport: Transport, sessionId: string, timeout = 30_000): Promise<void> {
-  const start = Date.now();
   const interactiveGrace = 1500; // ms after first 'interactive' before giving up on 'complete'
   let interactiveSince: number | null = null;
+  const deadlineReached = Symbol('page-load-deadline');
+  let deadlineTimer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<typeof deadlineReached>(resolve => {
+    deadlineTimer = setTimeout(() => resolve(deadlineReached), timeout);
+  });
+  const injectBorder = async (): Promise<void> => {
+    await Promise.race([
+      transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => undefined),
+      deadline,
+    ]);
+  };
 
-  while (Date.now() - start < timeout) {
-    try {
-      const { result } = await transport.send('Runtime.evaluate', {
-        expression: 'document.readyState',
-      }, sessionId);
-      const state = result.value;
+  try {
+    while (true) {
+      const evaluation = await Promise.race([
+        transport.send('Runtime.evaluate', {
+          expression: 'document.readyState',
+        }, sessionId).then(
+          ({ result }) => ({ state: result.value as unknown }),
+          () => ({ state: undefined }),
+        ),
+        deadline,
+      ]);
+      if (evaluation === deadlineReached) throw new PageLoadTimeoutError(timeout);
 
-      if (state === 'complete') {
-        await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
+      if (evaluation.state === 'complete') {
+        await injectBorder();
         return;
       }
 
-      if (state === 'interactive') {
+      if (evaluation.state === 'interactive') {
         if (interactiveSince === null) interactiveSince = Date.now();
-        // DOM parsed and usable; if 'complete' doesn't come quickly, accept and move on
+        // DOM parsed and usable; if 'complete' doesn't come quickly, accept and move on.
         if (Date.now() - interactiveSince >= interactiveGrace) {
-          await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
+          await injectBorder();
           return;
         }
       }
-    } catch { /* page navigating */ }
-    await new Promise(r => setTimeout(r, 200));
-  }
 
-  // Last-chance check: if DOM is at least interactive, accept rather than throw
-  try {
-    const { result } = await transport.send('Runtime.evaluate', { expression: 'document.readyState' }, sessionId);
-    if (result.value === 'interactive' || result.value === 'complete') {
-      await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
-      return;
+      const sleep = await Promise.race([
+        new Promise<'poll'>(resolve => setTimeout(() => resolve('poll'), 200)),
+        deadline,
+      ]);
+      if (sleep === deadlineReached) throw new PageLoadTimeoutError(timeout);
     }
-  } catch { /* */ }
-
-  throw new PageLoadTimeoutError(timeout);
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
 }

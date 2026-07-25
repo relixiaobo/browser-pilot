@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { readBrokerLocatorSync, processIsAlive } from './broker-locator.js';
 import { BROWSER_PILOT_PATHS } from './paths.js';
 import type { Transport } from './transport.js';
-import { browserPilotErrorFromJsonRpc } from './protocol/errors.js';
+import { BrowserPilotError, browserPilotErrorFromJsonRpc } from './protocol/errors.js';
 import type { JsonRpcErrorObject, JsonRpcNotification, JsonValue } from './protocol/model.js';
 
 export interface BrokerClientSummary {
@@ -18,6 +18,8 @@ export interface DaemonShutdownExpectation {
   executableVersion: string;
   executableIdentity: string;
 }
+
+const BROKER_SHUTDOWN_TIMEOUT_MS = 15_000;
 
 export function isDaemonRunning(): boolean {
   const locator = readBrokerLocatorSync();
@@ -117,6 +119,29 @@ export class DaemonClient implements Transport {
 
   async shutdown(expectation: DaemonShutdownExpectation): Promise<void> {
     await this.request('/shutdown', expectation);
+    const deadline = Date.now() + BROKER_SHUTDOWN_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const locator = readBrokerLocatorSync();
+      if (
+        !locator ||
+        locator.brokerProcessIdentity !== expectation.brokerProcessIdentity ||
+        !processIsAlive(locator.pid)
+      ) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new BrowserPilotError(
+      'unknown_outcome',
+      `Browser Pilot Broker accepted shutdown but did not exit within ${BROKER_SHUTDOWN_TIMEOUT_MS}ms`,
+      {
+        retryable: true,
+        context: { brokerProcessIdentity: expectation.brokerProcessIdentity },
+        remediation: {
+          code: 'inspect_broker_state',
+          message: 'Inspect Broker health before retrying shutdown or starting a replacement.',
+          actionRequired: false,
+        },
+      },
+    );
   }
 
   async brokerCall(

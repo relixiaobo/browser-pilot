@@ -152,19 +152,40 @@ export class CDPClient implements Transport {
     return () => this.connectionHandlers.delete(handler);
   }
 
-  close(): void {
+  close(): Promise<void> {
     this.closeRequested = true;
     const socket = this.ws;
     if (!socket) {
       this.transition('closed');
-      return;
+      return Promise.resolve();
     }
-    if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
-      socket.close();
-    } else {
+    if (socket.readyState !== WebSocket.CONNECTING && socket.readyState !== WebSocket.OPEN) {
       this.ws = undefined;
+      this.failPending(this.disconnectedError());
       this.transition('closed');
+      return Promise.resolve();
     }
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        socket.terminate();
+        if (this.ws === socket) {
+          this.ws = undefined;
+          this.failPending(this.disconnectedError());
+          this.transition('closed');
+        }
+        finish();
+      }, 1_000);
+      timer.unref();
+      socket.once('close', finish);
+      socket.close();
+    });
   }
 
   private disconnectedError(cause?: Error): BrowserPilotError {

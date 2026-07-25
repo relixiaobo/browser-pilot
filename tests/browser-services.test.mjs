@@ -10,6 +10,7 @@ import {
   MemoryRefStore,
   NetworkService,
   ObservationService,
+  PageLoadTimeoutError,
   PageContentService,
   RefRevalidationService,
   TargetService,
@@ -35,6 +36,21 @@ const snapshot = {
   text: '[page] Example | https://example.com',
   data: { title: 'Example', url: 'https://example.com', elements: [] },
 };
+
+test('ObservationService enforces its load deadline when a CDP request never settles', async () => {
+  const transport = new FakeTransport(() => new Promise(() => {}));
+  const service = new ObservationService(transport, 'session:stalled', 'target:stalled', {
+    settleDelayMs: 0,
+    loadTimeoutMs: 25,
+  });
+  const startedAt = Date.now();
+
+  await assert.rejects(
+    () => service.observeAfterAction(),
+    error => error instanceof PageLoadTimeoutError && error.timeoutMs === 25,
+  );
+  assert.ok(Date.now() - startedAt < 500, 'load deadline was not enforced around the pending CDP request');
+});
 
 function domOnlyRefSnapshot({ backendNodeId = 200, name = 'DOM Command', clickable = true } = {}) {
   const strings = [];

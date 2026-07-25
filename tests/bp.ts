@@ -1,9 +1,10 @@
 // Helper: run bp CLI commands and parse JSON output.
-import { execSync } from 'node:child_process';
+import { execSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { isAbsolute, relative, resolve } from 'node:path';
 
 const BP = resolve(import.meta.dirname, '../dist/cli.js');
 const USER_CHROME_OPT_IN = 'BROWSER_PILOT_TEST_USER_CHROME';
+const BP_COMMAND_TIMEOUT_MS = 40_000;
 
 function assertSafeBrowserEnvironment(): void {
   if (process.env[USER_CHROME_OPT_IN] === '1') return;
@@ -44,7 +45,9 @@ function run(args: string): BpResult {
   try {
     const out = execSync(`node ${BP} ${args}`, {
       encoding: 'utf-8',
-      timeout: 15_000,
+      // The service navigation watchdog is 30s; the caller must allow it to
+      // return a structured unknown_outcome instead of killing the CLI first.
+      timeout: BP_COMMAND_TIMEOUT_MS,
       env: { ...process.env, FORCE_COLOR: '0' },
     }).trim();
     return JSON.parse(out);
@@ -61,6 +64,39 @@ function run(args: string): BpResult {
 
 export function bp(command: string): BpResult {
   return run(command);
+}
+
+export function startBp(args: string[]): {
+  child: ChildProcessWithoutNullStreams;
+  completed: Promise<BpResult>;
+} {
+  assertSafeBrowserEnvironment();
+  const child = spawn(process.execPath, [BP, ...args], {
+    env: { ...process.env, FORCE_COLOR: '0' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', value => { stdout += value; });
+  child.stderr.on('data', value => { stderr += value; });
+  const completed = new Promise<BpResult>(resolveResult => {
+    const timer = setTimeout(() => child.kill('SIGTERM'), BP_COMMAND_TIMEOUT_MS);
+    timer.unref();
+    child.once('close', () => {
+      clearTimeout(timer);
+      try {
+        resolveResult(JSON.parse(stdout.trim()));
+      } catch {
+        resolveResult({
+          ok: false,
+          error: stderr.trim() || stdout.trim() || 'Browser Pilot command returned no JSON result',
+        });
+      }
+    });
+  });
+  return { child, completed };
 }
 
 /** Open a URL and return snapshot */

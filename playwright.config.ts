@@ -2,7 +2,8 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
-  timeout: 30_000,
+  // Individual CLI calls allow the Broker's 30s navigation watchdog to fire.
+  timeout: 45_000,
   retries: 0,
   workers: 1, // bp uses a single browser session — must be serial
   globalSetup: './tests/global-setup.ts',

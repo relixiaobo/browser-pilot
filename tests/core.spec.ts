@@ -2,7 +2,7 @@
 // Covers lifecycle, navigation, click, type, press, eval, screenshot, pdf,
 // cookies, frames, upload, auth, tabs, dialogs, and output format.
 import { test, expect } from '@playwright/test';
-import { open, click, type as bpType, press, evaluate, snapshot, findRef, findRefByRole, bp } from './bp.js';
+import { open, click, type as bpType, press, evaluate, snapshot, findRef, findRefByRole, bp, startBp } from './bp.js';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DaemonClient } from '../src/client.js';
@@ -12,8 +12,7 @@ const BASE = 'http://127.0.0.1:18274';
 // ── Lifecycle ───────────────────────────────────────
 
 test.describe('lifecycle', () => {
-  // This mutates the shared Broker lifecycle; dedicated process tests cover restart behavior.
-  test.skip('disconnect + reconnect (process-isolated)', async () => {
+  test('disconnect + reconnect', async () => {
     bp('disconnect');
     const result = bp('connect');
     expect(result.ok).toBe(true);
@@ -270,19 +269,8 @@ test.describe('auth', () => {
 
 test.describe('dialogs', () => {
   test('dialog remains pending until explicitly dismissed', async () => {
-    test.skip(
-      process.env.BROWSER_PILOT_TEST_USER_CHROME !== '1',
-      'requires Browser Pilot to be the browser\'s sole CDP client',
-    );
-    const daemon = new DaemonClient();
-    const { targetId } = await daemon.send('Target.createTarget', { url: `${BASE}/input/types` });
-    const { sessionId } = await daemon.send('Target.attachToTarget', { targetId, flatten: true });
-    await daemon.send('Page.enable', {}, sessionId);
-    const evaluation = daemon.send('Runtime.evaluate', {
-      expression: 'confirm("Submit this form?")',
-      awaitPromise: true,
-      returnByValue: true,
-    }, sessionId);
+    open(`${BASE}/input/types`);
+    const evaluation = startBp(['eval', 'confirm("Submit this form?")']);
 
     try {
       let pending;
@@ -293,12 +281,14 @@ test.describe('dialogs', () => {
       expect(pending).toBeDefined();
       expect(pending?.sessionId).toBeUndefined();
       expect(bp(`dialog ${pending.dialogId} --dismiss`).action).toBe('dismiss');
-      await evaluation;
+      const result = await evaluation.completed;
+      expect(result.ok).toBe(true);
+      expect(result.value).toBe(false);
       expect(bp('dialogs').dialogs).toEqual([]);
     } finally {
-      await daemon.send('Page.handleJavaScriptDialog', { accept: false }, sessionId).catch(() => {});
-      await daemon.send('Target.detachFromTarget', { sessionId }).catch(() => {});
-      await daemon.send('Target.closeTarget', { targetId }).catch(() => {});
+      if (evaluation.child.exitCode === null && evaluation.child.signalCode === null) {
+        evaluation.child.kill('SIGTERM');
+      }
     }
   });
 });

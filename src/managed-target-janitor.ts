@@ -195,7 +195,7 @@ async function finish(cleanup: boolean, exitCode = 0): Promise<void> {
       new Promise<void>(resolve => setTimeout(resolve, CLEANUP_TIMEOUT_MS)),
     ]).catch(() => {});
   }
-  cdp.close();
+  await cdp.close();
   process.exitCode = exitCode;
   setImmediate(() => process.exit(exitCode));
 }
