@@ -158,12 +158,16 @@ Preserve Browser Pilot advantages:
     managed popup, dialog, Observation invalidation, Command status, and Lease
     expiry, sanitized Workspace network, scoped download, and browser connection
     recovery producers are connected.
-- [ ] **B4.2** Add watchdogs for browser disconnect, stalled navigation,
+- [x] **B4.2** Add watchdogs for browser disconnect, stalled navigation,
   detached frames, unhandled dialogs, and repeated no-progress actions.
   - Covers: FR-5, FR-8.
-  - Progress: WebSocket loss is detected immediately and starts selected-profile
-    rediscovery with bounded backoff. Stalled navigation, unhandled-dialog, and
-    repeated-no-progress watchdogs remain.
+  - Complete: WebSocket loss emits connection state and starts selected-profile
+    rediscovery with bounded backoff. Navigation timeouts return structured
+    `unknown_outcome`; selected-frame detach clears frame state; pending dialogs
+    emit a bounded reminder without auto-response; and browser-observable action
+    evidence drives a Lease/target-scoped no-progress streak. Timers and streaks
+    are transient, cleaned up with their owning resources, and never expose raw
+    CDP IDs, refs, typed text, or credentials.
 - [x] **B4.3** Replace dialog auto-accept with explicit pending state and
   accept/dismiss commands.
   - Covers: DEC-5.

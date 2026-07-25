@@ -217,6 +217,13 @@ export async function disconnect(): Promise<void> {
   clearState();
 }
 
+export class PageLoadTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Page load did not become interactive within ${timeoutMs}ms`);
+    this.name = 'PageLoadTimeoutError';
+  }
+}
+
 /** Wait for the page to be usable.
  *  Returns when readyState === 'complete', OR when readyState === 'interactive'
  *  has been stable for a short grace period (handles sites with slow trackers/ads
@@ -260,5 +267,5 @@ export async function waitForLoad(transport: Transport, sessionId: string, timeo
     }
   } catch { /* */ }
 
-  throw new Error('Page load timeout');
+  throw new PageLoadTimeoutError(timeout);
 }

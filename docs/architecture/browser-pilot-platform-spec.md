@@ -535,7 +535,9 @@ documentGeneration
 The event taxonomy includes navigation, document changed, target attached,
 target detached, control acquired/released, popup, dialog, download, connection
 lost, connection restored, network request, network response, command status,
-observation invalidated, and Lease expiry.
+observation invalidated, Lease expiry, and watchdog signals for stalled
+navigation, selected-frame detach, unhandled dialogs, and repeated observable
+no-progress actions.
 
 Every event contains an event ID, monotonic Workspace sequence, timestamp,
 Workspace ID, relevant Lease and target IDs, type, payload version, and
@@ -549,6 +551,23 @@ uses `workspaces/get` to establish a new baseline.
 JavaScript dialogs enter explicit pending state and emit opened/closed events.
 They remain paused until the user or an Agent issues `browser.dialogs.respond`;
 Browser Pilot never auto-accepts them.
+
+Watchdogs report browser state; they do not make task decisions. A navigation
+that never becomes interactive emits `watchdog.navigation_stalled` and leaves
+the dispatched command as `unknown_outcome`. Detaching the selected frame emits
+`watchdog.frame_detached`, clears the frame selection, and invalidates its
+Observation. A dialog still pending after the bounded threshold emits one
+`watchdog.dialog_unhandled` event but remains pending. Three consecutive actions
+with browser-observable mismatch or no effect emit one `watchdog.no_progress`
+event per streak, scoped by Lease and target. Unobservable coordinate/canvas
+actions do not increment the streak. Navigation, frame changes, verified
+progress, session replacement, Lease release, and Workspace cleanup reset the
+applicable transient state.
+
+Watchdog payloads contain only bounded recovery metadata and opaque public IDs;
+they never contain typed values, passwords, refs, raw CDP target/session/frame
+IDs, or dialog prompt responses. Consumers inspect fresh browser state before
+deciding whether to continue, retry, or ask the user.
 
 ## Artifacts
 

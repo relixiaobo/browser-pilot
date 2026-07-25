@@ -252,9 +252,11 @@ stored cursor past an event the host has not processed.
 Current producers cover command status, Lease expiry, navigation, document
 change, target attach/detach, target control, managed popups, dialogs, downloads,
 browser connection loss/restoration, network request/response metadata, and
-observation invalidation. Network events never contain credentials, headers,
-request/response bodies, or raw CDP IDs; retrieve sensitive detail explicitly
-through the scoped network tools.
+observation invalidation. They also include `watchdog.navigation_stalled`,
+`watchdog.frame_detached`, `watchdog.dialog_unhandled`, and
+`watchdog.no_progress`. Network and watchdog events never contain credentials,
+typed values, refs, headers, request/response bodies, or raw CDP IDs; retrieve
+sensitive detail explicitly through the scoped tools.
 
 `connection.lost` keeps the last connection generation and causes later browser
 tools to fail with retryable `browser_disconnected`. The daemon repeatedly reads
@@ -268,6 +270,29 @@ recorded status is `unknown_outcome`.
 JavaScript dialogs remain pending. Use `browser.dialogs.list`, then call
 `browser.dialogs.respond` with the returned `dialogId`, target, and explicit
 `accept` or `dismiss` action. Browser Pilot never auto-accepts a dialog.
+
+Watchdog events are advisory browser-state signals, not autonomous recovery:
+
+- `watchdog.navigation_stalled` means `Page.navigate` was dispatched but the
+  page did not become interactive within 30 seconds. The command is
+  `unknown_outcome`; observe the target before deciding whether to navigate
+  again.
+- `watchdog.frame_detached` carries the opaque selected `frameId`. Browser Pilot
+  clears that selection and invalidates the Observation; list frames and create
+  a fresh Observation before continuing.
+- `watchdog.dialog_unhandled` is emitted once when a dialog remains pending for
+  15 seconds. It does not accept or dismiss the dialog.
+- `watchdog.no_progress` is emitted once after three consecutive completed
+  actions on the same Lease and target have browser-observable mismatch or no
+  supported effect. Verified progress, navigation, frame/session changes, and
+  cleanup reset the streak. Coordinate/canvas actions whose effects cannot be
+  observed do not count.
+
+Browser Pilot never automatically retries, repeats, stops, accepts, or dismisses
+an action because of a watchdog event. The host or Agent must inspect current
+state and decide. Timers and streaks are in-memory transient state and are
+removed on dialog close, session loss, Lease release, Workspace release, or
+browser disconnect as applicable.
 
 ## Artifacts
 

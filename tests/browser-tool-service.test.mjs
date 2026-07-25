@@ -3,7 +3,12 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
-import { ArtifactStore, BrowserToolService, MemoryBrokerRuntime } from '../dist/services.js';
+import {
+  ArtifactStore,
+  BrowserToolService,
+  MemoryBrokerRuntime,
+  PageLoadTimeoutError,
+} from '../dist/services.js';
 
 function png(width, height) {
   const bytes = Buffer.alloc(24);
@@ -460,6 +465,43 @@ test('dialogs remain pending, emit ordered events, and require an explicit respo
   assert.equal(dialogEvents[1].payload.action, 'dismiss');
 });
 
+test('an unhandled dialog emits one watchdog event without choosing a response', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding, { dialogTimeoutMs: 5 }),
+  });
+  const client = await createClient(runtime, 'bridge:dialog-watchdog', 'com.example.agent', 'instance:dialog-watchdog');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const sessionId = [...transport.sessions.entries()]
+    .find(([, cdpTargetId]) => cdpTargetId === 'user-form')[0];
+
+  transport.emit('Page.javascriptDialogOpening', {
+    type: 'confirm',
+    message: 'Continue?',
+    url: 'https://example.test/form',
+  }, sessionId);
+  await new Promise(resolve => setTimeout(resolve, 15));
+
+  const replayed = await runtime.call(client.bridge, 'events/poll', {
+    workspaceId: client.workspace.id,
+    cursor: client.eventCursor,
+  });
+  const watchdogEvents = replayed.events.filter(event => event.type === 'watchdog.dialog_unhandled');
+  assert.equal(watchdogEvents.length, 1);
+  assert.equal(watchdogEvents[0].targetId, targetId);
+  assert.match(watchdogEvents[0].payload.dialogId, /^dialog:/);
+  assert.equal(watchdogEvents[0].payload.type, 'confirm');
+  assert.equal(
+    transport.calls.some(call => call.method === 'Page.handleJavaScriptDialog'),
+    false,
+  );
+  assert.equal((await tool(runtime, client, 'browser.dialogs.list', {})).dialogs.length, 1);
+});
+
 test('Workspace auth and network rules are active before first navigation and use explicit Fetch handling', async () => {
   const transport = new BrowserFixtureTransport();
   const browserTools = new BrowserToolService(transport, binding);
@@ -716,6 +758,17 @@ test('frame tools expose session-scoped opaque IDs and apply the selected execut
   )).at(-1);
   assert.equal(framedEvaluation.params.contextId, 77);
 
+  const sessionId = [...transport.sessions.entries()]
+    .find(([, cdpTargetId]) => cdpTargetId === 'user-form')[0];
+  transport.emit('Page.frameDetached', { frameId: 'cdp-child-frame' }, sessionId);
+  const frameEvents = await runtime.call(client.bridge, 'events/poll', {
+    workspaceId: client.workspace.id,
+    cursor: client.eventCursor,
+  });
+  const detached = frameEvents.events.find(event => event.type === 'watchdog.frame_detached');
+  assert.equal(detached.payload.frameId, childFrameId);
+  assert.equal(JSON.stringify(detached).includes('cdp-child-frame'), false);
+
   const top = await tool(runtime, client, 'browser.frames.switch', { top: true }, targetId);
   assert.equal(top.frameId, listed.frames[0].frameId);
   await tool(runtime, client, 'browser.eval', { expression: '6 * 7' }, targetId);
@@ -723,6 +776,84 @@ test('frame tools expose session-scoped opaque IDs and apply the selected execut
     call.method === 'Runtime.evaluate' && call.params.expression === '6 * 7'
   )).at(-1);
   assert.equal('contextId' in topEvaluation.params, false);
+});
+
+test('stalled navigation returns unknown_outcome and an inspect-before-retry event', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding, {
+      navigationTimeoutMs: 25,
+      loadWaiter: async (_transport, _sessionId, timeoutMs) => {
+        throw new PageLoadTimeoutError(timeoutMs);
+      },
+    }),
+  });
+  const client = await createClient(runtime, 'bridge:navigation-watchdog', 'com.example.agent', 'instance:navigation-watchdog');
+
+  await assert.rejects(
+    () => runtime.call(client.bridge, 'tools/call', {
+      name: 'browser.open',
+      arguments: { url: 'https://pending.test/', newTarget: true },
+      workspaceId: client.workspace.id,
+      leaseId: client.lease.id,
+    }),
+    error => (
+      error.code === 'unknown_outcome' &&
+      error.retryable === true &&
+      error.context.reason === 'navigation_stalled' &&
+      error.remediation.code === 'inspect_navigation_state'
+    ),
+  );
+  const replayed = await runtime.call(client.bridge, 'events/poll', {
+    workspaceId: client.workspace.id,
+    cursor: client.eventCursor,
+  });
+  const stalled = replayed.events.find(event => event.type === 'watchdog.navigation_stalled');
+  assert.equal(stalled.payload.url, 'https://pending.test/');
+  assert.equal(stalled.payload.timeoutMs, 25);
+  assert.equal(stalled.payload.outcome, 'unknown');
+});
+
+test('three observable no-progress actions emit one scoped watchdog event', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.pointerTargetState.targetState.focused = true;
+  transport.pointerReadbackState.focused = true;
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding, { noProgressThreshold: 3 }),
+  });
+  const client = await createClient(runtime, 'bridge:no-progress', 'com.example.agent', 'instance:no-progress');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  let observation = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+
+  for (let index = 0; index < 4; index += 1) {
+    observation = await tool(runtime, client, 'browser.click', {
+      target: { observationId: observation.observationId, ref: 1 },
+    }, targetId);
+    assert.equal(observation.evidence.reason, 'no_observable_effect');
+  }
+
+  const replayed = await runtime.call(client.bridge, 'events/poll', {
+    workspaceId: client.workspace.id,
+    cursor: client.eventCursor,
+  });
+  const watchdogEvents = replayed.events.filter(event => event.type === 'watchdog.no_progress');
+  assert.equal(watchdogEvents.length, 1);
+  assert.equal(watchdogEvents[0].leaseId, client.lease.id);
+  assert.equal(watchdogEvents[0].targetId, targetId);
+  assert.deepEqual(watchdogEvents[0].payload, {
+    action: 'click',
+    evidenceStatus: 'unavailable',
+    reason: 'no_observable_effect',
+    streak: 3,
+    threshold: 3,
+  });
+  assert.equal(JSON.stringify(watchdogEvents).includes('Submit'), false);
 });
 
 test('browser.upload consumes only imported upload_input Artifacts and preserves the source filename', async t => {

@@ -20,7 +20,7 @@ import type { ToolDefinition } from '../protocol/tools.js';
 import { INJECT_BORDER } from '../page-scripts.js';
 import { MemoryRefStore, type RefStore, type SnapshotResult } from '../snapshot.js';
 import type { Transport } from '../transport.js';
-import { waitForLoad } from '../session.js';
+import { PageLoadTimeoutError, waitForLoad } from '../session.js';
 import {
   ActionService,
   type ClickActionResult,
@@ -39,6 +39,10 @@ import { ArtifactStore } from './artifact-store.js';
 import { DownloadController } from './download-controller.js';
 import { CdpBrowserTargetCatalog } from './browser-target-catalog.js';
 import { createBrowserControlPolicy } from './browser-control-policy.js';
+import {
+  BrowserWatchdogService,
+  DEFAULT_NAVIGATION_TIMEOUT_MS,
+} from './browser-watchdog-service.js';
 import {
   MemoryControlledTargetRegistry,
   type ControlledTargetRecord,
@@ -205,6 +209,15 @@ function refsChanged(before: StoredObservation, after: StoredObservation): boole
   return !before.truncated && !after.truncated;
 }
 
+export interface BrowserToolServiceOptions {
+  observations?: MemoryObservationStore;
+  artifactStore?: ArtifactStore;
+  navigationTimeoutMs?: number;
+  dialogTimeoutMs?: number;
+  noProgressThreshold?: number;
+  loadWaiter?: typeof waitForLoad;
+}
+
 export class BrowserToolService implements BrowserToolExecutor {
   readonly supportedTools: readonly string[];
 
@@ -225,18 +238,27 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly artifactStore?: ArtifactStore;
   private readonly downloads?: DownloadController;
   private readonly network: WorkspaceNetworkController;
+  private readonly watchdogs: BrowserWatchdogService;
+  private readonly navigationTimeoutMs: number;
+  private readonly loadWaiter: typeof waitForLoad;
   private eventPublisher?: (event: PublishBrowserEventInput) => void;
 
   constructor(
     private readonly transport: Transport,
     private readonly binding: BrokerBrowserBinding,
-    options: {
-      observations?: MemoryObservationStore;
-      artifactStore?: ArtifactStore;
-    } = {},
+    options: BrowserToolServiceOptions = {},
   ) {
     this.observations = options.observations ?? new MemoryObservationStore();
     this.artifactStore = options.artifactStore;
+    this.navigationTimeoutMs = options.navigationTimeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.navigationTimeoutMs) || this.navigationTimeoutMs <= 0) {
+      throw new Error('navigationTimeoutMs must be a positive integer');
+    }
+    this.loadWaiter = options.loadWaiter ?? waitForLoad;
+    this.watchdogs = new BrowserWatchdogService(event => this.publishEvent(event), {
+      dialogTimeoutMs: options.dialogTimeoutMs,
+      noProgressThreshold: options.noProgressThreshold,
+    });
     this.downloads = this.artifactStore
       ? new DownloadController(transport, this.artifactStore, {
         publishEvent: event => this.publishEvent(event),
@@ -318,6 +340,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.binding.instance = { ...current };
     this.binding.candidate.state = current.state === 'connected' ? 'ready' : 'disconnected';
     if (current.state !== 'connected') {
+      this.watchdogs.reset();
       for (const session of [...this.sessions.values()]) {
         this.downloads?.detachSession(session.sessionId, 'connection_lost');
         this.observations.invalidateSession(session.sessionId);
@@ -434,6 +457,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   }
 
   releaseLease(lease: ControlLease): void {
+    this.watchdogs.releaseLease(lease.id);
     this.downloads?.releaseLease(lease.id);
     this.inventory.releaseLease(lease.id);
     this.observations.releaseLease(lease.id);
@@ -451,6 +475,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): void {
     const caller = { principalId: principal.id, workspaceId: workspace.id };
     const records = this.registry.activeRecords(caller);
+    this.watchdogs.releaseWorkspace(workspace.id);
     this.downloads?.releaseWorkspace(workspace.id);
     this.inventory.releaseWorkspace(caller);
     this.observations.releaseWorkspace(workspace.id);
@@ -580,6 +605,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         ? { executionContextId: selection.executionContextId }
         : {}),
     };
+    this.watchdogs.resetTarget(session.leaseId, targetId);
     this.observations.invalidateTarget(targetId, 'frame_changed');
     this.publishEvent({
       workspaceId: session.workspaceId,
@@ -619,6 +645,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     const session = await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
     session.activeFrame = undefined;
     this.framesBySession.delete(session.sessionId);
+    this.watchdogs.resetTarget(inventoryContext.leaseId, targetId);
     this.observations.invalidateTarget(targetId, 'navigation');
     this.publishEvent({
       workspaceId: inventoryContext.workspaceId,
@@ -645,7 +672,36 @@ export class BrowserToolService implements BrowserToolExecutor {
         ...(typeof navigation?.loaderId === 'string' ? { loaderId: navigation.loaderId } : {}),
       },
     });
-    await waitForLoad(this.transport, session.sessionId);
+    try {
+      await this.loadWaiter(this.transport, session.sessionId, this.navigationTimeoutMs);
+    } catch (cause) {
+      if (!(cause instanceof PageLoadTimeoutError)) throw cause;
+      this.watchdogs.navigationStalled({
+        workspaceId: inventoryContext.workspaceId,
+        leaseId: inventoryContext.leaseId,
+        targetId,
+      }, {
+        url,
+        timeoutMs: cause.timeoutMs,
+      });
+      throw new BrowserPilotError('unknown_outcome', 'Navigation did not become interactive before the watchdog timeout', {
+        retryable: true,
+        context: {
+          workspaceId: inventoryContext.workspaceId,
+          leaseId: inventoryContext.leaseId,
+          targetId,
+          url,
+          reason: 'navigation_stalled',
+          timeoutMs: cause.timeoutMs,
+        },
+        remediation: {
+          code: 'inspect_navigation_state',
+          message: 'Inspect the target before deciding whether to navigate again.',
+          actionRequired: false,
+        },
+        cause,
+      });
+    }
     return this.observationResult(
       context,
       targetId,
@@ -792,6 +848,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         : {}),
     });
     if (!next) throw new BrowserPilotError('internal_error', 'Upload did not produce an Observation');
+    this.recordActionEvidence(context, targetId, result.evidence);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, result.evidence);
   }
@@ -1286,6 +1343,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (!next) throw new BrowserPilotError('internal_error', 'Click did not produce an Observation');
     const extraEffects = this.collectActionSignalEffects(session, before, next, observation);
     const evidence = this.mergeClickEvidence(result.evidence, extraEffects);
+    this.recordActionEvidence(context, targetId, evidence);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, evidence);
   }
@@ -1303,6 +1361,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (!next) throw new BrowserPilotError('internal_error', 'Key action did not produce an Observation');
     const extraEffects = this.collectActionSignalEffects(session, before, next);
     const evidence = this.mergePressEvidence(result.evidence, extraEffects);
+    this.recordActionEvidence(context, targetId, evidence);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, evidence);
   }
@@ -1318,6 +1377,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     const result = await action(harness.service);
     const next = harness.observation();
     if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
+    this.recordActionEvidence(context, targetId, result.evidence);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, result.evidence);
   }
@@ -1537,6 +1597,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.observations.invalidateTarget(targetId, reason);
     const session = [...this.sessions.values()].find(candidate => candidate.targetId === targetId);
     if (session) {
+      this.watchdogs.resetTarget(session.leaseId, targetId);
       this.publishEvent({
         workspaceId: session.workspaceId,
         leaseId: session.leaseId,
@@ -1580,7 +1641,17 @@ export class BrowserToolService implements BrowserToolExecutor {
       this.dialogOpenSequenceBySession.set(sessionId, this.dialogOpenSequence);
       this.pendingDialogs.set(dialog.id, dialog);
       this.pendingDialogBySession.set(sessionId, dialog.id);
+      this.watchdogs.resetTarget(dialog.leaseId, dialog.targetId);
       this.publishDialogEvent(dialog, 'opened');
+      this.watchdogs.dialogOpened({
+        workspaceId: dialog.workspaceId,
+        leaseId: dialog.leaseId,
+        targetId: dialog.targetId,
+      }, {
+        dialogId: dialog.id,
+        dialogType: dialog.type,
+        openedAt: dialog.openedAt,
+      });
     });
     this.transport.on?.('Page.javascriptDialogClosed', (params: any, sessionId?: string) => {
       if (!sessionId) return;
@@ -1621,20 +1692,12 @@ export class BrowserToolService implements BrowserToolExecutor {
       frames.byCdpId.delete(detached.cdpFrameId);
       frames.byId.delete(detached.id);
       if (session.activeFrame?.id !== detached.id) return;
-      session.activeFrame = undefined;
-      this.observations.invalidateTarget(session.targetId, 'frame_detached');
-      this.publishEvent({
-        workspaceId: session.workspaceId,
-        leaseId: session.leaseId,
-        targetId: session.targetId,
-        type: 'observation.invalidated',
-        sensitivity: 'browser_data',
-        payload: { reason: 'frame_detached', frameId: detached.id },
-      });
+      this.selectedFrameDetached(session, detached.id);
     });
     this.transport.on?.('Page.frameNavigated', (params: any, sessionId?: string) => {
       if (!sessionId || typeof params?.frame?.id !== 'string') return;
       const session = [...this.sessions.values()].find(candidate => candidate.sessionId === sessionId);
+      if (session) this.watchdogs.resetTarget(session.leaseId, session.targetId);
       if (session?.activeFrame && session.activeFrame.cdpFrameId === params.frame.id) {
         session.activeFrame.executionContextId = undefined;
       }
@@ -1657,10 +1720,10 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (!session.activeFrame) return;
     const service = new FrameService(this.transport, session.sessionId);
     const frames = this.syncFrames(session, await service.list());
-    const frame = frames.byId.get(session.activeFrame.id);
+    const activeFrameId = session.activeFrame.id;
+    const frame = frames.byId.get(activeFrameId);
     if (!frame) {
-      session.activeFrame = undefined;
-      this.observations.invalidateTarget(session.targetId, 'frame_detached');
+      this.selectedFrameDetached(session, activeFrameId);
       throw invalidArgument('Active frame is no longer attached; switch frames and observe again', 'frameId');
     }
     if (frame.id === frames.topFrameId) {
@@ -1737,7 +1800,9 @@ export class BrowserToolService implements BrowserToolExecutor {
 
   private forgetSession(sessionId: string): void {
     for (const [key, session] of this.sessions) {
-      if (session.sessionId === sessionId) this.sessions.delete(key);
+      if (session.sessionId !== sessionId) continue;
+      this.watchdogs.resetTarget(session.leaseId, session.targetId);
+      this.sessions.delete(key);
     }
     this.network.detachSession(sessionId);
     this.downloads?.detachSession(sessionId, 'target_detached');
@@ -1844,7 +1909,41 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
   }
 
+  private recordActionEvidence(
+    context: BrokerToolCallContext,
+    targetId: ControlledTargetId,
+    evidence:
+      | InputVerificationEvidence
+      | ClickVerificationEvidence
+      | PressVerificationEvidence
+      | UploadVerificationEvidence,
+  ): void {
+    this.watchdogs.actionCompleted({
+      workspaceId: context.workspace!.id,
+      leaseId: context.lease!.id,
+      targetId,
+    }, evidence);
+  }
+
+  private selectedFrameDetached(session: TargetSession, frameId: FrameId): void {
+    session.activeFrame = undefined;
+    this.observations.invalidateTarget(session.targetId, 'frame_detached');
+    const context = {
+      workspaceId: session.workspaceId,
+      leaseId: session.leaseId,
+      targetId: session.targetId,
+    };
+    this.publishEvent({
+      ...context,
+      type: 'observation.invalidated',
+      sensitivity: 'browser_data',
+      payload: { reason: 'frame_detached', frameId },
+    });
+    this.watchdogs.frameDetached(context, frameId);
+  }
+
   private removeDialog(dialog: PendingDialog): void {
+    this.watchdogs.dialogClosed(dialog.id);
     this.pendingDialogs.delete(dialog.id);
     if (this.pendingDialogBySession.get(dialog.sessionId) === dialog.id) {
       this.pendingDialogBySession.delete(dialog.sessionId);

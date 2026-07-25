@@ -424,6 +424,10 @@ export type BrowserEventType =
   | 'network.response'
   | 'command.status'
   | 'observation.invalidated'
+  | 'watchdog.navigation_stalled'
+  | 'watchdog.frame_detached'
+  | 'watchdog.dialog_unhandled'
+  | 'watchdog.no_progress'
   | 'lease.expired';
 
 export interface BrowserEvent {

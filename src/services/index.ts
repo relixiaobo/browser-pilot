@@ -22,5 +22,7 @@ export * from './broker-runtime.js';
 export * from './controlled-target-registry.js';
 export * from './target-inventory-service.js';
 export * from './browser-target-catalog.js';
+export * from './browser-watchdog-service.js';
 export * from './browser-tool-service.js';
+export { PageLoadTimeoutError } from '../session.js';
 export { FileRefStore, MemoryRefStore, type RefStore } from '../snapshot.js';
