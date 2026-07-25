@@ -34,6 +34,8 @@ test.describe('navigation', () => {
     const snap = open(`${BASE}/input/scrollable`, { limit: 5 });
     expect(snap.ok).toBe(true);
     expect(snap.elements?.length).toBeLessThanOrEqual(5);
+    expect(snap.truncated).toBe(true);
+    expect(snap.truncationReasons).toContain('element_limit');
   });
 
   test('open --new creates new tab', async () => {

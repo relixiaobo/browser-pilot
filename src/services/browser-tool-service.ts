@@ -1,21 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
-import type {
-  AgentHint,
-  ArtifactDescriptor,
-  ArtifactId,
-  BrowserInstance,
-  BrowserOperation,
-  BrowserWorkspaceId,
-  ControlledTargetId,
-  ControlLease,
-  ControlLeaseId,
-  FrameId,
-  JsonValue,
-  ManagedTabSetId,
-  NetworkRequestId,
-  NetworkRuleId,
-  ObservationId,
+import {
+  OBSERVATION_V1_LIMITS,
+  type AgentHint,
+  type ArtifactDescriptor,
+  type ArtifactId,
+  type BrowserInstance,
+  type BrowserOperation,
+  type BrowserWorkspaceId,
+  type ControlledTargetId,
+  type ControlLease,
+  type ControlLeaseId,
+  type FrameId,
+  type JsonValue,
+  type ManagedTabSetId,
+  type NetworkRequestId,
+  type NetworkRuleId,
+  type ObservationId,
 } from '../protocol/model.js';
 import type { ToolDefinition } from '../protocol/tools.js';
 import { INJECT_BORDER } from '../page-scripts.js';
@@ -135,6 +136,12 @@ interface CreatedObservation {
   snapshot: SnapshotResult;
   record: StoredObservation;
   hints: AgentHint[];
+}
+
+interface ObservationContextIdentity {
+  frameId: string;
+  loaderId: string;
+  documentGeneration: string;
 }
 
 interface ActionServiceHarness {
@@ -733,14 +740,26 @@ export class BrowserToolService implements BrowserToolExecutor {
     return this.observationResult(
       context,
       targetId,
-      await this.createObservation(context, targetId, session, Number(args.observationLimit ?? 50), false),
+      await this.createObservation(
+        context,
+        targetId,
+        session,
+        Number(args.observationLimit ?? OBSERVATION_V1_LIMITS.defaultElements),
+        false,
+      ),
     );
   }
 
   private async observe(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
-    const created = await this.createObservation(context, targetId, session, Number(args.limit ?? 50), false);
+    const created = await this.createObservation(
+      context,
+      targetId,
+      session,
+      Number(args.limit ?? OBSERVATION_V1_LIMITS.defaultElements),
+      false,
+    );
     return this.observationResult(context, targetId, created);
   }
 
@@ -862,7 +881,7 @@ export class BrowserToolService implements BrowserToolExecutor {
 
     let next: CreatedObservation | undefined;
     const observations = {
-      observeAfterAction: async (limit = 50) => {
+      observeAfterAction: async (limit = OBSERVATION_V1_LIMITS.defaultElements) => {
         next = await this.createObservation(context, targetId, session, limit, true);
         return next.snapshot;
       },
@@ -1259,14 +1278,17 @@ export class BrowserToolService implements BrowserToolExecutor {
     const snapshot = afterAction
       ? await service.observeAfterAction(limit)
       : await service.observe(limit);
-    const loaderId = await this.loaderId(session);
+    const identity = await this.observationContextIdentity(session);
     const record = this.observations.create({
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
       targetId,
+      browserProcessIdentity: context.browser.instance.processIdentity,
       browserConnectionGeneration: context.browser.instance.connectionGeneration,
       sessionId: session.sessionId,
-      loaderId,
+      frameId: identity.frameId,
+      loaderId: identity.loaderId,
+      documentGeneration: identity.documentGeneration,
       title: snapshot.data.title,
       url: snapshot.data.url,
       refs: refs.load(targetId),
@@ -1290,15 +1312,18 @@ export class BrowserToolService implements BrowserToolExecutor {
     observationId: ObservationId,
     ref: number,
   ): Promise<StoredObservation> {
-    const loaderId = await this.loaderId(session);
+    const identity = await this.observationContextIdentity(session);
     const observation = this.observations.resolve({
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
       targetId,
       observationId,
+      browserProcessIdentity: context.browser.instance.processIdentity,
       browserConnectionGeneration: context.browser.instance.connectionGeneration,
       sessionId: session.sessionId,
-      loaderId,
+      frameId: identity.frameId,
+      loaderId: identity.loaderId,
+      documentGeneration: identity.documentGeneration,
       ref,
     });
     try {
@@ -1446,7 +1471,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         targetId,
         observationOptions,
       ).locate(selector),
-      observeAfterAction: async (limit = 50) => {
+      observeAfterAction: async (limit = OBSERVATION_V1_LIMITS.defaultElements) => {
         next = await this.createObservation(context, targetId, session, limit, true);
         return next.snapshot;
       },
@@ -1602,7 +1627,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     return scale < 0.999 ? scale : undefined;
   }
 
-  private async loaderId(session: TargetSession): Promise<string> {
+  private async frameLoaderIdentity(
+    session: TargetSession,
+  ): Promise<{ frameId: string; loaderId: string }> {
     const { frameTree } = await this.transport.send('Page.getFrameTree', {}, session.sessionId);
     const findFrame = (node: any): any => {
       if (!session.activeFrame || node?.frame?.id === session.activeFrame.cdpFrameId) return node?.frame;
@@ -1612,11 +1639,50 @@ export class BrowserToolService implements BrowserToolExecutor {
       }
       return undefined;
     };
-    const loaderId = findFrame(frameTree)?.loaderId;
-    if (typeof loaderId !== 'string' || loaderId.length === 0) {
+    const frame = findFrame(frameTree);
+    if (
+      typeof frame?.id !== 'string' || frame.id.length === 0 ||
+      typeof frame.loaderId !== 'string' || frame.loaderId.length === 0
+    ) {
       throw new BrowserPilotError('internal_error', 'Chrome returned an invalid document loader');
     }
-    return loaderId;
+    return { frameId: frame.id, loaderId: frame.loaderId };
+  }
+
+  private async observationContextIdentity(session: TargetSession): Promise<ObservationContextIdentity> {
+    const frame = await this.frameLoaderIdentity(session);
+    const params: Record<string, unknown> = {
+      expression: 'document',
+      returnByValue: false,
+    };
+    if (session.activeFrame?.executionContextId !== undefined) {
+      params.contextId = session.activeFrame.executionContextId;
+    }
+    const { result } = await this.transport.send('Runtime.evaluate', params, session.sessionId);
+    if (typeof result?.objectId !== 'string' || result.objectId.length === 0) {
+      throw new BrowserPilotError('internal_error', 'Chrome returned an invalid Document identity');
+    }
+    try {
+      const { node } = await this.transport.send('DOM.describeNode', {
+        objectId: result.objectId,
+        depth: 0,
+      }, session.sessionId);
+      if (!Number.isSafeInteger(node?.backendNodeId) || node.backendNodeId <= 0) {
+        throw new BrowserPilotError('internal_error', 'Chrome returned an invalid Document identity');
+      }
+      return {
+        ...frame,
+        documentGeneration: `document:${node.backendNodeId}`,
+      };
+    } finally {
+      await this.transport.send('Runtime.releaseObject', {
+        objectId: result.objectId,
+      }, session.sessionId).catch(() => {});
+    }
+  }
+
+  private async loaderId(session: TargetSession): Promise<string> {
+    return (await this.frameLoaderIdentity(session)).loaderId;
   }
 
   private async currentUrl(session: TargetSession): Promise<string> {

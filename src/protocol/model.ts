@@ -335,17 +335,52 @@ export interface ObservationRef {
   ref: number;
 }
 
-export type ObservationInvalidationReason =
-  | 'navigation'
-  | 'loader_replaced'
-  | 'frame_changed'
-  | 'frame_detached'
-  | 'session_replaced'
-  | 'target_detached'
-  | 'browser_reconnected'
-  | 'target_ineligible'
-  | 'target_closed'
-  | 'expired';
+export const OBSERVATION_INVALIDATION_REASONS = [
+  'navigation',
+  'loader_replaced',
+  'document_replaced',
+  'frame_changed',
+  'frame_detached',
+  'session_replaced',
+  'target_detached',
+  'browser_reconnected',
+  'target_ineligible',
+  'target_closed',
+  'expired',
+] as const;
+
+export type ObservationInvalidationReason = (typeof OBSERVATION_INVALIDATION_REASONS)[number];
+
+export const OBSERVATION_TRUNCATION_REASONS = [
+  'element_limit',
+  'text_limit',
+  'depth_limit',
+  'byte_limit',
+] as const;
+
+export type ObservationTruncationReason = (typeof OBSERVATION_TRUNCATION_REASONS)[number];
+
+export const OBSERVATION_V1_LIMITS = {
+  defaultElements: 50,
+  maxElements: 10_000,
+  maxTitleCharacters: 4_096,
+  maxUrlCharacters: 16_384,
+  maxElementNameCharacters: 4_096,
+  maxElementValueCharacters: 65_536,
+  maxTextCharacters: 1_000_000,
+  maxTreeDepth: 128,
+  maxSerializedBytes: 2 * 1024 * 1024,
+  ttlMs: 5 * 60_000,
+  maxStoredObservations: 2_048,
+} as const;
+
+export interface ObservationElement {
+  ref: number;
+  role: string;
+  name: string;
+  value?: string;
+  checked?: boolean;
+}
 
 export interface ObservationDescriptor {
   id: ObservationId;
@@ -356,7 +391,7 @@ export interface ObservationDescriptor {
   expiresAt: number;
   elementCount: number;
   truncated: boolean;
-  truncationReasons: Array<'element_limit' | 'text_limit' | 'depth_limit' | 'byte_limit'>;
+  truncationReasons: ObservationTruncationReason[];
   invalidatedBy?: ObservationInvalidationReason;
 }
 

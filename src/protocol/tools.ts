@@ -1,6 +1,8 @@
 import { invalidArgument } from './errors.js';
 import {
   CAPABILITIES,
+  OBSERVATION_TRUNCATION_REASONS,
+  OBSERVATION_V1_LIMITS,
   SENSITIVITIES,
   type ArtifactDescriptor,
   type Capability,
@@ -101,8 +103,8 @@ const networkRequestDetailSchema = objectSchema({
 const elementSchema = objectSchema({
   ref: integerSchema({ minimum: 1 }),
   role: stringSchema({ minLength: 1, maxLength: 128 }),
-  name: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
-  value: sensitive(stringSchema({ maxLength: 65_536 }), 'browser_data', 'credential'),
+  name: sensitive(stringSchema({ maxLength: OBSERVATION_V1_LIMITS.maxElementNameCharacters }), 'browser_data'),
+  value: sensitive(stringSchema({ maxLength: OBSERVATION_V1_LIMITS.maxElementValueCharacters }), 'browser_data', 'credential'),
   checked: booleanSchema(),
 }, ['ref', 'role', 'name']);
 
@@ -291,11 +293,11 @@ function resultSchema(
 
 const observationOutput = resultSchema('target', {
   observationId: opaqueIdSchema,
-  title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
-  elements: arraySchema(elementSchema, { maxItems: 10_000 }),
+  title: sensitive(stringSchema({ maxLength: OBSERVATION_V1_LIMITS.maxTitleCharacters }), 'browser_data'),
+  elements: arraySchema(elementSchema, { maxItems: OBSERVATION_V1_LIMITS.maxElements }),
   truncated: booleanSchema(),
   truncationReasons: arraySchema(stringSchema({
-    enum: ['element_limit', 'text_limit', 'depth_limit', 'byte_limit'],
+    enum: [...OBSERVATION_TRUNCATION_REASONS],
   }), { uniqueItems: true }),
   hints: arraySchema(agentHintSchema, { maxItems: 16 }),
   evidence: { oneOf: [inputEvidenceSchema, clickEvidenceSchema, pressEvidenceSchema, uploadEvidenceSchema] },
@@ -360,7 +362,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       url: boundedUrl,
       targetId: opaqueIdSchema,
       newTarget: booleanSchema(),
-      observationLimit: integerSchema({ minimum: 1, maximum: 10_000 }),
+      observationLimit: integerSchema({ minimum: 1, maximum: OBSERVATION_V1_LIMITS.maxElements }),
     }, ['url']),
     outputSchema: observationOutput,
     requiredCapabilities: ['browser.control', 'observation.read'],
@@ -375,7 +377,9 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     title: 'Observe page',
     description: 'Create an immutable bounded Observation with numbered refs.',
     context: 'target',
-    inputSchema: objectSchema({ limit: integerSchema({ minimum: 1, maximum: 10_000 }) }),
+    inputSchema: objectSchema({
+      limit: integerSchema({ minimum: 1, maximum: OBSERVATION_V1_LIMITS.maxElements }),
+    }),
     outputSchema: observationOutput,
     requiredCapabilities: ['observation.read'],
     mutating: false,

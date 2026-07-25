@@ -1,19 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import { BrowserPilotError } from '../protocol/errors.js';
-import type {
-  BrowserWorkspaceId,
-  ControlledTargetId,
-  ControlLeaseId,
-  ObservationDescriptor,
-  ObservationId,
-  ObservationInvalidationReason,
+import {
+  OBSERVATION_TRUNCATION_REASONS,
+  OBSERVATION_V1_LIMITS,
+  type BrowserWorkspaceId,
+  type ControlledTargetId,
+  type ControlLeaseId,
+  type ObservationDescriptor,
+  type ObservationId,
+  type ObservationInvalidationReason,
 } from '../protocol/model.js';
+// Raw CDP identity stays below this store; only opaque Observation refs leave the Broker.
 import type { RefEntry } from '../snapshot.js';
 
 export interface StoredObservation extends ObservationDescriptor {
   leaseId: ControlLeaseId;
+  browserProcessIdentity: string;
   sessionId: string;
+  frameId: string;
   loaderId: string;
+  documentGeneration: string;
   title: string;
   url: string;
   refs: RefEntry[];
@@ -23,9 +29,12 @@ export interface CreateObservationInput {
   workspaceId: BrowserWorkspaceId;
   leaseId: ControlLeaseId;
   targetId: ControlledTargetId;
+  browserProcessIdentity: string;
   browserConnectionGeneration: number;
   sessionId: string;
+  frameId: string;
   loaderId: string;
+  documentGeneration: string;
   title: string;
   url: string;
   refs: readonly RefEntry[];
@@ -38,9 +47,12 @@ export interface ResolveObservationInput {
   leaseId: ControlLeaseId;
   targetId: ControlledTargetId;
   observationId: ObservationId;
+  browserProcessIdentity: string;
   browserConnectionGeneration: number;
   sessionId: string;
+  frameId: string;
   loaderId: string;
+  documentGeneration: string;
   ref?: number;
 }
 
@@ -67,8 +79,8 @@ export class MemoryObservationStore {
   private readonly idFactory: () => string;
 
   constructor(options: MemoryObservationStoreOptions = {}) {
-    this.ttlMs = options.ttlMs ?? 5 * 60_000;
-    this.maxObservations = options.maxObservations ?? 2048;
+    this.ttlMs = options.ttlMs ?? OBSERVATION_V1_LIMITS.ttlMs;
+    this.maxObservations = options.maxObservations ?? OBSERVATION_V1_LIMITS.maxStoredObservations;
     this.now = options.now ?? Date.now;
     this.idFactory = options.idFactory ?? (() => `observation:${randomUUID()}`);
     if (!Number.isSafeInteger(this.ttlMs) || this.ttlMs <= 0) throw new Error('Invalid Observation TTL');
@@ -78,6 +90,23 @@ export class MemoryObservationStore {
   }
 
   create(input: CreateObservationInput): StoredObservation {
+    if (input.refs.length > OBSERVATION_V1_LIMITS.maxElements) {
+      throw new BrowserPilotError('internal_error', 'Observation exceeds the element limit');
+    }
+    if (
+      input.title.length > OBSERVATION_V1_LIMITS.maxTitleCharacters ||
+      input.url.length > OBSERVATION_V1_LIMITS.maxUrlCharacters
+    ) {
+      throw new BrowserPilotError('internal_error', 'Observation contains an oversized page identity');
+    }
+    const reasons = new Set(input.truncationReasons);
+    if (
+      reasons.size !== input.truncationReasons.length ||
+      input.truncationReasons.some(reason => !OBSERVATION_TRUNCATION_REASONS.includes(reason)) ||
+      input.truncated !== (input.truncationReasons.length > 0)
+    ) {
+      throw new BrowserPilotError('internal_error', 'Observation truncation metadata is inconsistent');
+    }
     this.sweep();
     while (this.records.size >= this.maxObservations) {
       const oldest = [...this.records.values()]
@@ -95,9 +124,12 @@ export class MemoryObservationStore {
       workspaceId: input.workspaceId,
       leaseId: input.leaseId,
       targetId: input.targetId,
+      browserProcessIdentity: input.browserProcessIdentity,
       browserConnectionGeneration: input.browserConnectionGeneration,
       sessionId: input.sessionId,
+      frameId: input.frameId,
       loaderId: input.loaderId,
+      documentGeneration: input.documentGeneration,
       title: input.title,
       url: input.url,
       createdAt,
@@ -116,21 +148,35 @@ export class MemoryObservationStore {
     const record = this.records.get(input.observationId);
     if (
       !record ||
-      record.invalidatedBy ||
       record.workspaceId !== input.workspaceId ||
       record.leaseId !== input.leaseId ||
-      record.targetId !== input.targetId ||
-      record.browserConnectionGeneration !== input.browserConnectionGeneration
+      record.targetId !== input.targetId
     ) {
       throw this.stale(input);
     }
+    if (record.invalidatedBy) throw this.stale(input, record.invalidatedBy);
+    if (
+      record.browserProcessIdentity !== input.browserProcessIdentity ||
+      record.browserConnectionGeneration !== input.browserConnectionGeneration
+    ) {
+      this.invalidateRecord(record, 'browser_reconnected');
+      throw this.stale(input, 'browser_reconnected');
+    }
     if (record.sessionId !== input.sessionId) {
       this.invalidateRecord(record, 'session_replaced');
-      throw this.stale(input);
+      throw this.stale(input, 'session_replaced');
+    }
+    if (record.frameId !== input.frameId) {
+      this.invalidateRecord(record, 'frame_changed');
+      throw this.stale(input, 'frame_changed');
     }
     if (record.loaderId !== input.loaderId) {
-      this.invalidateRecord(record, 'navigation');
-      throw this.stale(input);
+      this.invalidateRecord(record, 'loader_replaced');
+      throw this.stale(input, 'loader_replaced');
+    }
+    if (record.documentGeneration !== input.documentGeneration) {
+      this.invalidateRecord(record, 'document_replaced');
+      throw this.stale(input, 'document_replaced');
     }
     if (input.ref !== undefined && (input.ref < 1 || input.ref > record.refs.length)) {
       throw this.stale(input);
@@ -185,7 +231,10 @@ export class MemoryObservationStore {
     record.refs = [];
   }
 
-  private stale(input: ResolveObservationInput): BrowserPilotError {
+  private stale(
+    input: ResolveObservationInput,
+    reason?: ObservationInvalidationReason,
+  ): BrowserPilotError {
     return new BrowserPilotError('stale_ref', 'Observation ref is stale or does not belong to this context', {
       context: {
         workspaceId: input.workspaceId,
@@ -193,6 +242,7 @@ export class MemoryObservationStore {
         targetId: input.targetId,
         observationId: input.observationId,
         ...(input.ref !== undefined ? { ref: input.ref } : {}),
+        ...(reason ? { reason } : {}),
       },
     });
   }

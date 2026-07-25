@@ -95,8 +95,19 @@ function fail(error: string, hint?: string): never {
 }
 
 function emitSnapshot(result: SnapshotResult): void {
-  if (useJson()) console.log(JSON.stringify({ ok: true, ...result.data }));
-  else console.log(result.text);
+  if (useJson()) {
+    console.log(JSON.stringify({
+      ok: true,
+      ...result.data,
+      truncated: result.truncated ?? false,
+      truncationReasons: result.truncationReasons ?? [],
+    }));
+  } else {
+    const suffix = result.truncated
+      ? `\n\n[truncated: ${(result.truncationReasons ?? []).join(', ')}]`
+      : '';
+    console.log(`${result.text}${suffix}`);
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────
@@ -392,9 +403,15 @@ Examples:
         observationLimit: limit,
       });
       if (useJson()) {
-        console.log(JSON.stringify({ ok: true, typed: text, ...result.observation.data }));
+        console.log(JSON.stringify({
+          ok: true,
+          typed: text,
+          ...result.observation.data,
+          truncated: result.observation.truncated ?? false,
+          truncationReasons: result.observation.truncationReasons ?? [],
+        }));
       } else {
-        console.log(result.observation.text);
+        emitSnapshot(result.observation);
       }
     });
   }));

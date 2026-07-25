@@ -1,6 +1,12 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { REFS_FILE } from './paths.js';
 import { PAGE_INFO } from './page-scripts.js';
+import {
+  OBSERVATION_TRUNCATION_REASONS,
+  OBSERVATION_V1_LIMITS,
+  type ObservationElement,
+  type ObservationTruncationReason,
+} from './protocol/model.js';
 import type { Transport } from './transport.js';
 
 const INTERACTIVE_ROLES = new Set([
@@ -75,7 +81,7 @@ export interface SnapshotData {
   url: string;
   // NOTE: elements are exposed to LLM agents — keep this lean.
   // backendNodeId is intentionally omitted (saved separately in REFS_FILE for resolution).
-  elements: Array<{ ref: number; role: string; name: string; value?: string; checked?: boolean }>;
+  elements: ObservationElement[];
 }
 
 export interface SnapshotResult {
@@ -83,7 +89,7 @@ export interface SnapshotResult {
   data: SnapshotData;
   guidance: SnapshotGuidanceSignals;
   truncated?: boolean;
-  truncationReasons?: Array<'element_limit'>;
+  truncationReasons?: ObservationTruncationReason[];
 }
 
 export interface SnapshotGuidanceSignals {
@@ -114,7 +120,7 @@ export async function takeSnapshot(
   transport: Transport,
   sessionId: string,
   targetId: string,
-  limit = 50,
+  limit: number = OBSERVATION_V1_LIMITS.defaultElements,
   refStore: RefStore = legacyRefStore,
   context: SnapshotContext = {},
 ): Promise<SnapshotResult> {
@@ -124,7 +130,22 @@ export async function takeSnapshot(
   if (context.executionContextId) infoParams.contextId = context.executionContextId;
   const { result: info } = await transport.send('Runtime.evaluate', infoParams, sessionId);
   const pageInfo = JSON.parse(info.value);
-  const { title, url } = pageInfo;
+  const truncation = new Set<ObservationTruncationReason>();
+  let textCharacters = 0;
+
+  const boundedText = (raw: unknown, fieldLimit: number): string => {
+    const value = typeof raw === 'string' ? raw : '';
+    const fieldBounded = value.slice(0, fieldLimit);
+    if (fieldBounded.length !== value.length) truncation.add('text_limit');
+    const remaining = Math.max(0, OBSERVATION_V1_LIMITS.maxTextCharacters - textCharacters);
+    const result = fieldBounded.slice(0, remaining);
+    if (result.length !== fieldBounded.length) truncation.add('text_limit');
+    textCharacters += result.length;
+    return result;
+  };
+
+  const title = boundedText(pageInfo.title, OBSERVATION_V1_LIMITS.maxTitleCharacters);
+  const url = boundedText(pageInfo.url, OBSERVATION_V1_LIMITS.maxUrlCharacters);
   const pageGuidance = pageInfo.guidance && typeof pageInfo.guidance === 'object'
     ? pageInfo.guidance as Record<string, unknown>
     : {};
@@ -157,9 +178,16 @@ export async function takeSnapshot(
   const filterRefs: number[] = [];
   let modalCount = 0;
   let eligibleCount = 0;
+  let serializedBytes = Buffer.byteLength(JSON.stringify({ title, url, elements: [] }), 'utf8');
+  let byteBudgetExhausted = serializedBytes > OBSERVATION_V1_LIMITS.maxSerializedBytes;
+  if (byteBudgetExhausted) truncation.add('byte_limit');
 
-  function walk(node: any, insideDialog = false): void {
+  function walk(node: any, insideDialog = false, depth = 0): void {
     if (!node) return;
+    if (depth > OBSERVATION_V1_LIMITS.maxTreeDepth) {
+      truncation.add('depth_limit');
+      return;
+    }
 
     let childInsideDialog = insideDialog;
     if (!node.ignored) {
@@ -178,42 +206,53 @@ export async function takeSnapshot(
       const isInteractive = role && (INTERACTIVE_ROLES.has(role) || isEditable);
 
       if (isInteractive && node.backendDOMNodeId !== undefined) {
-        const name = node.name?.value || '';
-        const value = node.value?.value;
-        const effectiveRole = isEditable && role === 'generic' ? 'textbox' : role;
+        const rawName = typeof node.name?.value === 'string' ? node.name.value : '';
+        const rawValue = typeof node.value?.value === 'string' ? node.value.value : undefined;
+        const effectiveRole = String(isEditable && role === 'generic' ? 'textbox' : role).slice(0, 128);
 
         // Allow empty name for input-like roles and editables; require name/value for buttons/links
-        const hasIdentity = name || value || ALLOW_EMPTY_NAME.has(effectiveRole) || isEditable;
+        const hasIdentity = rawName || rawValue || ALLOW_EMPTY_NAME.has(effectiveRole) || isEditable;
         if (!props.disabled && hasIdentity) {
           eligibleCount += 1;
         }
-        if (!props.disabled && hasIdentity && refs.length < limit) {
+        if (!props.disabled && hasIdentity && refs.length < limit && !byteBudgetExhausted) {
+          const name = boundedText(rawName, OBSERVATION_V1_LIMITS.maxElementNameCharacters);
+          const value = rawValue === undefined
+            ? undefined
+            : boundedText(rawValue, OBSERVATION_V1_LIMITS.maxElementValueCharacters);
           const checked = props.checked === 'true' || props.checked === true ? true : undefined;
-          refs.push({ backendNodeId: node.backendDOMNodeId, role: effectiveRole, name });
-          const el: SnapshotData['elements'][number] = { ref: refs.length, role: effectiveRole, name };
+          const el: SnapshotData['elements'][number] = { ref: refs.length + 1, role: effectiveRole, name };
           if (value !== undefined && value !== '') el.value = value;
           if (checked) el.checked = true;
-          elements.push(el);
-          const ref = el.ref;
-          const autocomplete = typeof props.autocomplete === 'string'
-            ? props.autocomplete.trim().toLowerCase()
-            : '';
-          if (
-            effectiveRole === 'combobox' &&
-            autocomplete !== '' && autocomplete !== 'none' &&
-            autocompleteRefs.length < 32
-          ) autocompleteRefs.push(ref);
-          if (childInsideDialog && modalRefs.length < 32) modalRefs.push(ref);
-          if (
-            filterRefs.length < 32 &&
-            /(^|[\s_:-])(filter|filters|sort|sorting|refine|refinement)([\s_:-]|$)|筛选|过滤|排序/i.test(name)
-          ) filterRefs.push(ref);
+          const elementBytes = Buffer.byteLength(JSON.stringify(el), 'utf8') + 1;
+          if (serializedBytes + elementBytes > OBSERVATION_V1_LIMITS.maxSerializedBytes) {
+            byteBudgetExhausted = true;
+            truncation.add('byte_limit');
+          } else {
+            serializedBytes += elementBytes;
+            refs.push({ backendNodeId: node.backendDOMNodeId, role: effectiveRole, name });
+            elements.push(el);
+            const ref = el.ref;
+            const autocomplete = typeof props.autocomplete === 'string'
+              ? props.autocomplete.trim().toLowerCase()
+              : '';
+            if (
+              effectiveRole === 'combobox' &&
+              autocomplete !== '' && autocomplete !== 'none' &&
+              autocompleteRefs.length < 32
+            ) autocompleteRefs.push(ref);
+            if (childInsideDialog && modalRefs.length < 32) modalRefs.push(ref);
+            if (
+              filterRefs.length < 32 &&
+              /(^|[\s_:-])(filter|filters|sort|sorting|refine|refinement)([\s_:-]|$)|筛选|过滤|排序/i.test(name)
+            ) filterRefs.push(ref);
+          }
         }
       }
     }
 
     // Always walk children — ignored containers can have interactive descendants
-    for (const child of node.children) walk(child, childInsideDialog);
+    for (const child of node.children) walk(child, childInsideDialog, depth + 1);
   }
 
   if (root) walk(root);
@@ -232,7 +271,9 @@ export async function takeSnapshot(
     }
   }
 
-  const truncated = eligibleCount > limit;
+  if (eligibleCount > limit) truncation.add('element_limit');
+  const truncationReasons = OBSERVATION_TRUNCATION_REASONS.filter(reason => truncation.has(reason));
+  const truncated = truncationReasons.length > 0;
   return {
     text: lines.join('\n'),
     data: { title, url, elements },
@@ -247,7 +288,7 @@ export async function takeSnapshot(
       filterRefs,
     },
     truncated,
-    truncationReasons: truncated ? ['element_limit'] : [],
+    truncationReasons,
   };
 }
 

@@ -1,4 +1,5 @@
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
+import { OBSERVATION_V1_LIMITS } from '../protocol/model.js';
 import {
   legacyRefStore,
   takeSnapshot,
@@ -52,9 +53,12 @@ export class ObservationService {
     return this.refStore;
   }
 
-  async observe(limit = 50): Promise<SnapshotResult> {
-    if (!Number.isSafeInteger(limit) || limit < 1) {
-      throw invalidArgument('Observation limit must be a positive integer', 'limit');
+  async observe(limit: number = OBSERVATION_V1_LIMITS.defaultElements): Promise<SnapshotResult> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > OBSERVATION_V1_LIMITS.maxElements) {
+      throw invalidArgument(
+        `Observation limit must be an integer from 1 through ${OBSERVATION_V1_LIMITS.maxElements}`,
+        'limit',
+      );
     }
     return takeSnapshot(this.transport, this.sessionId, this.targetId, limit, this.refStore, {
       ...(this.executionContextId !== undefined ? { executionContextId: this.executionContextId } : {}),
@@ -62,7 +66,7 @@ export class ObservationService {
     });
   }
 
-  async observeAfterAction(limit = 50): Promise<SnapshotResult> {
+  async observeAfterAction(limit: number = OBSERVATION_V1_LIMITS.defaultElements): Promise<SnapshotResult> {
     if (this.settleDelayMs > 0) {
       await new Promise(resolve => setTimeout(resolve, this.settleDelayMs));
     }

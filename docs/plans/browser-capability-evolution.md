@@ -58,9 +58,20 @@ Preserve Browser Pilot advantages:
     frames, a forced cross-origin OOPIF target, top-level navigation, and same-URL
     Document replacement. The compatibility fixture server exposes the same
     catalog for later public-surface regression tests.
-- [ ] **B0.3** Freeze Observation v1 public fields, internal node identity,
+- [x] **B0.3** Freeze Observation v1 public fields, internal node identity,
   invalidation reasons, limits, and truncation metadata with Workstream A.
   - Covers: BR-13 through BR-16, NFR-1.
+  - Complete: runtime constants and canonical schemas now define the public
+    fields, deterministic truncation reasons, field/aggregate/depth/UTF-8 byte
+    limits, TTL, and capacity. Internal resolution binds process, browser
+    generation, Workspace, Lease, target, CDP session, frame, loader, Document
+    backend identity, and backend node. Same-context `stale_ref` errors expose a
+    stable invalidation reason while ownership mismatches remain opaque. Direct
+    CLI snapshots now preserve truncation metadata as additive JSON fields.
+  - A0 decision: `document_replaced` is an additive optional
+    `stale_ref.context.reason` under protocol 1.0 and 1.1. Older clients already
+    branch on `stale_ref` and rebuild state; no capability or version change is
+    required.
 - [ ] **B0.4** Add quantitative baselines: observable target recall, false
   interactable rate, action verification failures, stale-ref detection, and
   output size.
@@ -77,9 +88,14 @@ Preserve Browser Pilot advantages:
 - [ ] **B1.3** Preserve Shadow DOM traversal and add session-aware frame/OOPIF
   traversal with deterministic ordering.
   - Covers: AC-8.
-- [ ] **B1.4** Add explicit element/page/text limits and truncation reasons;
+- [x] **B1.4** Add explicit element/page/text limits and truncation reasons;
   keep output lean enough for Agent context.
   - Covers: BR-16, NFR-1.
+  - Complete: Observation v1 enforces field and aggregate text limits, requested
+    and absolute element limits, AX tree depth, and a 2 MiB UTF-8 serialized
+    data budget. It emits canonical reasons in deterministic order, stores only
+    returned refs, and preserves the metadata through both Broker results and
+    additive direct-CLI JSON fields.
 
 ### B2. Replace ref storage and resolution
 
@@ -93,6 +109,11 @@ Preserve Browser Pilot advantages:
 - [ ] **B2.2** Resolve refs using browser generation, target, CDP session,
   frame, loader, backend node, and document generation.
   - Covers: BR-13 through BR-15.
+  - Progress: Broker Observations now bind and validate browser process and
+    connection generation, Workspace, Lease, target, CDP session, selected
+    frame, loader, Document backend identity, and per-ref backend node before
+    live-node resolution. The compatibility FileRefStore remains target-scoped
+    until B2.1/A2.3 replace it.
 - [ ] **B2.3** Hard-invalidate on navigation, loader replacement, frame/session
   detach, target detach, and reconnect, emitting typed reasons.
   - Covers: BR-14, AC-5.

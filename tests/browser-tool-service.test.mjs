@@ -53,6 +53,7 @@ class BrowserFixtureTransport {
   pressStates = [];
   pressReadIndex = 0;
   continuityFocusChanged = false;
+  documentBackendNodeId = 9_000;
   onMouseReleased;
   onKeyUp;
   onInsertText;
@@ -134,6 +135,7 @@ class BrowserFixtureTransport {
           return { result: { objectId: `press-active-${this.pressReadIndex}` } };
         }
         if (params.expression === '1') return { result: { value: 1 } };
+        if (params.expression === 'document') return { result: { objectId: `document:${targetId}` } };
         if (params.expression === 'document.readyState') return { result: { value: 'complete' } };
         if (params.expression === '6 * 7') return { result: { value: 42 } };
         if (params.expression === 'location.href') return { result: { value: target.url } };
@@ -202,6 +204,9 @@ class BrowserFixtureTransport {
       }
       case 'DOM.resolveNode': return { object: { objectId: `object:${params.backendNodeId}` } };
       case 'DOM.describeNode':
+        if (String(params.objectId).startsWith('document:')) {
+          return { node: { backendNodeId: this.documentBackendNodeId, nodeName: '#document' } };
+        }
         if (String(params.objectId).startsWith('press-active-')) {
           return { node: { backendNodeId: this.pressStates[this.pressReadIndex]?.backendNodeId ?? 80 } };
         }
@@ -1192,6 +1197,38 @@ test('Observation refs are Lease-scoped, stale after navigation, and actions ret
       target: { observationId: clicked.observationId, ref: 1 },
     }, targetId),
     error => error.code === 'stale_ref',
+  );
+});
+
+test('same-URL Document replacement invalidates old Observation refs before input dispatch', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:document-generation',
+    'com.example.agent',
+    'instance:document-generation',
+  );
+  const tabs = await tool(runtime, client, 'browser.tabs.list', {});
+  const targetId = tabs.targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', {}, targetId);
+
+  transport.documentBackendNodeId += 1;
+  const pointerCallCount = transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').length;
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.click', {
+      target: { observationId: observed.observationId, ref: 1 },
+    }, targetId),
+    error => error.code === 'stale_ref' && error.context?.reason === 'document_replaced',
+  );
+  assert.equal(
+    transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').length,
+    pointerCallCount,
   );
 });
 

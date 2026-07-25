@@ -543,6 +543,23 @@ passwords, network bodies, and transient control state never persist.
 
 ## Observation and Ref Semantics
 
+Observation v1 has these required public fields: `workspaceId`, `leaseId`,
+`targetId`, `url`, `observationId`, `title`, `elements`, `truncated`, and
+`truncationReasons`. Each element contains only `ref`, `role`, `name`, and the
+optional `value` and `checked` fields. Built-in Observation-producing tools
+also return `hints`; action tools additionally return discriminated `evidence`.
+The latter two fields remain optional in the schema so older compatible
+executors stay valid. Raw nodes, selectors, bounds, CDP identifiers, and the
+internal identity below never appear in an Observation result.
+
+The frozen v1 limits are 50 elements by default and 10,000 at most; 4,096
+string code units for title and element name; 16,384 for URL; 65,536 for one
+element value; 1,000,000 across collected Observation text; AX depth 128; and
+2 MiB of UTF-8 serialized Observation data. Broker storage retains at most
+2,048 Observations for five minutes each. Hitting any collection limit sets
+`truncated: true` and includes one or more canonical reasons in deterministic
+order: `element_limit`, `text_limit`, `depth_limit`, `byte_limit`.
+
 The public identity of an element is:
 
 ```text
@@ -562,10 +579,26 @@ backendNodeId
 documentGeneration
 ```
 
+The Broker stores process, connection, target, Lease, CDP session, frame,
+loader, and Document generation on the Observation; each ref adds its backend
+node identity. Resolution verifies all of them before live-node revalidation.
+Same-context failures expose one of these stable invalidation reasons when
+known: `navigation`, `loader_replaced`, `document_replaced`, `frame_changed`,
+`frame_detached`, `session_replaced`, `target_detached`,
+`browser_reconnected`, `target_ineligible`, `target_closed`, or `expired`.
+Ownership mismatches remain an undifferentiated `stale_ref` so they do not
+disclose another Workspace's state.
+
+Adding `document_replaced` as an optional `stale_ref.context.reason` value is
+additive under protocol 1.0 and 1.1: clients branch on the stable error code,
+handle known reasons when useful, and treat unknown reasons as a request to
+rebuild current Observation state. It adds no operation or capability.
+
 - **BR-13:** Cross-Workspace, cross-target, cross-observation, and expired refs
   return `stale_ref`; they never fall back to another target.
-- **BR-14:** Navigation, loader replacement, target detach, frame detach, CDP
-  session replacement, and browser reconnect hard-invalidate affected refs.
+- **BR-14:** Navigation, loader or Document replacement, target detach, frame
+  detach, CDP session replacement, and browser reconnect hard-invalidate
+  affected refs.
 - **BR-15:** Same-document DOM changes require live node revalidation. They do
   not force blanket invalidation when the node remains resolvable and valid.
 - **BR-16:** Observations are immutable and bounded by element count, text size,
