@@ -21,6 +21,7 @@ import {
 
 export interface TargetInventoryContext extends WorkspaceCallerContext {
   leaseId: ControlLeaseId;
+  browserConnectionGeneration: number;
 }
 
 export interface RegisterManagedTargetInput extends TargetInventoryContext {
@@ -52,6 +53,7 @@ export interface TargetInventoryServiceOptions {
   onPopup?: (target: ControlledTargetRecord) => void;
   onControlAcquired?: (target: ControlledTargetRecord, leaseId: ControlLeaseId) => void;
   onControlReleased?: (target: ControlledTargetRecord, leaseId: ControlLeaseId) => void;
+  isCurrentContext?: (context: TargetInventoryContext) => boolean;
 }
 
 interface RootTargetInfo extends LiveTargetMetadata {
@@ -68,6 +70,8 @@ export class TargetInventoryService {
   private readonly onPopup?: (target: ControlledTargetRecord) => void;
   private readonly onControlAcquired?: TargetInventoryServiceOptions['onControlAcquired'];
   private readonly onControlReleased?: TargetInventoryServiceOptions['onControlReleased'];
+  private readonly isCurrentContext?: TargetInventoryServiceOptions['isCurrentContext'];
+  private readonly refreshTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly transport: Transport,
@@ -81,6 +85,7 @@ export class TargetInventoryService {
     this.onPopup = options.onPopup;
     this.onControlAcquired = options.onControlAcquired;
     this.onControlReleased = options.onControlReleased;
+    this.isCurrentContext = options.isCurrentContext;
   }
 
   registerManagedTarget(input: RegisterManagedTargetInput): ControlledTargetRecord {
@@ -88,6 +93,7 @@ export class TargetInventoryService {
       principalId: input.principalId,
       workspaceId: input.workspaceId,
       browserInstanceId: this.browserInstanceId,
+      browserConnectionGeneration: input.browserConnectionGeneration,
       managedTabSetId: input.managedTabSetId,
       cdpTargetId: input.cdpTargetId,
       ...(input.openerCdpTargetId ? { openerCdpTargetId: input.openerCdpTargetId } : {}),
@@ -107,16 +113,31 @@ export class TargetInventoryService {
   }
 
   async refresh(context: TargetInventoryContext): Promise<ControlledTargetInvalidation[]> {
+    const previous = this.refreshTails.get(context.workspaceId) ?? Promise.resolve();
+    const refresh = previous.catch(() => {}).then(() => this.refreshNow(context));
+    const settled = refresh.then(() => {}, () => {});
+    this.refreshTails.set(context.workspaceId, settled);
+    void settled.finally(() => {
+      if (this.refreshTails.get(context.workspaceId) === settled) {
+        this.refreshTails.delete(context.workspaceId);
+      }
+    });
+    return refresh;
+  }
+
+  private async refreshNow(context: TargetInventoryContext): Promise<ControlledTargetInvalidation[]> {
+    this.assertCurrent(context);
     const controlledBefore = new Map(
       this.registry.activeRecords(context)
         .filter(target => target.controllerLeaseId)
         .map(target => [target.id, target]),
     );
     const liveTargets = await this.readLiveTargets();
-    this.adoptManagedPopups(context, liveTargets);
-
+    this.assertCurrent(context);
     const userTargets = (await this.policy.listUserTargets(this.browserInstanceId))
       .filter(target => target.browserInstanceId === this.browserInstanceId);
+    this.assertCurrent(context);
+    this.adoptManagedPopups(context, liveTargets);
     const synchronized = this.registry.syncUserTargets(
       context,
       this.browserInstanceId,
@@ -135,6 +156,17 @@ export class TargetInventoryService {
     }
     this.emitInvalidations(invalidated);
     return invalidated;
+  }
+
+  private assertCurrent(context: TargetInventoryContext): void {
+    if (this.isCurrentContext?.(context) !== false) return;
+    throw new BrowserPilotError('browser_disconnected', 'Target inventory belongs to a stale browser connection', {
+      retryable: true,
+      context: {
+        workspaceId: context.workspaceId,
+        expectedConnectionGeneration: context.browserConnectionGeneration,
+      },
+    });
   }
 
   async activate(
@@ -301,6 +333,7 @@ export class TargetInventoryService {
           principalId: context.principalId,
           workspaceId: context.workspaceId,
           browserInstanceId: this.browserInstanceId,
+          browserConnectionGeneration: context.browserConnectionGeneration,
           managedTabSetId: ancestor.managedTabSetId,
           cdpTargetId: target.cdpTargetId,
           ...(target.openerCdpTargetId ? { openerCdpTargetId: target.openerCdpTargetId } : {}),

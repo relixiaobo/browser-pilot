@@ -140,7 +140,7 @@ capability, Lease ownership, tool schema, and target control before dispatch.
 Every `tools/call` response is a Command outcome:
 
 ```json
-{"command":{"id":"command:...","status":"completed","method":"browser.observe","idempotencyKey":"observe:01J...","acceptedAt":1,"deadlineAt":30001,"dispatchedAt":2,"completedAt":20,"mutating":false},"result":{"workspaceId":"workspace:...","leaseId":"lease:...","targetId":"target:...","url":"https://example.com","observationId":"observation:...","title":"Example","elements":[],"truncated":false,"truncationReasons":[]}}
+{"command":{"id":"command:...","status":"completed","method":"browser.observe","browserConnectionGeneration":3,"idempotencyKey":"observe:01J...","acceptedAt":1,"deadlineAt":30001,"dispatchedAt":2,"completedAt":20,"mutating":false},"result":{"workspaceId":"workspace:...","leaseId":"lease:...","targetId":"target:...","url":"https://example.com","observationId":"observation:...","title":"Example","elements":[],"truncated":false,"truncationReasons":[]}}
 ```
 
 The manifest's output schema describes the inner `result`. Clients should pass
@@ -231,7 +231,7 @@ Every event is first committed to a bounded per-Workspace journal and then
 offered as this best-effort notification:
 
 ```json
-{"jsonrpc":"2.0","method":"events/event","params":{"event":{"id":"event:...","sequence":7,"timestamp":1,"workspaceId":"workspace:...","leaseId":"lease:...","targetId":"target:...","type":"dialog","payloadVersion":1,"sensitivity":"browser_data","payload":{"dialogId":"dialog:...","state":"opened","type":"confirm","message":"Continue?","url":"https://example.com"}}}}
+{"jsonrpc":"2.0","method":"events/event","params":{"event":{"id":"event:...","sequence":7,"timestamp":1,"workspaceId":"workspace:...","browserConnectionGeneration":3,"leaseId":"lease:...","targetId":"target:...","type":"dialog","payloadVersion":1,"sensitivity":"browser_data","payload":{"dialogId":"dialog:...","state":"opened","type":"confirm","message":"Continue?","url":"https://example.com"}}}}
 ```
 
 Notifications can interleave with responses and can be dropped under transport
@@ -266,6 +266,14 @@ and active Leases remain valid, but old target IDs, frame IDs, CDP sessions,
 Observations, and refs do not. Poll through the restoration event, call
 `browser.tabs.list`, and rebuild target state. Never retry a mutating command whose
 recorded status is `unknown_outcome`.
+
+Every event has a top-level `browserConnectionGeneration`. A delayed ordinary
+event from an older connection is discarded before journaling. Historical
+`command.status` events and reconnect cleanup events remain in the journal with
+their original generation, so consumers can finish old Command state machines
+without treating cleanup as current browser state. Commands accepted against an
+old generation are fenced before dispatch; commands already dispatched when the
+connection changes follow the `unknown_outcome` rule above.
 
 JavaScript dialogs remain pending. Use `browser.dialogs.list`, then call
 `browser.dialogs.respond` with the returned `dialogId`, target, and explicit

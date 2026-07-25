@@ -26,6 +26,7 @@ export interface RunCommandInput {
   workspaceId?: BrowserWorkspaceId;
   leaseId?: ControlLeaseId;
   targetId?: ControlledTargetId;
+  browserConnectionGeneration?: number;
   commandId?: CommandId;
   idempotencyKey?: string;
   deadlineMs?: number;
@@ -96,6 +97,9 @@ function descriptor(record: StoredCommand): CommandDescriptor {
     ...(record.workspaceId ? { workspaceId: record.workspaceId } : {}),
     ...(record.leaseId ? { leaseId: record.leaseId } : {}),
     ...(record.targetId ? { targetId: record.targetId } : {}),
+    ...(record.browserConnectionGeneration !== undefined
+      ? { browserConnectionGeneration: record.browserConnectionGeneration }
+      : {}),
     idempotencyKey: record.idempotencyKey,
     method: record.method,
     mutating: record.mutating,
@@ -145,6 +149,15 @@ export class MemoryCommandRuntime {
     if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > this.maxDeadlineMs) {
       throw invalidArgument(`deadlineMs must be from 1 through ${this.maxDeadlineMs}`, 'deadlineMs');
     }
+    if (
+      input.browserConnectionGeneration !== undefined &&
+      (!Number.isSafeInteger(input.browserConnectionGeneration) || input.browserConnectionGeneration < 1)
+    ) {
+      throw invalidArgument(
+        'browserConnectionGeneration must be a positive integer',
+        'browserConnectionGeneration',
+      );
+    }
     const scopeKey = this.scopeKey(input.principalId, input.connectionId, input.workspaceId);
     const idempotencyKey = input.idempotencyKey ?? (
       input.commandId ? `command-id:${input.commandId}` : `auto:${randomUUID()}`
@@ -186,6 +199,9 @@ export class MemoryCommandRuntime {
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
       ...(input.leaseId ? { leaseId: input.leaseId } : {}),
       ...(input.targetId ? { targetId: input.targetId } : {}),
+      ...(input.browserConnectionGeneration !== undefined
+        ? { browserConnectionGeneration: input.browserConnectionGeneration }
+        : {}),
       principalId: input.principalId,
       connectionId: input.connectionId,
       idempotencyKey,

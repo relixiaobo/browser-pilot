@@ -174,9 +174,16 @@ Preserve Browser Pilot advantages:
   - Complete: daemon auto-accept is removed; pending Broker dialogs are
     Lease/target scoped and use explicit list/respond tools without target-actor
     deadlock. One-shot CLI calls use an isolated explicit list/respond path.
-- [ ] **B4.4** Ensure event producers are deterministic under target actor
+- [x] **B4.4** Ensure event producers are deterministic under target actor
   serialization and reconnect generations.
   - Covers: NFR-4.
+  - Complete: Browser events and Command records carry their source connection
+    generation. The Broker fences queued commands before dispatch and completed
+    results after execution, retains old-generation Command terminal and
+    reconnect cleanup events, and drops delayed ordinary CDP events from retired
+    generations. Target inventory refreshes serialize per Workspace and verify
+    their generation before applying an awaited snapshot. Tests cover same-target
+    ordering, cross-target interleaving, reconnect races, and stale inventory.
 
 ### B5. Improve Agent-facing guidance and data handling
 

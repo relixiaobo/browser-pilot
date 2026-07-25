@@ -5,6 +5,7 @@ import { MemoryEventJournal } from '../dist/services.js';
 function event(workspaceId, value) {
   return {
     workspaceId,
+    browserConnectionGeneration: 1,
     type: 'document.changed',
     sensitivity: 'browser_data',
     payload: { value },
@@ -59,5 +60,9 @@ test('Event Journal reports expired and future cursors explicitly', () => {
   assert.throws(
     () => journal.poll('workspace:test', 'cursor:4'),
     error => error.code === 'invalid_argument' && error.context.field === 'cursor',
+  );
+  assert.throws(
+    () => journal.publish({ ...event('workspace:test', 4), browserConnectionGeneration: 0 }),
+    error => error.code === 'invalid_argument' && error.context.field === 'browserConnectionGeneration',
   );
 });

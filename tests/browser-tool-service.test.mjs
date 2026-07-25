@@ -1408,6 +1408,9 @@ test('browser reconnection retires CDP sessions, refs, and opaque target IDs bef
     'observation.invalidated',
     'target.detached',
   ]);
+  assert.deepEqual(replayed.events
+    .filter(event => event.type !== 'command.status')
+    .map(event => event.browserConnectionGeneration), [1, 1, 1, 1, 2, 1, 1]);
 
   await assert.rejects(
     () => tool(runtime, client, 'browser.click', {

@@ -16,6 +16,7 @@ export interface DownloadSessionContext {
   workspaceId: BrowserWorkspaceId;
   leaseId: ControlLeaseId;
   targetId: ControlledTargetId;
+  browserConnectionGeneration: number;
   sessionId: string;
 }
 
@@ -382,6 +383,7 @@ export class DownloadController {
         workspaceId: session.context.workspaceId,
         leaseId: session.context.leaseId,
         targetId: session.context.targetId,
+        browserConnectionGeneration: session.context.browserConnectionGeneration,
         type: 'download',
         sensitivity: 'user_file',
         payload,

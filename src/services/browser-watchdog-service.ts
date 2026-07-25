@@ -16,6 +16,7 @@ export interface BrowserWatchdogContext {
   workspaceId: BrowserWorkspaceId;
   leaseId: ControlLeaseId;
   targetId: ControlledTargetId;
+  browserConnectionGeneration: number;
 }
 
 export interface WatchdogActionEvidence {
@@ -123,6 +124,7 @@ export class BrowserWatchdogService {
         workspaceId: pending.workspaceId,
         leaseId: pending.leaseId,
         targetId: pending.targetId,
+        browserConnectionGeneration: pending.browserConnectionGeneration,
         type: 'watchdog.dialog_unhandled',
         sensitivity: 'browser_data',
         payload: {

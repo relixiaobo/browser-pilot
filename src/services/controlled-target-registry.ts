@@ -23,12 +23,14 @@ export type ControlledTargetInvalidationReason =
 
 export interface ControlledTargetRecord extends ControlledTarget {
   principalId: ClientPrincipalId;
+  browserConnectionGeneration: number;
   title: string;
   invalidatedBy?: ControlledTargetInvalidationReason;
 }
 
 export interface ManagedTargetRegistration extends WorkspaceCallerContext {
   browserInstanceId: BrowserInstanceId;
+  browserConnectionGeneration: number;
   managedTabSetId: ManagedTabSetId;
   cdpTargetId: string;
   openerCdpTargetId?: string;
@@ -47,6 +49,7 @@ export interface LiveTargetMetadata {
 export interface ControlledTargetInvalidation {
   targetId: ControlledTargetId;
   workspaceId: BrowserWorkspaceId;
+  browserConnectionGeneration: number;
   reason: ControlledTargetInvalidationReason;
 }
 
@@ -128,6 +131,7 @@ export class MemoryControlledTargetRegistry {
       principalId: input.principalId,
       workspaceId: input.workspaceId,
       browserInstanceId: input.browserInstanceId,
+      browserConnectionGeneration: input.browserConnectionGeneration,
       cdpTargetId: input.cdpTargetId,
       ...(input.openerCdpTargetId ? { openerCdpTargetId: input.openerCdpTargetId } : {}),
       origin: input.origin,
@@ -143,7 +147,7 @@ export class MemoryControlledTargetRegistry {
   }
 
   syncUserTargets(
-    context: WorkspaceCallerContext,
+    context: WorkspaceCallerContext & { browserConnectionGeneration: number },
     browserInstanceId: BrowserInstanceId,
     userTargets: readonly UserBrowserTarget[],
   ): {
@@ -195,6 +199,7 @@ export class MemoryControlledTargetRegistry {
         principalId: context.principalId,
         workspaceId: context.workspaceId,
         browserInstanceId: target.browserInstanceId,
+        browserConnectionGeneration: context.browserConnectionGeneration,
         cdpTargetId: target.cdpTargetId,
         origin: 'user_tab',
         title: target.title,
@@ -486,7 +491,12 @@ export class MemoryControlledTargetRegistry {
     for (const [leaseId, targetId] of this.activeByLease) {
       if (targetId === record.id) this.activeByLease.delete(leaseId);
     }
-    return { targetId: record.id, workspaceId: record.workspaceId, reason };
+    return {
+      targetId: record.id,
+      workspaceId: record.workspaceId,
+      browserConnectionGeneration: record.browserConnectionGeneration,
+      reason,
+    };
   }
 
   private assertCallerOwns(

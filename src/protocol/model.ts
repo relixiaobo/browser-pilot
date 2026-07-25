@@ -373,6 +373,7 @@ export interface CommandDescriptor {
   workspaceId?: BrowserWorkspaceId;
   leaseId?: ControlLeaseId;
   targetId?: ControlledTargetId;
+  browserConnectionGeneration?: number;
   idempotencyKey: string;
   method: string;
   mutating: boolean;
@@ -435,6 +436,7 @@ export interface BrowserEvent {
   sequence: number;
   timestamp: number;
   workspaceId: BrowserWorkspaceId;
+  browserConnectionGeneration: number;
   leaseId?: ControlLeaseId;
   targetId?: ControlledTargetId;
   type: BrowserEventType;

@@ -27,6 +27,7 @@ export interface WorkspaceNetworkSession {
   workspaceId: BrowserWorkspaceId;
   leaseId: ControlLeaseId;
   targetId: ControlledTargetId;
+  browserConnectionGeneration: number;
   sessionId: string;
 }
 
@@ -57,6 +58,7 @@ interface NetworkRequestRecord {
   workspaceId: BrowserWorkspaceId;
   leaseId: ControlLeaseId;
   targetId: ControlledTargetId;
+  browserConnectionGeneration: number;
   sessionId: string;
   networkId: string;
   method: string;
@@ -661,6 +663,7 @@ export class WorkspaceNetworkController {
       workspaceId: session.workspaceId,
       leaseId: session.leaseId,
       targetId: session.targetId,
+      browserConnectionGeneration: session.browserConnectionGeneration,
       sessionId,
       networkId: params.requestId,
       method: boundedString(params?.request?.method, 32).toUpperCase(),
@@ -683,6 +686,7 @@ export class WorkspaceNetworkController {
       workspaceId: record.workspaceId,
       leaseId: record.leaseId,
       targetId: record.targetId,
+      browserConnectionGeneration: record.browserConnectionGeneration,
       type: 'network.request',
       sensitivity: 'browser_data',
       payload: {
@@ -714,6 +718,7 @@ export class WorkspaceNetworkController {
       workspaceId: record.workspaceId,
       leaseId: record.leaseId,
       targetId: record.targetId,
+      browserConnectionGeneration: record.browserConnectionGeneration,
       type: 'network.response',
       sensitivity: 'browser_data',
       payload: {

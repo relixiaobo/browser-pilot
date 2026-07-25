@@ -61,10 +61,10 @@ import {
 } from './workspace-network-controller.js';
 import type {
   BrokerBrowserBinding,
+  BrowserEventPublication,
   BrokerToolCallContext,
   BrowserToolExecutor,
 } from './broker-runtime.js';
-import type { PublishBrowserEventInput } from './event-journal.js';
 
 const BASE_SUPPORTED_TOOLS = [
   'browser.discover',
@@ -102,6 +102,7 @@ interface TargetSession {
   workspaceId: BrowserWorkspaceId;
   leaseId: ControlLeaseId;
   targetId: ControlledTargetId;
+  browserConnectionGeneration: number;
   cdpTargetId: string;
   sessionId: string;
   activeFrame?: ActiveFrame;
@@ -156,6 +157,7 @@ interface PendingDialog {
   workspaceId: BrowserWorkspaceId;
   leaseId: ControlLeaseId;
   targetId: ControlledTargetId;
+  browserConnectionGeneration: number;
   sessionId: string;
   type: DialogType;
   message: string;
@@ -241,7 +243,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly watchdogs: BrowserWatchdogService;
   private readonly navigationTimeoutMs: number;
   private readonly loadWaiter: typeof waitForLoad;
-  private eventPublisher?: (event: PublishBrowserEventInput) => void;
+  private eventPublisher?: (event: BrowserEventPublication) => void;
 
   constructor(
     private readonly transport: Transport,
@@ -295,6 +297,7 @@ export class BrowserToolService implements BrowserToolExecutor {
           this.observations.invalidateTarget(invalidation.targetId, invalidation.reason);
           this.publishEvent({
             workspaceId: invalidation.workspaceId,
+            browserConnectionGeneration: invalidation.browserConnectionGeneration,
             targetId: invalidation.targetId,
             type: 'observation.invalidated',
             sensitivity: 'browser_data',
@@ -302,6 +305,7 @@ export class BrowserToolService implements BrowserToolExecutor {
           });
           this.publishEvent({
             workspaceId: invalidation.workspaceId,
+            browserConnectionGeneration: invalidation.browserConnectionGeneration,
             targetId: invalidation.targetId,
             type: 'target.detached',
             sensitivity: 'browser_data',
@@ -312,6 +316,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         onPopup: target => this.publishTargetEvent('popup', target),
         onControlAcquired: (target, leaseId) => this.publishEvent({
           workspaceId: target.workspaceId,
+          browserConnectionGeneration: target.browserConnectionGeneration,
           leaseId,
           targetId: target.id,
           type: 'target_control.acquired',
@@ -320,19 +325,24 @@ export class BrowserToolService implements BrowserToolExecutor {
         }),
         onControlReleased: (target, leaseId) => this.publishEvent({
           workspaceId: target.workspaceId,
+          browserConnectionGeneration: target.browserConnectionGeneration,
           leaseId,
           targetId: target.id,
           type: 'target_control.released',
           sensitivity: 'browser_data',
           payload: { origin: target.origin, url: target.url },
         }),
+        isCurrentContext: context => (
+          this.binding.instance.state === 'connected' &&
+          this.binding.instance.connectionGeneration === context.browserConnectionGeneration
+        ),
       },
     );
     this.installDialogHandlers();
     this.installSessionHandlers();
   }
 
-  setEventPublisher(publisher: (event: PublishBrowserEventInput) => void): void {
+  setEventPublisher(publisher: (event: BrowserEventPublication) => void): void {
     this.eventPublisher = publisher;
   }
 
@@ -346,6 +356,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         this.observations.invalidateSession(session.sessionId);
         this.publishEvent({
           workspaceId: session.workspaceId,
+          browserConnectionGeneration: session.browserConnectionGeneration,
           leaseId: session.leaseId,
           targetId: session.targetId,
           type: 'observation.invalidated',
@@ -364,17 +375,21 @@ export class BrowserToolService implements BrowserToolExecutor {
       this.observations.invalidateTarget(invalidation.targetId, 'browser_reconnected');
       this.publishEvent({
         workspaceId: invalidation.workspaceId,
+        browserConnectionGeneration: invalidation.browserConnectionGeneration,
         targetId: invalidation.targetId,
         type: 'observation.invalidated',
         sensitivity: 'browser_data',
         payload: { reason: 'browser_reconnected' },
+        preserveIfGenerationStale: true,
       });
       this.publishEvent({
         workspaceId: invalidation.workspaceId,
+        browserConnectionGeneration: invalidation.browserConnectionGeneration,
         targetId: invalidation.targetId,
         type: 'target.detached',
         sensitivity: 'browser_data',
         payload: { reason: 'browser_reconnected' },
+        preserveIfGenerationStale: true,
       });
     }
   }
@@ -609,6 +624,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.observations.invalidateTarget(targetId, 'frame_changed');
     this.publishEvent({
       workspaceId: session.workspaceId,
+      browserConnectionGeneration: session.browserConnectionGeneration,
       leaseId: session.leaseId,
       targetId,
       type: 'observation.invalidated',
@@ -649,6 +665,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.observations.invalidateTarget(targetId, 'navigation');
     this.publishEvent({
       workspaceId: inventoryContext.workspaceId,
+      browserConnectionGeneration: inventoryContext.browserConnectionGeneration,
       leaseId: inventoryContext.leaseId,
       targetId,
       type: 'observation.invalidated',
@@ -663,6 +680,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
     this.publishEvent({
       workspaceId: inventoryContext.workspaceId,
+      browserConnectionGeneration: inventoryContext.browserConnectionGeneration,
       leaseId: inventoryContext.leaseId,
       targetId,
       type: 'navigation',
@@ -680,6 +698,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         workspaceId: inventoryContext.workspaceId,
         leaseId: inventoryContext.leaseId,
         targetId,
+        browserConnectionGeneration: inventoryContext.browserConnectionGeneration,
       }, {
         url,
         timeoutMs: cause.timeoutMs,
@@ -1175,6 +1194,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         this.observations.invalidateSession(existing.sessionId);
         this.publishEvent({
           workspaceId: existing.workspaceId,
+          browserConnectionGeneration: existing.browserConnectionGeneration,
           leaseId: existing.leaseId,
           targetId: existing.targetId,
           type: 'observation.invalidated',
@@ -1194,6 +1214,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       workspaceId: context.workspaceId,
       leaseId: context.leaseId,
       targetId,
+      browserConnectionGeneration: context.browserConnectionGeneration,
       cdpTargetId,
       sessionId: attached.sessionId,
     };
@@ -1279,6 +1300,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         workspaceId: context.workspace!.id,
         leaseId: context.lease!.id,
         targetId,
+        browserConnectionGeneration: session.browserConnectionGeneration,
         type: 'observation.invalidated',
         sensitivity: 'browser_data',
         payload: { reason: 'loader_replaced', observationId },
@@ -1521,6 +1543,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       principalId: context.principal.id,
       workspaceId: workspace.id,
       leaseId: lease.id,
+      browserConnectionGeneration: context.browser.instance.connectionGeneration,
     };
   }
 
@@ -1600,6 +1623,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       this.watchdogs.resetTarget(session.leaseId, targetId);
       this.publishEvent({
         workspaceId: session.workspaceId,
+        browserConnectionGeneration: session.browserConnectionGeneration,
         leaseId: session.leaseId,
         targetId,
         type: 'observation.invalidated',
@@ -1630,6 +1654,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         workspaceId: session.workspaceId,
         leaseId: session.leaseId,
         targetId: session.targetId,
+        browserConnectionGeneration: session.browserConnectionGeneration,
         sessionId,
         type,
         message: typeof params.message === 'string' ? params.message : '',
@@ -1647,6 +1672,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         workspaceId: dialog.workspaceId,
         leaseId: dialog.leaseId,
         targetId: dialog.targetId,
+        browserConnectionGeneration: dialog.browserConnectionGeneration,
       }, {
         dialogId: dialog.id,
         dialogType: dialog.type,
@@ -1818,6 +1844,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): void {
     this.publishEvent({
       workspaceId: target.workspaceId,
+      browserConnectionGeneration: target.browserConnectionGeneration,
       ...(target.controllerLeaseId ? { leaseId: target.controllerLeaseId } : {}),
       targetId: target.id,
       type,
@@ -1870,6 +1897,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): void {
     this.publishEvent({
       workspaceId: dialog.workspaceId,
+      browserConnectionGeneration: dialog.browserConnectionGeneration,
       leaseId: dialog.leaseId,
       targetId: dialog.targetId,
       type: 'dialog',
@@ -1886,7 +1914,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
   }
 
-  private publishEvent(event: PublishBrowserEventInput): void {
+  private publishEvent(event: BrowserEventPublication): void {
     try { this.eventPublisher?.(event); } catch { /* browser event handlers must stay non-throwing */ }
   }
 
@@ -1897,6 +1925,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): void {
     this.publishEvent({
       workspaceId: context.workspace!.id,
+      browserConnectionGeneration: context.browser.instance.connectionGeneration,
       leaseId: context.lease!.id,
       targetId,
       type: 'document.changed',
@@ -1922,6 +1951,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
       targetId,
+      browserConnectionGeneration: context.browser.instance.connectionGeneration,
     }, evidence);
   }
 
@@ -1932,6 +1962,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       workspaceId: session.workspaceId,
       leaseId: session.leaseId,
       targetId: session.targetId,
+      browserConnectionGeneration: session.browserConnectionGeneration,
     };
     this.publishEvent({
       ...context,

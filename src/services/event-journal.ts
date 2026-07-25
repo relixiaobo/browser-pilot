@@ -15,6 +15,7 @@ import type {
 
 export interface PublishBrowserEventInput {
   workspaceId: BrowserWorkspaceId;
+  browserConnectionGeneration: number;
   leaseId?: ControlLeaseId;
   targetId?: ControlledTargetId;
   type: BrowserEventType;
@@ -88,6 +89,15 @@ export class MemoryEventJournal {
 
   publish(input: PublishBrowserEventInput): BrowserEvent {
     const journal = this.requireJournal(input.workspaceId);
+    if (
+      !Number.isSafeInteger(input.browserConnectionGeneration) ||
+      input.browserConnectionGeneration < 1
+    ) {
+      throw invalidArgument(
+        'Event browserConnectionGeneration must be a positive integer',
+        'browserConnectionGeneration',
+      );
+    }
     if (!Number.isSafeInteger(input.payloadVersion ?? 1) || (input.payloadVersion ?? 1) <= 0) {
       throw invalidArgument('Event payloadVersion must be a positive integer', 'payloadVersion');
     }
@@ -100,6 +110,7 @@ export class MemoryEventJournal {
       sequence: journal.nextSequence++,
       timestamp: this.now(),
       workspaceId: input.workspaceId,
+      browserConnectionGeneration: input.browserConnectionGeneration,
       ...(input.leaseId ? { leaseId: input.leaseId } : {}),
       ...(input.targetId ? { targetId: input.targetId } : {}),
       type: input.type,

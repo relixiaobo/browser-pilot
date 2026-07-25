@@ -27,7 +27,7 @@ class InventoryTransport {
   close() {}
 }
 
-function createHarness({ deniedOperations = [] } = {}) {
+function createHarness({ deniedOperations = [], isCurrentContext } = {}) {
   let timestamp = 1_000;
   let targetSequence = 0;
   const browserInstanceId = 'browser:main';
@@ -75,12 +75,16 @@ function createHarness({ deniedOperations = [] } = {}) {
     browserInstanceId,
     policy,
     registry,
-    { onInvalidated: invalidation => invalidations.push(invalidation) },
+    {
+      onInvalidated: invalidation => invalidations.push(invalidation),
+      ...(isCurrentContext ? { isCurrentContext } : {}),
+    },
   );
   const contextA = {
     principalId: 'principal:agent',
     workspaceId: 'workspace:task',
     leaseId: 'lease:a',
+    browserConnectionGeneration: 1,
   };
   const contextB = { ...contextA, leaseId: 'lease:b' };
   inventory.registerManagedTarget({
@@ -242,4 +246,45 @@ test('host operation policy is enforced before CDP dispatch', async () => {
     harness.transport.calls.filter(call => call.method === 'Target.closeTarget').length,
     closeCalls,
   );
+});
+
+test('inventory serializes refreshes and rejects an old-generation snapshot before mutation', async () => {
+  let currentGeneration = 1;
+  const harness = createHarness({
+    isCurrentContext: context => context.browserConnectionGeneration === currentGeneration,
+  });
+  let releaseSnapshot;
+  let snapshotRequested;
+  const requested = new Promise(resolve => { snapshotRequested = resolve; });
+  const originalSend = harness.transport.send.bind(harness.transport);
+  let firstRead = true;
+  harness.transport.send = async (method, params = {}) => {
+    if (method === 'Target.getTargets' && firstRead) {
+      firstRead = false;
+      const snapshot = harness.transport.targets.map(target => ({ ...target }));
+      snapshotRequested();
+      await new Promise(resolve => { releaseSnapshot = resolve; });
+      return { targetInfos: snapshot };
+    }
+    return originalSend(method, params);
+  };
+
+  const stale = harness.inventory.refresh(harness.contextA);
+  await requested;
+  currentGeneration = 2;
+  harness.transport.targets = harness.transport.targets.filter(target => (
+    target.targetId === 'cdp:managed' || target.targetId === 'cdp:internal'
+  ));
+  const currentContext = { ...harness.contextA, browserConnectionGeneration: 2 };
+  const current = harness.inventory.refresh(currentContext);
+  releaseSnapshot();
+
+  await assert.rejects(stale, error => (
+    error.code === 'browser_disconnected' &&
+    error.context.expectedConnectionGeneration === 1
+  ));
+  await current;
+  const active = harness.registry.activeRecords(currentContext);
+  assert.deepEqual(active.map(target => target.cdpTargetId), ['cdp:managed']);
+  assert.equal(active.some(target => target.origin === 'user_tab'), false);
 });

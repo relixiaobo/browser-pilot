@@ -65,6 +65,10 @@ import {
   type PublishBrowserEventInput,
 } from './event-journal.js';
 
+export interface BrowserEventPublication extends PublishBrowserEventInput {
+  preserveIfGenerationStale?: boolean;
+}
+
 export const DEFAULT_PROTOCOL_LIMITS: Readonly<ProtocolLimits> = {
   maxMessageBytes: 1024 * 1024,
   maxResultBytes: 4 * 1024 * 1024,
@@ -158,7 +162,7 @@ export interface BrowserToolExecutor {
     definition: ToolDefinition,
     args: JsonValue,
   ): ControlledTargetId | undefined;
-  setEventPublisher?(publisher: (event: PublishBrowserEventInput) => void): void;
+  setEventPublisher?(publisher: (event: BrowserEventPublication) => void): void;
   browserConnectionChanged?(previous: BrowserInstance, current: BrowserInstance): void;
   releaseLease?(lease: ControlLease): void;
   releaseWorkspace?(
@@ -266,11 +270,14 @@ export class MemoryBrokerRuntime {
       if (!outcome.command.workspaceId) return;
       this.publishBrowserEvent({
         workspaceId: outcome.command.workspaceId,
+        browserConnectionGeneration: outcome.command.browserConnectionGeneration ??
+          this.workspaceBrowserGeneration(outcome.command.workspaceId),
         ...(outcome.command.leaseId ? { leaseId: outcome.command.leaseId } : {}),
         ...(outcome.command.targetId ? { targetId: outcome.command.targetId } : {}),
         type: 'command.status',
         sensitivity: 'browser_data',
         payload: { command: outcome.command } as unknown as JsonValue,
+        preserveIfGenerationStale: true,
       });
     }));
     this.listenerCleanup.push(this.events.subscribe(event => this.deliverNotification(event)));
@@ -428,10 +435,20 @@ export class MemoryBrokerRuntime {
     }
   }
 
-  publishBrowserEvent(input: PublishBrowserEventInput): BrowserEvent | undefined {
+  publishBrowserEvent(input: BrowserEventPublication): BrowserEvent | undefined {
     const workspace = this.workspaces.get(input.workspaceId);
     if (!workspace || workspace.value.state !== 'active') return undefined;
-    return this.events.publish(input);
+    const binding = this.browserBindings.find(candidate => (
+      candidate.instance.id === workspace.value.browserInstanceId
+    ));
+    if (!binding) return undefined;
+    if (input.browserConnectionGeneration > binding.instance.connectionGeneration) return undefined;
+    if (
+      input.browserConnectionGeneration < binding.instance.connectionGeneration &&
+      input.preserveIfGenerationStale !== true
+    ) return undefined;
+    const { preserveIfGenerationStale: _preserve, ...event } = input;
+    return this.events.publish(event);
   }
 
   updateBrowserConnection(
@@ -490,6 +507,9 @@ export class MemoryBrokerRuntime {
         ) continue;
         this.publishBrowserEvent({
           workspaceId: workspace.value.id,
+          browserConnectionGeneration: eventType === 'connection.lost'
+            ? previous.connectionGeneration
+            : current.connectionGeneration,
           type: eventType,
           sensitivity: 'browser_data',
           payload: {
@@ -804,6 +824,7 @@ export class MemoryBrokerRuntime {
     if (state === 'expired') {
       this.publishBrowserEvent({
         workspaceId: lease.workspaceId,
+        browserConnectionGeneration: this.workspaceBrowserGeneration(lease.workspaceId),
         leaseId: lease.id,
         type: 'lease.expired',
         sensitivity: 'public',
@@ -988,16 +1009,57 @@ export class MemoryBrokerRuntime {
       ...(params.commandId ? { commandId: params.commandId } : {}),
       ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
       ...(params.deadlineMs !== undefined ? { deadlineMs: params.deadlineMs } : {}),
+      browserConnectionGeneration: context.browser.instance.connectionGeneration,
       method: definition.name,
       mutating: definition.mutating,
       cancellation: definition.cancellation,
       actorKey,
       request,
     }, async ({ signal, markDispatched }) => {
-      if (!definition.mutating) markDispatched();
-      const result = await executor.call({ ...context, signal, markDispatched }, definition, args);
+      const assertCurrentBrowserGeneration = (): void => {
+        const current = this.browserBindings.find(candidate => (
+          candidate.instance.id === context.browser.instance.id
+        ));
+        if (
+          !current ||
+          current.instance.state !== 'connected' ||
+          current.instance.connectionGeneration !== context.browser.instance.connectionGeneration
+        ) {
+          throw new BrowserPilotError('browser_disconnected', 'Browser connection changed during command execution', {
+            retryable: true,
+            context: {
+              browserInstanceId: context.browser.instance.id,
+              expectedConnectionGeneration: context.browser.instance.connectionGeneration,
+              ...(current ? {
+                currentConnectionGeneration: current.instance.connectionGeneration,
+                browserState: current.instance.state,
+              } : {}),
+            },
+          });
+        }
+      };
+      const guardedMarkDispatched = (): void => {
+        assertCurrentBrowserGeneration();
+        markDispatched();
+      };
+      assertCurrentBrowserGeneration();
+      if (!definition.mutating) guardedMarkDispatched();
+      const result = await executor.call(
+        { ...context, signal, markDispatched: guardedMarkDispatched },
+        definition,
+        args,
+      );
+      assertCurrentBrowserGeneration();
       return validateToolResult(definition.name, result);
     }));
+  }
+
+  private workspaceBrowserGeneration(workspaceId: BrowserWorkspaceId): number {
+    const workspace = this.workspaces.get(workspaceId);
+    const binding = workspace && this.browserBindings.find(candidate => (
+      candidate.instance.id === workspace.value.browserInstanceId
+    ));
+    return binding?.instance.connectionGeneration ?? 1;
   }
 
   private pollEvents(connection: RuntimeConnection, value: unknown): JsonValue {

@@ -234,7 +234,10 @@ and expiry.
 ### BrowserEvent
 
 A typed, ordered event in a bounded per-Workspace journal. Events can be pushed
-over stdio and replayed with a cursor.
+over stdio and replayed with a cursor. Every event carries the browser connection
+generation of its source. Ordinary events from a retired generation are dropped;
+Command terminal state and explicit reconnect cleanup remain replayable with
+their historical generation.
 
 ## Public Executable Surface
 
@@ -480,6 +483,12 @@ accepted -> expired
 - **BR-12:** Browser disconnect and reconnect change the BrowserInstance
   connection generation and invalidate sessions and observations. The generation
   advances on successful restoration, not merely on a retry attempt.
+
+Commands capture that generation when accepted. The Broker verifies it again
+before browser dispatch and after the executor returns. A queued stale command
+never reaches the browser. If a mutating command was already dispatched when the
+generation changed, its terminal state is `unknown_outcome`; a stale read fails
+with retryable `browser_disconnected` rather than returning old data.
 
 The dispatch transition occurs immediately before the first browser mutation,
 after argument, ref, target, and continuity preflight. Composite-action guards

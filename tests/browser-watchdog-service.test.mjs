@@ -6,6 +6,7 @@ const context = {
   workspaceId: 'workspace:test',
   leaseId: 'lease:test',
   targetId: 'target:test',
+  browserConnectionGeneration: 1,
 };
 
 test('action watchdog emits once per observable no-progress streak and resets on progress', () => {

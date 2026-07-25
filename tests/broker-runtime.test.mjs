@@ -352,6 +352,328 @@ test('Broker records unknown outcomes after a dispatched browser disconnect', as
   assert.equal(queried.error.data.code, 'unknown_outcome');
 });
 
+test('same-target commands publish deterministic actor-local event order', async () => {
+  let publish;
+  let releaseFirst;
+  let firstDispatched;
+  let executions = 0;
+  const firstStarted = new Promise(resolve => { firstDispatched = resolve; });
+  const executor = {
+    supportedTools: ['browser.tabs.switch'],
+    setEventPublisher(publisher) { publish = publisher; },
+    commandTargetId(_context, _definition, args) { return args.targetId; },
+    actorKey(context, _definition, args) {
+      return `${context.workspace.id}\u0000${args.targetId}`;
+    },
+    async call(context, _definition, args) {
+      executions += 1;
+      const commandId = executions === 1 ? 'command:first' : 'command:second';
+      context.markDispatched();
+      publish({
+        workspaceId: context.workspace.id,
+        leaseId: context.lease.id,
+        targetId: args.targetId,
+        browserConnectionGeneration: context.browser.instance.connectionGeneration,
+        type: 'navigation',
+        sensitivity: 'browser_data',
+        payload: { commandId },
+      });
+      if (executions === 1) {
+        firstDispatched();
+        await new Promise(resolve => { releaseFirst = resolve; });
+      }
+      return {
+        workspaceId: context.workspace.id,
+        leaseId: context.lease.id,
+        targetId: args.targetId,
+        url: 'https://example.test',
+      };
+    },
+  };
+  const runtime = createRuntime({ toolExecutor: executor });
+  await initialize(runtime, 'bridge:event-order', {
+    requestedCapabilities: ['browser.control', 'workspace.manage', 'event.read'],
+  });
+  const created = await runtime.call('bridge:event-order', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:event-order', 'leases/create', {
+    workspaceId: created.workspace.id,
+  });
+  const call = (commandId, targetId) => runtime.call('bridge:event-order', 'tools/call', {
+    name: 'browser.tabs.switch',
+    arguments: { targetId },
+    workspaceId: created.workspace.id,
+    leaseId: lease.id,
+    commandId,
+  });
+
+  const first = call('command:first', 'target:one');
+  const second = call('command:second', 'target:one');
+  await firstStarted;
+  releaseFirst();
+  await Promise.all([first, second]);
+  const replayed = await runtime.call('bridge:event-order', 'events/poll', {
+    workspaceId: created.workspace.id,
+    cursor: created.eventCursor,
+  });
+  const order = replayed.events.map(event => event.type === 'command.status'
+    ? `${event.payload.command.status}:${event.payload.command.id}`
+    : `${event.type}:${event.payload.commandId}`);
+  assert.deepEqual(order, [
+    'accepted:command:first',
+    'accepted:command:second',
+    'dispatched:command:first',
+    'navigation:command:first',
+    'completed:command:first',
+    'dispatched:command:second',
+    'navigation:command:second',
+    'completed:command:second',
+  ]);
+  assert.deepEqual(replayed.events.map(event => event.browserConnectionGeneration), Array(8).fill(1));
+});
+
+test('different target actors can interleave while preserving each target local order', async () => {
+  let publish;
+  let releaseSlow;
+  let slowDispatched;
+  const slowStarted = new Promise(resolve => { slowDispatched = resolve; });
+  const executor = {
+    supportedTools: ['browser.tabs.switch'],
+    setEventPublisher(publisher) { publish = publisher; },
+    commandTargetId(_context, _definition, args) { return args.targetId; },
+    actorKey(context, _definition, args) { return `${context.workspace.id}\u0000${args.targetId}`; },
+    async call(context, _definition, args) {
+      context.markDispatched();
+      if (args.targetId === 'target:slow') {
+        slowDispatched();
+        await new Promise(resolve => { releaseSlow = resolve; });
+      }
+      publish({
+        workspaceId: context.workspace.id,
+        leaseId: context.lease.id,
+        targetId: args.targetId,
+        browserConnectionGeneration: context.browser.instance.connectionGeneration,
+        type: 'document.changed',
+        sensitivity: 'browser_data',
+        payload: { targetId: args.targetId },
+      });
+      return {
+        workspaceId: context.workspace.id,
+        leaseId: context.lease.id,
+        targetId: args.targetId,
+        url: 'https://example.test',
+      };
+    },
+  };
+  const runtime = createRuntime({ toolExecutor: executor });
+  await initialize(runtime, 'bridge:target-interleave', {
+    requestedCapabilities: ['browser.control', 'workspace.manage', 'event.read'],
+  });
+  const created = await runtime.call('bridge:target-interleave', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:target-interleave', 'leases/create', {
+    workspaceId: created.workspace.id,
+  });
+  const call = (commandId, targetId) => runtime.call('bridge:target-interleave', 'tools/call', {
+    name: 'browser.tabs.switch',
+    arguments: { targetId },
+    workspaceId: created.workspace.id,
+    leaseId: lease.id,
+    commandId,
+  });
+
+  const slow = call('command:slow', 'target:slow');
+  await slowStarted;
+  const fast = call('command:fast', 'target:fast');
+  await fast;
+  releaseSlow();
+  await slow;
+  const replayed = await runtime.call('bridge:target-interleave', 'events/poll', {
+    workspaceId: created.workspace.id,
+    cursor: created.eventCursor,
+  });
+  for (const [targetId, commandId] of [
+    ['target:slow', 'command:slow'],
+    ['target:fast', 'command:fast'],
+  ]) {
+    const local = replayed.events
+      .filter(event => event.targetId === targetId)
+      .map(event => event.type === 'command.status'
+        ? event.payload.command.status
+        : event.type);
+    assert.deepEqual(local, ['accepted', 'dispatched', 'document.changed', 'completed'], commandId);
+  }
+  const terminalIds = replayed.events
+    .filter(event => event.type === 'command.status' && event.payload.command.status === 'completed')
+    .map(event => event.payload.command.id);
+  assert.deepEqual(terminalIds, ['command:fast', 'command:slow']);
+});
+
+test('Broker fences delayed commands and browser events across reconnect generations', async () => {
+  let publish;
+  let releaseExecution;
+  let executionDispatched;
+  const dispatched = new Promise(resolve => { executionDispatched = resolve; });
+  const runtime = createRuntime({
+    toolExecutor: {
+      supportedTools: ['browser.connect'],
+      setEventPublisher(publisher) { publish = publisher; },
+      async call(context) {
+        context.markDispatched();
+        executionDispatched();
+        await new Promise(resolve => { releaseExecution = resolve; });
+        return {
+          workspaceId: context.workspace.id,
+          leaseId: context.lease.id,
+          browserInstanceId: context.browser.instance.id,
+          connectionGeneration: context.browser.instance.connectionGeneration,
+          state: 'connected',
+        };
+      },
+    },
+  });
+  await initialize(runtime, 'bridge:generation-fence', {
+    requestedCapabilities: ['browser.control', 'workspace.manage', 'event.read'],
+  });
+  const created = await runtime.call('bridge:generation-fence', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:generation-fence', 'leases/create', {
+    workspaceId: created.workspace.id,
+  });
+  const pending = runtime.call('bridge:generation-fence', 'tools/call', {
+    name: 'browser.connect',
+    arguments: { browserId: 'browser:test' },
+    workspaceId: created.workspace.id,
+    leaseId: lease.id,
+    commandId: 'command:generation-one',
+  });
+  await dispatched;
+  const queued = runtime.call('bridge:generation-fence', 'tools/call', {
+    name: 'browser.connect',
+    arguments: { browserId: 'browser:test' },
+    workspaceId: created.workspace.id,
+    leaseId: lease.id,
+    commandId: 'command:queued-generation-one',
+  });
+  const queuedRejected = assert.rejects(queued, error => error.code === 'browser_disconnected');
+  runtime.updateBrowserConnection('browser-instance:test', {
+    state: 'disconnected',
+    connectionGeneration: 1,
+  });
+  runtime.updateBrowserConnection('browser-instance:test', {
+    state: 'connected',
+    connectionGeneration: 2,
+  });
+  publish({
+    workspaceId: created.workspace.id,
+    browserConnectionGeneration: 1,
+    type: 'navigation',
+    sensitivity: 'browser_data',
+    payload: { url: 'https://stale.test' },
+  });
+  publish({
+    workspaceId: created.workspace.id,
+    browserConnectionGeneration: 2,
+    type: 'navigation',
+    sensitivity: 'browser_data',
+    payload: { url: 'https://current.test' },
+  });
+  publish({
+    workspaceId: created.workspace.id,
+    browserConnectionGeneration: 3,
+    type: 'navigation',
+    sensitivity: 'browser_data',
+    payload: { url: 'https://future.test' },
+  });
+  releaseExecution();
+  await assert.rejects(pending, error => error.code === 'unknown_outcome');
+  await queuedRejected;
+
+  const replayed = await runtime.call('bridge:generation-fence', 'events/poll', {
+    workspaceId: created.workspace.id,
+    cursor: created.eventCursor,
+  });
+  assert.equal(replayed.events.some(event => event.payload?.url === 'https://stale.test'), false);
+  assert.equal(replayed.events.some(event => event.payload?.url === 'https://future.test'), false);
+  assert.equal(replayed.events.some(event => (
+    event.payload?.url === 'https://current.test' && event.browserConnectionGeneration === 2
+  )), true);
+  const commandEvents = replayed.events.filter(event => (
+    event.type === 'command.status' &&
+    event.payload.command.id === 'command:generation-one'
+  ));
+  assert.deepEqual(commandEvents.map(event => event.payload.command.status), [
+    'accepted',
+    'dispatched',
+    'unknown_outcome',
+  ]);
+  assert.deepEqual(commandEvents.map(event => event.browserConnectionGeneration), [1, 1, 1]);
+  const queuedEvents = replayed.events.filter(event => (
+    event.type === 'command.status' &&
+    event.payload.command.id === 'command:queued-generation-one'
+  ));
+  assert.deepEqual(queuedEvents.map(event => event.payload.command.status), ['accepted', 'completed']);
+  assert.deepEqual(queuedEvents.map(event => event.browserConnectionGeneration), [1, 1]);
+  assert.deepEqual(replayed.events
+    .filter(event => event.type === 'connection.lost' || event.type === 'connection.restored')
+    .map(event => [event.type, event.browserConnectionGeneration]), [
+    ['connection.lost', 1],
+    ['connection.restored', 2],
+  ]);
+});
+
+test('Broker rejects a delayed read result instead of returning stale browser data', async () => {
+  let releaseRead;
+  let readStarted;
+  const started = new Promise(resolve => { readStarted = resolve; });
+  const runtime = createRuntime({
+    toolExecutor: {
+      supportedTools: ['browser.tabs.list'],
+      async call(context) {
+        readStarted();
+        await new Promise(resolve => { releaseRead = resolve; });
+        return {
+          workspaceId: context.workspace.id,
+          leaseId: context.lease.id,
+          targets: [],
+        };
+      },
+    },
+  });
+  await initialize(runtime, 'bridge:stale-read', {
+    requestedCapabilities: ['browser.control', 'workspace.manage', 'event.read'],
+  });
+  const created = await runtime.call('bridge:stale-read', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:stale-read', 'leases/create', {
+    workspaceId: created.workspace.id,
+  });
+  const pending = runtime.call('bridge:stale-read', 'tools/call', {
+    name: 'browser.tabs.list',
+    arguments: { scope: 'all' },
+    workspaceId: created.workspace.id,
+    leaseId: lease.id,
+    commandId: 'command:stale-read',
+  });
+  await started;
+  runtime.updateBrowserConnection('browser-instance:test', {
+    state: 'disconnected',
+    connectionGeneration: 1,
+  });
+  runtime.updateBrowserConnection('browser-instance:test', {
+    state: 'connected',
+    connectionGeneration: 2,
+  });
+  releaseRead();
+
+  await assert.rejects(pending, error => (
+    error.code === 'browser_disconnected' && error.retryable === true
+  ));
+  const command = await runtime.call('bridge:stale-read', 'commands/get', {
+    workspaceId: created.workspace.id,
+    commandId: 'command:stale-read',
+  });
+  assert.equal(command.command.status, 'completed');
+  assert.equal(command.command.browserConnectionGeneration, 1);
+  assert.equal(command.error.data.code, 'browser_disconnected');
+});
+
 test('Broker publishes one lost/restored pair, rejects disconnected tools, and advances generation', async () => {
   const changes = [];
   const runtime = createRuntime({
@@ -437,6 +759,7 @@ test('Broker replays Workspace events, pushes notifications, and enforces Princi
 
   runtime.publishBrowserEvent({
     workspaceId: created.workspace.id,
+    browserConnectionGeneration: 1,
     type: 'navigation',
     sensitivity: 'browser_data',
     payload: { url: 'https://example.test' },
@@ -489,6 +812,7 @@ test('Broker returns cursor_expired after bounded Workspace event compaction', a
   for (let value = 1; value <= 3; value += 1) {
     runtime.publishBrowserEvent({
       workspaceId: created.workspace.id,
+      browserConnectionGeneration: 1,
       type: 'document.changed',
       sensitivity: 'browser_data',
       payload: { value },
