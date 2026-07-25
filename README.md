@@ -63,7 +63,7 @@ The agent will use `bp` commands automatically. Your real login sessions are pre
 - **Real login sessions** — Operates your actual browser profile. Cookies, extensions, logins all intact
 - **CLI-native** — Any agent with bash access can use it. No MCP protocol, no SDK integration needed
 - **Auto-snapshot** — Every action returns page state with numbered `[ref]` elements, so the agent always knows what's on screen
-- **Lightweight** — 78KB npm package. No bundled Chromium (unlike Playwright's 400MB+)
+- **Lightweight npm install** — About 200KB as an npm tarball. No bundled Chromium (unlike Playwright's 400MB+)
 - **Rich editor support** — Works with contenteditable editors (Draft.js, ProseMirror, Quill, Slate) and Shadow DOM elements out of the box
 
 ## Comparison
@@ -96,7 +96,10 @@ CLI Process ──── HTTP/Unix Socket ──── Daemon Process (persisten
                                        └── Pilot window (agent operates here)
 ```
 
-The daemon maintains a single CDP WebSocket connection. A pulsing blue glow around the Pilot window indicates the agent is active.
+The Broker maintains the browser connection and isolated state for each Agent.
+An independent private janitor owns only Browser Pilot-created tabs so it can
+clean them after a Broker crash without touching user-opened tabs. A pulsing
+blue glow around a Pilot window indicates Agent activity.
 
 ## Platform Evolution
 
@@ -135,8 +138,44 @@ the daemon exits or crashes; it does not persist target IDs or close user tabs.
 Compatible Agent products reuse one per-user Broker through protocol
 negotiation. Protected shutdown cannot terminate live embedded clients, and an
 incompatible product must explicitly select a separate `BROWSER_PILOT_HOME`.
-Browser-capability conformance and distributable packaging work remain in
-progress.
+Global npm installation, local npm/npx use, and product-bundled absolute-path
+launches are covered by distribution black-box tests. Native self-contained
+release artifacts use one executable for the public CLI and its private Broker
+and janitor roles, with no runtime download or system-Node fallback.
+
+## Installation and Embedding
+
+Agent-managed installation remains supported:
+
+```bash
+npm install -g browser-pilot-cli
+bp tabs
+```
+
+A project can pin Browser Pilot locally and run the same CLI without a global
+installation:
+
+```bash
+npm install --save-exact browser-pilot-cli@0.1.6
+npx --no-install browser-pilot tabs
+```
+
+Agent products should pin either the npm package or a native archive from the
+GitHub release. Launch an absolute path directly with `bridge --stdio`; do not
+invoke a shell, import `src/*`, or depend on Broker locator/socket files. The
+npm form launches `node_modules/browser-pilot-cli/dist/cli.js` with the
+product's pinned Node runtime. The native archive launches its single
+`browser-pilot` executable and does not require Node to be installed.
+
+Each native archive contains `manifest.json`, per-file `SHA256SUMS`, licenses,
+and an adjacent archive checksum. The manifest reports the actual signature
+kind: Developer ID or ad-hoc on macOS, Authenticode or unsigned on Windows, and
+unsigned on Linux. Release automation never labels an artifact signed when its
+signing credentials were unavailable.
+
+All three forms use the same protocol and compatible per-user Broker. Use a
+distinct absolute `BROWSER_PILOT_HOME` only when a product deliberately needs
+an incompatible isolated Broker.
 
 ## Commands
 
@@ -334,10 +373,20 @@ non-blocking canaries so a third-party outage cannot fail the release gate:
 ```bash
 npm test                         # unit + local core, compat, and network gates
 npm run test:capabilities        # isolated-Chrome quantitative capability gate
+npm run test:distribution        # packed global/local/product-bundled launch modes
 npm run test:canary              # real-site drift report; non-blocking
 npm run test:canary:strict       # fail on drift or unavailability
 npm run test:integration         # compatibility alias for strict canaries
 npm run test:all                 # release gates plus non-blocking canaries
+```
+
+Maintainers can build and verify a native artifact with an official,
+SEA-capable Node 22.17.0 runtime:
+
+```bash
+BROWSER_PILOT_SEA_NODE=/absolute/path/to/node npm run build:standalone
+npm run verify:standalone
+npm run package:standalone
 ```
 
 The canary report is written to

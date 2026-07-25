@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: npm
+
+      - name: Verify release tag version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node -e "const p=require('./package.json'); if(process.env.GITHUB_REF_NAME !== 'v' + p.version) throw new Error('Release tag must equal v' + p.version)"
+
+      - run: npm ci
+      - if: runner.os == 'Linux'
+        run: npm run test:unit
+      - if: runner.os == 'Linux'
+        run: npx tsc --noEmit
+      - run: npm run test:distribution
+
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          if [[ -z "$CERTIFICATE_BASE64" && -z "$CERTIFICATE_PASSWORD" && -z "$SIGN_IDENTITY" ]]; then
+            echo "No macOS signing credentials; the artifact will be ad-hoc signed."
+            exit 0
+          fi
+          if [[ -z "$CERTIFICATE_BASE64" || -z "$CERTIFICATE_PASSWORD" || -z "$SIGN_IDENTITY" ]]; then
+            echo "macOS signing credentials are incomplete." >&2
+            exit 1
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/browser-pilot-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/browser-pilot-signing.p12"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          printf '%s' "$CERTIFICATE_BASE64" | openssl base64 -d -A -out "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "BROWSER_PILOT_MACOS_SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:CERTIFICATE_BASE64 -and -not $env:CERTIFICATE_PASSWORD) {
+            Write-Host 'No Windows signing credentials; the artifact will be unsigned.'
+            exit 0
+          }
+          if (-not $env:CERTIFICATE_BASE64 -or -not $env:CERTIFICATE_PASSWORD) {
+            throw 'Windows signing credentials are incomplete.'
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'browser-pilot-signing.pfx'
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:CERTIFICATE_BASE64))
+          $password = ConvertTo-SecureString $env:CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) {
+            throw 'signtool.exe was not found in the installed Windows SDK.'
+          }
+          "BROWSER_PILOT_WINDOWS_SIGN_SHA1=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BROWSER_PILOT_SIGNTOOL=$($signTool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - run: npm run build:standalone
+      - run: npm run verify:standalone
+      - run: npm run package:standalone
+
+      - name: Notarize macOS archive
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+        run: |
+          if [[ -z "$APPLE_ID" && -z "$APPLE_TEAM_ID" && -z "$APPLE_APP_PASSWORD" ]]; then
+            echo "No notarization credentials; notarization was not claimed."
+            exit 0
+          fi
+          if [[ -z "$BROWSER_PILOT_MACOS_SIGN_IDENTITY" ]]; then
+            echo "Notarization requires a Developer ID signed artifact." >&2
+            exit 1
+          fi
+          if [[ -z "$APPLE_ID" || -z "$APPLE_TEAM_ID" || -z "$APPLE_APP_PASSWORD" ]]; then
+            echo "macOS notarization credentials are incomplete." >&2
+            exit 1
+          fi
+          ARCHIVE="$(find release -maxdepth 1 -name '*.zip' -print -quit)"
+          xcrun notarytool submit "$ARCHIVE" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-pilot-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            release/*.tar.gz
+            release/*.tar.gz.sha256
+            release/*.zip
+            release/*.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber

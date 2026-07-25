@@ -272,6 +272,24 @@ Three distribution modes are equivalent:
 Embedded products must not import `src/*`, depend on daemon socket details, or
 parse human-readable output.
 
+The npm distribution contains bundled JavaScript entry points for the CLI,
+Broker, and managed-target janitor and requires Node 18 or newer. The native
+distribution is one Node SEA executable containing the runtime and JavaScript
+dependencies. It re-executes itself with reserved private role arguments for
+Broker and janitor processes; it neither downloads a runtime nor falls back to
+system Node. Both layouts derive executable installation identity from the
+public entry point, so private child roles do not create false version
+boundaries.
+
+Native artifacts are built and verified on their target OS and architecture.
+Each archive includes an actual-state signature descriptor, file sizes and
+SHA-256 hashes, runtime/dependency licenses, and an archive checksum. macOS uses
+Developer ID signing with hardened runtime and explicit JIT entitlements when
+credentials exist, otherwise ad-hoc signing. Windows uses Authenticode when a
+certificate exists, otherwise records unsigned state. Linux records unsigned
+state. Build or release automation must fail on incomplete credentials and
+must never describe an artifact as signed when signing did not run.
+
 ### Broker Locator and Startup
 
 The executable, not an embedding Host, resolves the per-user Broker endpoint.
@@ -913,6 +931,11 @@ fields, never on message text.
    included without grants, launch-time denied operations fail before CDP
    dispatch, opaque IDs cannot cross Workspaces, and bulk cleanup never closes
    user tabs.
+7. Distribution tests pack and install the npm package through global and local
+   layouts, launch local npx and product-owned absolute paths, and exercise
+   version output, bridge initialization, private Broker startup, and cleanup.
+   Native verification additionally checks manifest hashes, signature state,
+   private child roles, and archive checksums on each target platform.
 
 ## Implementation Boundary
 

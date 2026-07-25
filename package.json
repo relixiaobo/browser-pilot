@@ -10,6 +10,10 @@
   },
   "scripts": {
     "build": "tsup",
+    "build:standalone:js": "tsup --config tsup.standalone.config.ts",
+    "build:standalone": "npm run build:standalone:js && node scripts/build-standalone.mjs",
+    "package:standalone": "node scripts/package-standalone.mjs",
+    "verify:standalone": "node scripts/verify-standalone.mjs",
     "dev": "tsup --watch",
     "start": "node dist/cli.js",
     "test": "tsup && node --test tests/*.test.mjs && npx playwright test --project core --project compat --project network",
@@ -17,6 +21,7 @@
     "test:capabilities": "tsup && node --test tests/browser-capability-fixtures.test.mjs",
     "test:protocol": "tsup && node --test tests/protocol.test.mjs",
     "test:stdio-conformance": "tsup && node scripts/run-stdio-conformance.mjs",
+    "test:distribution": "tsup && node scripts/verify-npm-distribution.mjs",
     "test:canary": "tsup && node scripts/run-real-site-canaries.mjs",
     "test:canary:strict": "tsup && node scripts/run-real-site-canaries.mjs --strict",
     "test:integration": "npm run test:canary:strict",
@@ -25,6 +30,19 @@
     "test:agent:dry": "python3 tests/agent/run.py --dry-run",
     "test:agent:download": "python3 tests/agent/download_data.py"
   },
+  "files": [
+    "dist/cli.js",
+    "dist/daemon.js",
+    "dist/managed-target-janitor.js",
+    "scripts/run-stdio-conformance.mjs",
+    "docs/architecture/browser-pilot-platform-spec.md",
+    "docs/integration/stdio-bridge.md",
+    "docs/integration/stdio-conformance.md",
+    "docs/plans/browser-capability-evolution.md",
+    "docs/plans/universal-agent-integration.md",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "commander": "^13.1.0",
     "ws": "^8.21.1"
@@ -33,6 +51,7 @@
     "@playwright/test": "^1.59.1",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "postject": "^1.0.0-alpha.6",
     "tsup": "^8.0.0",
     "typescript": "^5.7.0"
   },

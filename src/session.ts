@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { DaemonClient } from './client.js';
 import {
   acquireBrokerStartupLock,
@@ -15,13 +14,14 @@ import {
 import { INJECT_BORDER } from './page-scripts.js';
 import type { Transport } from './transport.js';
 import { BrowserPilotError } from './protocol/errors.js';
+import { internalProcessInvocation } from './runtime-layout.js';
 
 // ── Daemon lifecycle ────────────────────────────────
 
 async function startDaemon(browser: DiscoveredBrowser | null): Promise<DaemonClient> {
-  const script = fileURLToPath(new URL('daemon.js', import.meta.url));
-  const child = spawn(process.execPath, [
-    script,
+  const invocation = internalProcessInvocation('daemon', import.meta.url);
+  const child = spawn(invocation.command, [
+    ...invocation.argumentsPrefix,
     browser?.endpoint?.wsUrl ?? '',
     browser?.candidate.product ?? '',
     browser?.dataDir ?? '',

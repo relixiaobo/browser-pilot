@@ -5,5 +5,7 @@ dist/
 tests/agent/data/
 tests/agent/__pycache__/
 test-results/
+build/
+release/
 screenshot-*.png
 .env

@@ -1,8 +1,6 @@
 import http from 'node:http';
 import { unlinkSync, chmodSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { BROKER_TRANSPORT, STATE_DIR, SOCKET_PATH } from './paths.js';
 import {
@@ -34,10 +32,10 @@ import {
   type DiscoveredBrowser,
 } from './chrome.js';
 import { ManagedTargetJanitorClient } from './managed-target-janitor-client.js';
+import { publicExecutablePath } from './runtime-layout.js';
+import { BROWSER_PILOT_VERSION as PKG_VERSION } from './version.js';
 
-const require = createRequire(import.meta.url);
-const PKG_VERSION: string = require('../package.json').version;
-const CLI_EXECUTABLE_PATH = fileURLToPath(new URL('cli.js', import.meta.url));
+const CLI_EXECUTABLE_PATH = publicExecutablePath(import.meta.url);
 const PROTOCOL_RANGE = {
   min: { ...SUPPORTED_PROTOCOL_VERSIONS[0] },
   max: { ...SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1] },

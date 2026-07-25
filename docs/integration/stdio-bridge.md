@@ -23,6 +23,29 @@ Launch it directly, without a shell:
 browser-pilot bridge --stdio
 ```
 
+The three supported layouts are behaviorally equivalent:
+
+- global npm: the host explicitly resolves the installed `browser-pilot` bin;
+- local npm/npx: the host pins `browser-pilot-cli` and resolves its local bin or
+  absolute `dist/cli.js` path;
+- native bundle: the host pins and launches the release archive's absolute
+  `browser-pilot` executable path.
+
+The npm layout requires Node 18 or newer and starts the adjacent packaged
+`daemon.js` and `managed-target-janitor.js` files as private processes. A native
+release is a Node SEA executable with its runtime and dependencies embedded. It
+respawns that same executable for private Broker and janitor roles; reserved
+`--browser-pilot-internal=*` arguments are not a Host API. It never downloads a
+runtime or falls back to a system Node installation.
+
+Native archives contain `manifest.json`, `SHA256SUMS`, dependency/runtime
+licenses, and an adjacent archive checksum. Verify the archive checksum before
+unpacking and the manifest-listed file hashes before launch. The manifest's
+`signature.kind` is evidence, not an aspirational channel label: `developer_id`
+or `adhoc` on macOS, `authenticode` or `unsigned` on Windows, and `unsigned` on
+Linux. Hosts that require a trusted publisher must reject ad-hoc or unsigned
+artifacts themselves.
+
 The host may add `--browser <id|product|channel>` to make its initial browser
 preference explicit. Without it, Browser Pilot deterministically selects the
 first ready candidate in stable platform order. The running Broker retains that
@@ -486,7 +509,11 @@ auth, network observation/rules, eval, screenshot, PDF, protected upload import,
 scoped download Artifacts, Artifact access, command recovery, browser reconnect,
 and event replay. Broker startup serialization, executable/protocol negotiation,
 live-client shutdown protection, bounded version history, and deliberate
-version isolation are covered by process tests.
+version isolation are covered by process tests. Packed global npm, local
+npm/npx, and product-bundled absolute-path launches are also exercised as
+black-box installs. Native artifact verification covers manifest hashes,
+version output, stdio startup, the private Broker role, protected disconnect,
+and the private janitor role without attaching to the user's browser.
 
 Before shipping an adapter, run the black-box
 [stdio conformance suite](stdio-conformance.md) against the exact bundled launch

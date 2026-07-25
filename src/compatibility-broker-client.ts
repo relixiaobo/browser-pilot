@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { DaemonClient, isDaemonRunning } from './client.js';
 import { connectDaemon } from './session.js';
 import { createExecutableMetadataSync } from './broker-locator.js';
+import { publicExecutablePath } from './runtime-layout.js';
 import { BrowserPilotError } from './protocol/errors.js';
 import {
   CAPABILITIES,
@@ -277,7 +278,10 @@ export async function shutdownCompatibility(executableVersion: string): Promise<
       },
     });
   }
-  const requester = createExecutableMetadataSync(executableVersion, process.argv[1]);
+  const requester = createExecutableMetadataSync(
+    executableVersion,
+    publicExecutablePath(import.meta.url),
+  );
   if (
     requester.version !== health.executableVersion ||
     requester.identity !== health.executableIdentity

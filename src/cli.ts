@@ -1,9 +1,7 @@
 import { Command } from 'commander';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
-const PKG_VERSION: string = require('../package.json').version;
+import { BROWSER_PILOT_VERSION as PKG_VERSION } from './version.js';
 import { BrowserPilotError } from './protocol/errors.js';
 import type { ArtifactDescriptor, ControlledTargetId, JsonValue } from './protocol/model.js';
 import { DaemonBridgeBackend } from './bridge/daemon-bridge-backend.js';

@@ -1,10 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { BrowserPilotError } from './protocol/errors.js';
 import type {
   ManagedTargetCreateParams,
   ManagedTargetLifecycle,
 } from './services/managed-target-lifecycle.js';
+import { internalProcessInvocation, type InternalProcessInvocation } from './runtime-layout.js';
 
 const MAX_LINE_BYTES = 64 * 1024;
 const MAX_PENDING_REQUESTS = 64;
@@ -23,7 +23,7 @@ export interface ManagedTargetJanitorClientOptions {
 }
 
 export class ManagedTargetJanitorClient implements ManagedTargetLifecycle {
-  private readonly workerPath: string;
+  private readonly workerInvocation: InternalProcessInvocation;
   private readonly onLog?: (message: string) => void;
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly ownedTargetIds = new Set<string>();
@@ -41,9 +41,9 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle {
   private closed = false;
 
   constructor(options: ManagedTargetJanitorClientOptions = {}) {
-    this.workerPath = options.workerPath ?? fileURLToPath(
-      new URL('./managed-target-janitor.js', import.meta.url),
-    );
+    this.workerInvocation = options.workerPath
+      ? { command: process.execPath, argumentsPrefix: [options.workerPath] }
+      : internalProcessInvocation('janitor', import.meta.url);
     this.onLog = options.onLog;
   }
 
@@ -101,7 +101,10 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle {
   private async startWorker(): Promise<void> {
     const wsUrl = this.desiredWsUrl;
     if (!wsUrl) throw new Error('Managed target janitor has no browser endpoint');
-    const worker = spawn(process.execPath, [this.workerPath, wsUrl], {
+    const worker = spawn(this.workerInvocation.command, [
+      ...this.workerInvocation.argumentsPrefix,
+      wsUrl,
+    ], {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });

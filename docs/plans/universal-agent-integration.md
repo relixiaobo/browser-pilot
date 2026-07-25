@@ -274,9 +274,19 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     cross-platform isolation; incompatibility never triggers hidden replacement
     or isolation. Process tests cover reuse, incompatibility, shutdown
     protection, crash recovery, and two intentional Broker namespaces.
-- [ ] **A6.4** Preserve global npm, local npm/npx, and product-bundled launch
+- [x] **A6.4** Preserve global npm, local npm/npx, and product-bundled launch
   modes. Add signed/self-contained artifacts where each platform permits.
   - Covers: FR-1, FR-2.
+  - Complete: build-time version injection and a runtime layout abstraction
+    preserve adjacent-script npm installs while allowing one Node SEA executable
+    to serve the public CLI and reserved private Broker/janitor roles. Packed
+    global npm, local npm/npx, and product-owned absolute-path launches pass
+    black-box version, bridge, Broker startup, and cleanup tests. Native bundles
+    include actual-state signature metadata, SHA-256 manifests, licenses, and
+    platform archives; macOS Developer ID/notarization and Windows Authenticode
+    hooks activate only with complete credentials, while unsigned/ad-hoc state
+    remains explicit. Release CI uses fixed official Node 22.17.0 native runners
+    and verifies every artifact before publishing it.
 
 ### A7. Agent-neutral integration kit
 

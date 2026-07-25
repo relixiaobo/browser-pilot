@@ -13,6 +13,9 @@ For complete envelopes and schemas, use the installed package's
 
 1. Launch the exact bundled, project-local, or explicitly selected global
    executable directly, without a shell.
+   For a product bundle, pin either `browser-pilot-cli` plus the product's Node
+   runtime or the platform-native self-contained release archive. Never locate
+   private Broker/janitor entry points or download a runtime at launch.
 2. Send `initialize` first. Negotiate protocol/capabilities and retain the
    returned connection and browser state. Branch on `error.data.code`, never
    English messages.
