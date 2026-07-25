@@ -11,6 +11,7 @@ import {
   NetworkService,
   ObservationService,
   PageContentService,
+  RefRevalidationService,
   TargetService,
   UploadService,
 } from '../dist/services.js';
@@ -34,6 +35,35 @@ const snapshot = {
   text: '[page] Example | https://example.com',
   data: { title: 'Example', url: 'https://example.com', elements: [] },
 };
+
+function domOnlyRefSnapshot({ backendNodeId = 200, name = 'DOM Command', clickable = true } = {}) {
+  const strings = [];
+  const intern = value => {
+    const existing = strings.indexOf(value);
+    if (existing >= 0) return existing;
+    strings.push(value);
+    return strings.length - 1;
+  };
+  const empty = intern('');
+  return {
+    strings,
+    documents: [{
+      frameId: intern('frame:dom-only'),
+      documentURL: intern('https://example.test/dom-only'),
+      baseURL: intern('https://example.test/'),
+      nodes: {
+        parentIndex: [-1, 0, 1, 2],
+        nodeType: [9, 1, 1, 1],
+        nodeName: ['#document', 'html', 'body', 'div'].map(intern),
+        nodeValue: [empty, empty, empty, empty],
+        backendNodeId: [9_000, 9_001, 9_002, backendNodeId],
+        attributes: [[], [], [], [intern('aria-label'), intern(name)]],
+        isClickable: { index: clickable ? [3] : [] },
+      },
+      layout: { nodeIndex: [], bounds: [], styles: [], paintOrders: [] },
+    }],
+  };
+}
 
 test('ObservationService stores refs in the injected store', async () => {
   const refs = new MemoryRefStore();
@@ -80,6 +110,63 @@ test('ObservationService locates and validates an element', async () => {
 
   assert.deepEqual(await service.locate('.editor'), location);
   assert.match(transport.calls[0].params.expression, /\.editor/);
+});
+
+test('RefRevalidationService accepts unchanged AX semantics without a full DOM snapshot', async () => {
+  const transport = new FakeTransport(method => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'object-ref' } };
+    if (method === 'Runtime.releaseObject') return {};
+    if (method === 'Runtime.callFunctionOn') return { result: { value: true } };
+    if (method === 'Accessibility.getPartialAXTree') return { nodes: [{
+      backendDOMNodeId: 201,
+      ignored: false,
+      role: { value: 'button' },
+      name: { value: 'Save' },
+      properties: [],
+    }] };
+    throw new Error(`Unexpected method: ${method}`);
+  });
+
+  await new RefRevalidationService(transport, 'session-ref').validate(
+    { backendNodeId: 201, role: 'button', name: 'Save' },
+    { targetId: 'target-ref', ref: 1 },
+  );
+
+  assert.equal(transport.calls.some(call => call.method === 'DOMSnapshot.captureSnapshot'), false);
+  assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
+});
+
+test('RefRevalidationService rejects changed AX and DOM-only semantics as stale refs', async () => {
+  let domSnapshot = domOnlyRefSnapshot();
+  const transport = new FakeTransport(method => {
+    if (method === 'Runtime.callFunctionOn') return { result: { value: true } };
+    if (method === 'Accessibility.getPartialAXTree') return { nodes: [{
+      backendDOMNodeId: 200,
+      ignored: false,
+      role: { value: 'generic' },
+      name: { value: '' },
+      properties: [],
+    }] };
+    if (method === 'DOMSnapshot.captureSnapshot') return domSnapshot;
+    throw new Error(`Unexpected method: ${method}`);
+  });
+  const service = new RefRevalidationService(transport, 'session-ref');
+  const expected = { backendNodeId: 200, role: 'button', name: 'DOM Command' };
+
+  await service.validateResolved('object-ref', expected, { targetId: 'target-ref', ref: 2 });
+  domSnapshot = domOnlyRefSnapshot({ name: 'Delete account' });
+  await assert.rejects(
+    () => service.validateResolved('object-ref', expected, { targetId: 'target-ref', ref: 2 }),
+    error => (
+      error.code === 'stale_ref' && error.context?.targetId === 'target-ref' &&
+      error.context?.ref === 2 && error.context?.reason === undefined
+    ),
+  );
+  domSnapshot = domOnlyRefSnapshot({ clickable: false });
+  await assert.rejects(
+    () => service.validateResolved('object-ref', expected),
+    error => error.code === 'stale_ref',
+  );
 });
 
 test('ActionService dispatches a coordinate click and observes the result', async () => {
@@ -213,6 +300,29 @@ test('ActionService reports a detached pointer target as a stale ref', async () 
   );
   assert.equal(transport.calls.some(call => call.method === 'Input.dispatchMouseEvent'), false);
   assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
+});
+
+test('ActionService reports a node removed before live resolution as a stale ref', async () => {
+  const refs = new MemoryRefStore();
+  refs.save('target-removed', [{ backendNodeId: 106, role: 'button', name: 'Removed' }]);
+  const transport = new FakeTransport(method => {
+    if (method === 'DOM.resolveNode') throw new Error('No node with given id found');
+    throw new Error(`Unexpected method: ${method}`);
+  });
+  const service = new ActionService(transport, 'session-removed', 'target-removed', {
+    refStore: refs,
+    refValidator: async () => assert.fail('validator must not run without a resolved node'),
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  await assert.rejects(
+    () => service.click({ kind: 'ref', ref: '1' }),
+    error => (
+      error.code === 'stale_ref' && error.context?.targetId === 'target-removed' &&
+      error.context?.ref === 1 && error.context?.reason === undefined
+    ),
+  );
+  assert.equal(transport.calls.some(call => call.method.startsWith('Input.')), false);
 });
 
 test('ActionService dispatches a page-validated descendant or label hit point', async () => {

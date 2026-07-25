@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test, { after, before } from 'node:test';
 import { chromium } from 'playwright';
-import { MemoryRefStore, ObservationService } from '../dist/services.js';
+import { MemoryRefStore, ObservationService, RefRevalidationService } from '../dist/services.js';
 import {
   BROWSER_CAPABILITY_FIXTURES,
   REQUIRED_BROWSER_CAPABILITY_SCENARIOS,
@@ -145,10 +145,29 @@ test('AX-only and DOM-only fixtures expose deliberately different browser signal
     let client = await page.context().newCDPSession(page);
     let tree = await client.send('Accessibility.getFullAXTree');
     assert.ok(tree.nodes.some(node => axValue(node, 'role') === 'button' && axValue(node, 'name') === 'AX Command'));
-    const axObservation = await observeWithCdp(client, 'ax-only');
+    const axRefs = new MemoryRefStore();
+    const transport = { send: (method, params) => client.send(method, params), close() {} };
+    const axObservation = await new ObservationService(transport, 'isolated-session', 'ax-only', {
+      refStore: axRefs,
+    }).observe(50);
     assert.ok(axObservation.data.elements.some(element => (
       element.role === 'button' && element.name === 'AX Command'
     )));
+    const observedRef = axRefs.load('ax-only')[0];
+    const { object } = await client.send('DOM.resolveNode', { backendNodeId: observedRef.backendNodeId });
+    const revalidator = new RefRevalidationService(transport, 'isolated-session');
+    try {
+      await revalidator.validateResolved(object.objectId, observedRef, { targetId: 'ax-only', ref: 1 });
+      await page.locator('#ax-control').evaluate(element => {
+        element.setAttribute('aria-label', 'Destructive Command');
+      });
+      await assert.rejects(
+        () => revalidator.validateResolved(object.objectId, observedRef, { targetId: 'ax-only', ref: 1 }),
+        error => error.code === 'stale_ref',
+      );
+    } finally {
+      await client.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => {});
+    }
     await client.detach();
 
     await page.goto(`${primaryOrigin}/capability/dom-only`);

@@ -211,6 +211,22 @@ class BrowserFixtureTransport {
           ],
         };
       }
+      case 'Accessibility.getPartialAXTree': {
+        const backendNodeId = Number(String(params.objectId).split(':').at(-1));
+        const primaryButtonName = this.buttonNamesByTarget.get(targetId) ?? 'Submit';
+        const extraName = backendNodeId >= 100
+          ? this.extraAxButtons[backendNodeId - 100]
+          : undefined;
+        const role = backendNodeId === 43 ? 'textbox' : 'button';
+        const name = backendNodeId === 43 ? 'Query' : extraName ?? primaryButtonName;
+        return { nodes: [{
+          backendDOMNodeId: backendNodeId,
+          ignored: false,
+          role: { value: role },
+          name: { value: name },
+          properties: [],
+        }] };
+      }
       case 'DOMSnapshot.captureSnapshot': return { documents: [], strings: [] };
       case 'DOM.getFrameOwner': return {
         backendNodeId: this.frameOwnerBackendNodeIds.get(params.frameId),
@@ -232,6 +248,9 @@ class BrowserFixtureTransport {
         return {};
       case 'Runtime.releaseObject': return {};
       case 'Runtime.callFunctionOn':
+        if (String(params.functionDeclaration).includes('browser-pilot.ref-revalidation.v1')) {
+          return { result: { value: true } };
+        }
         if (String(params.functionDeclaration).includes('valueToken') && this.pressStates.length > 0) {
           const { backendNodeId: _backendNodeId, ...value } = this.pressStates[this.pressReadIndex];
           this.pressReadIndex += 1;
@@ -1312,6 +1331,56 @@ test('Observation refs are Lease-scoped, stale after navigation, and actions ret
       target: { observationId: clicked.observationId, ref: 1 },
     }, targetId),
     error => error.code === 'stale_ref',
+  );
+});
+
+test('same-document semantic mutation makes an old ref stale until the Agent observes again', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.extraAxButtons = ['Secondary action'];
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:semantic-ref',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:semantic-ref',
+    'com.example.agent',
+    'instance:semantic-ref',
+  );
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', {})).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', {}, targetId);
+  transport.buttonNamesByTarget.set('user-form', 'Delete account');
+  const pointerCallCount = transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').length;
+
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.click', {
+      target: { observationId: observed.observationId, ref: 1 },
+    }, targetId),
+    error => error.code === 'stale_ref' && error.context?.reason === undefined,
+  );
+  assert.equal(
+    transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').length,
+    pointerCallCount,
+  );
+
+  await tool(runtime, client, 'browser.click', {
+    target: { observationId: observed.observationId, ref: 2 },
+  }, targetId);
+  assert.equal(
+    transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').length,
+    pointerCallCount + 3,
+  );
+
+  const refreshed = await tool(runtime, client, 'browser.observe', {}, targetId);
+  assert.equal(refreshed.elements[0].name, 'Delete account');
+  await tool(runtime, client, 'browser.click', {
+    target: { observationId: refreshed.observationId, ref: 1 },
+  }, targetId);
+  assert.equal(
+    transport.calls.filter(call => call.method === 'Input.dispatchMouseEvent').length,
+    pointerCallCount + 6,
   );
 });
 

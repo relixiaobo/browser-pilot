@@ -64,6 +64,7 @@ import {
 import { MemoryObservationStore, type StoredObservation } from './observation-store.js';
 import { ObservationService } from './observation-service.js';
 import { PageContentService } from './page-content-service.js';
+import { RefRevalidationService } from './ref-revalidation-service.js';
 import { TargetInventoryService, type TargetInventoryContext } from './target-inventory-service.js';
 import { UploadService, type UploadVerificationEvidence } from './upload-service.js';
 import {
@@ -892,7 +893,18 @@ export class BrowserToolService implements BrowserToolExecutor {
         args.observationId as ObservationId,
         Number(args.ref),
       );
-      backendNodeId = observation.refs[Number(args.ref) - 1].backendNodeId;
+      const observedRef = observation.refs[Number(args.ref) - 1];
+      await new RefRevalidationService(
+        this.transport,
+        this.activeCdpSessionId(session),
+      ).validate(observedRef, {
+        workspaceId: context.workspace.id,
+        leaseId: context.lease!.id,
+        targetId,
+        observationId: observation.id,
+        ref: Number(args.ref),
+      });
+      backendNodeId = observedRef.backendNodeId;
     }
 
     let next: CreatedObservation | undefined;
@@ -1348,31 +1360,6 @@ export class BrowserToolService implements BrowserToolExecutor {
       documentGeneration: identity.documentGeneration,
       ref,
     });
-    try {
-      const resolved = await this.transport.send('DOM.resolveNode', {
-        backendNodeId: observation.refs[ref - 1].backendNodeId,
-      }, cdpSessionId);
-      if (resolved?.object?.objectId) {
-        await this.transport.send('Runtime.releaseObject', {
-          objectId: resolved.object.objectId,
-        }, cdpSessionId).catch(() => {});
-      }
-    } catch (cause) {
-      this.observations.invalidateTarget(targetId, 'loader_replaced');
-      this.publishEvent({
-        workspaceId: context.workspace!.id,
-        leaseId: context.lease!.id,
-        targetId,
-        browserConnectionGeneration: session.browserConnectionGeneration,
-        type: 'observation.invalidated',
-        sensitivity: 'browser_data',
-        payload: { reason: 'loader_replaced', observationId },
-      });
-      throw new BrowserPilotError('stale_ref', 'Observation node is no longer resolvable', {
-        context: { workspaceId: context.workspace!.id, targetId, observationId, ref },
-        cause,
-      });
-    }
     return observation;
   }
 
@@ -1504,6 +1491,16 @@ export class BrowserToolService implements BrowserToolExecutor {
       service: new ActionService(this.transport, cdpSessionId, targetId, {
         refStore,
         observationService,
+        refValidator: input => new RefRevalidationService(
+          this.transport,
+          cdpSessionId,
+        ).validateResolved(input.objectId, input.entry, {
+          workspaceId: context.workspace!.id,
+          leaseId: context.lease!.id,
+          targetId,
+          ...(observation ? { observationId: observation.id } : {}),
+          ref: input.ref,
+        }),
         pointerOffset: () => this.activeFramePointerOffset(session),
         onWillDispatch: () => this.markDispatched(context),
         continuityFactory: action => CdpActionContinuityGuard.create(

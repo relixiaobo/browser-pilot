@@ -9,7 +9,13 @@ import {
   READ_EDITABLE_STATE,
   SET_VALUE_CONTROL,
 } from '../page-scripts.js';
-import { legacyRefStore, resolveTarget, type RefStore, type SnapshotResult } from '../snapshot.js';
+import {
+  legacyRefStore,
+  resolveTargetIdentity,
+  type RefEntry,
+  type RefStore,
+  type SnapshotResult,
+} from '../snapshot.js';
 import type { Transport } from '../transport.js';
 import type {
   ActionContinuityFactory,
@@ -34,6 +40,7 @@ export interface ActionServiceOptions {
   observationService?: ActionObservationService;
   inputDispatcher?: InputDispatcher;
   pointerOffset?: () => Promise<{ x: number; y: number }>;
+  refValidator?: (input: { objectId: string; ref: number; entry: RefEntry }) => Promise<void>;
   readbackDelayMs?: number;
   focusDelayMs?: number;
   executionContextId?: number;
@@ -533,6 +540,7 @@ export class ActionService {
   private readonly observations: ActionObservationService;
   private readonly input: InputDispatcher;
   private readonly pointerOffset: () => Promise<{ x: number; y: number }>;
+  private readonly refValidator?: ActionServiceOptions['refValidator'];
   private readonly readbackDelayMs: number;
   private readonly focusDelayMs: number;
   private readonly executionContextId?: number;
@@ -554,6 +562,7 @@ export class ActionService {
     );
     this.input = options.inputDispatcher ?? new InputDispatcher(transport, sessionId);
     this.pointerOffset = options.pointerOffset ?? (async () => ({ x: 0, y: 0 }));
+    this.refValidator = options.refValidator;
     this.readbackDelayMs = options.readbackDelayMs ?? 50;
     this.focusDelayMs = options.focusDelayMs ?? 300;
     this.executionContextId = options.executionContextId;
@@ -584,13 +593,14 @@ export class ActionService {
           reason: 'coordinate_target',
         };
       } else {
-        const objectId = await resolveTarget(
+        const resolved = await resolveTargetIdentity(
           this.transport,
           this.sessionId,
           target.ref,
           this.targetId,
           this.refStore,
         );
+        const { objectId } = resolved;
         try {
           const { result } = await this.transport.send('Runtime.callFunctionOn', {
             objectId,
@@ -598,6 +608,7 @@ export class ActionService {
             returnByValue: true,
           }, this.sessionId);
           const state = parsePointerTargetState(result.value);
+          await this.validateRef(objectId, target.ref, resolved.ref, resolved.entry);
           if (state.status === 'blocked') {
             const context = {
               action: 'click',
@@ -658,6 +669,21 @@ export class ActionService {
     return { x: x + offset.x, y: y + offset.y };
   }
 
+  private async validateRef(
+    objectId: string,
+    refValue: string,
+    resolvedRef?: number,
+    entry?: RefEntry,
+  ): Promise<void> {
+    if (!this.refValidator) return;
+    if (!entry || resolvedRef === undefined) {
+      throw new BrowserPilotError('stale_ref', `Ref [${refValue}] is no longer available`, {
+        context: { targetId: this.targetId, ref: refValue },
+      });
+    }
+    await this.refValidator({ objectId, ref: resolvedRef, entry });
+  }
+
   async press(key: string, observationLimit = 50): Promise<PressActionResult> {
     const run = await this.startRun('press');
     try {
@@ -687,15 +713,17 @@ export class ActionService {
   async type(ref: string, text: string, options: TypeOptions = {}): Promise<InputActionResult> {
     const run = await this.startRun('type');
     try {
-      const objectId = await resolveTarget(
+      const resolved = await resolveTargetIdentity(
         this.transport,
         this.sessionId,
         ref,
         this.targetId,
         this.refStore,
       );
+      const { objectId } = resolved;
       let evidence: InputVerificationEvidence;
       try {
+        await this.validateRef(objectId, ref, resolved.ref, resolved.entry);
         await this.checkpoint(run, 'prepare_target');
         this.willDispatch();
         const before = await this.prepareElement(objectId, !!options.clear);

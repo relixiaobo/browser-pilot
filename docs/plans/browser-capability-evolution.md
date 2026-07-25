@@ -142,9 +142,19 @@ Preserve Browser Pilot advantages:
   - Covers: BR-14, AC-5.
   - Progress: machine Observations now invalidate on every listed lifecycle,
     including browser generation restoration; compatibility CLI refs remain.
-- [ ] **B2.4** Revalidate live nodes after same-document mutation and return
+- [x] **B2.4** Revalidate live nodes after same-document mutation and return
   `stale_ref` instead of acting on a changed semantic target.
   - Covers: BR-15, AC-8.
+  - Complete: ref-based click, type, and upload now resolve the original
+    backend node and revalidate its connected state plus the same AX-first,
+    DOM-fallback role/name identity used by Observation. Ordinary controls use
+    a targeted partial AX query; AX-name fallbacks and DOM-only controls use a
+    current DOMSnapshot and retain browser clickability checks. A removed node,
+    changed role/name, or lost DOM-only clickability returns the existing
+    `stale_ref` without a new protocol reason, browser identity, or semantic
+    text in the error. Only that ref fails: the Observation and its unchanged
+    refs remain usable. Broker tools and compatibility CLI actions inject the
+    same validator.
 
 ### B3. Make actions verifiable
 

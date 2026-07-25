@@ -9,6 +9,7 @@ import { type SnapshotResult } from './snapshot.js';
 import { CaptureService } from './services/capture-service.js';
 import { ActionService, type ClickTarget } from './services/action-service.js';
 import { CdpActionContinuityGuard } from './services/action-continuity.js';
+import { RefRevalidationService } from './services/ref-revalidation-service.js';
 import { ObservationService } from './services/observation-service.js';
 import { UploadService } from './services/upload-service.js';
 import { PageContentService } from './services/page-content-service.js';
@@ -140,6 +141,13 @@ function createCompatibilityActionService(
   targetId: string,
 ): ActionService {
   return new ActionService(transport, sessionId, targetId, {
+    refValidator: input => new RefRevalidationService(
+      transport,
+      sessionId,
+    ).validateResolved(input.objectId, input.entry, {
+      targetId,
+      ref: input.ref,
+    }),
     continuityFactory: action => CdpActionContinuityGuard.create(
       transport,
       sessionId,

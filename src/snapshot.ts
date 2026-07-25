@@ -18,6 +18,7 @@ import {
   type ObservationElement,
   type ObservationTruncationReason,
 } from './protocol/model.js';
+import { BrowserPilotError } from './protocol/errors.js';
 import type { Transport } from './transport.js';
 
 const INTERACTIVE_ROLES = new Set([
@@ -38,6 +39,39 @@ export interface RefEntry {
   backendNodeId: number;
   role: string;
   name: string;
+}
+
+export interface AxElementSemantic {
+  backendNodeId: number;
+  role: string;
+  name?: string;
+  properties: Record<string, unknown>;
+}
+
+export function axElementSemantic(node: unknown): AxElementSemantic | undefined {
+  if (!node || typeof node !== 'object') return undefined;
+  const candidate = node as Record<string, any>;
+  if (candidate.ignored === true) return undefined;
+  const role = candidate.role?.value;
+  const properties = Object.fromEntries(
+    (Array.isArray(candidate.properties) ? candidate.properties : [])
+      .filter((property: unknown): property is Record<string, any> => (
+        Boolean(property) && typeof property === 'object' &&
+        typeof (property as Record<string, unknown>).name === 'string'
+      ))
+      .map(property => [property.name, property.value?.value]),
+  );
+  const editable = properties.editable === 'richtext';
+  if (typeof role !== 'string' || (!INTERACTIVE_ROLES.has(role) && !editable)) return undefined;
+  const backendNodeId = Number(candidate.backendDOMNodeId);
+  if (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) return undefined;
+  const name = candidate.name?.value;
+  return {
+    backendNodeId,
+    role: String(editable && role === 'generic' ? 'textbox' : role).slice(0, 128),
+    ...(typeof name === 'string' && name ? { name } : {}),
+    properties,
+  };
 }
 
 interface StoredRefs {
@@ -257,7 +291,8 @@ export async function takeSnapshot(
     let childInsideDialog = insideDialog;
     if (!node.ignored) {
       const role = node.role?.value;
-      const props = Object.fromEntries(
+      const semantic = axElementSemantic(node);
+      const props = semantic?.properties ?? Object.fromEntries(
         (node.properties || []).map((p: any) => [p.name, p.value?.value]),
       );
       const isDialog = role === 'dialog' || role === 'alertdialog';
@@ -266,23 +301,18 @@ export async function takeSnapshot(
         childInsideDialog = true;
       }
 
-      // Detect contenteditable elements (role=generic with editable=richtext in AX tree)
-      const isEditable = props.editable === 'richtext';
-      const isInteractive = role && (INTERACTIVE_ROLES.has(role) || isEditable);
-
-      if (isInteractive && node.backendDOMNodeId !== undefined) {
-        const backendNodeId = Number(node.backendDOMNodeId);
+      if (semantic) {
+        const { backendNodeId } = semantic;
         if (Number.isSafeInteger(backendNodeId) && backendNodeId > 0) {
           axClaimedBackendNodeIds.add(backendNodeId);
           const domFact = domDocument?.byBackendNodeId.get(backendNodeId);
           const domState = domFact && domDocument ? domElementState(domDocument, domFact) : undefined;
-          const rawName = typeof node.name?.value === 'string' && node.name.value
-            ? node.name.value
+          const rawName = semantic.name !== undefined
+            ? semantic.name
             : domFact && domDocument ? domElementName(domDocument, domFact) : '';
           const rawValue = typeof node.value?.value === 'string'
             ? node.value.value
             : domFact && domDocument ? domElementValue(domDocument, domFact) : undefined;
-          const effectiveRole = String(isEditable && role === 'generic' ? 'textbox' : role).slice(0, 128);
           const checked = props.checked === true || props.checked === 'true'
             ? true
             : props.checked === false || props.checked === 'false'
@@ -294,7 +324,7 @@ export async function takeSnapshot(
           if (!blocked) {
             addElement({
               backendNodeId,
-              role: effectiveRole,
+              role: semantic.role,
               rawName,
               rawValue,
               checked,
@@ -383,6 +413,56 @@ export function formatTarget(target: string, targetId?: string, refStore: RefSto
   return target;
 }
 
+export interface ResolvedTargetIdentity {
+  objectId: string;
+  ref?: number;
+  entry?: RefEntry;
+}
+
+export async function resolveTargetIdentity(
+  transport: Transport,
+  sessionId: string,
+  target: string,
+  targetId?: string,
+  refStore: RefStore = legacyRefStore,
+): Promise<ResolvedTargetIdentity> {
+  if (isRef(target)) {
+    const refs = refStore.load(targetId);
+    const ref = parseInt(target, 10);
+    if (ref < 1 || ref > refs.length) {
+      throw new Error(`Ref [${ref}] not found. Run 'bp snapshot' to refresh.`);
+    }
+    const entry = refs[ref - 1];
+    let object: unknown;
+    try {
+      ({ object } = await transport.send('DOM.resolveNode', {
+        backendNodeId: entry.backendNodeId,
+      }, sessionId));
+    } catch (cause) {
+      if (cause instanceof BrowserPilotError && cause.code === 'browser_disconnected') throw cause;
+      throw new BrowserPilotError('stale_ref', 'Ref no longer resolves to the observed element', {
+        context: { ...(targetId ? { targetId } : {}), ref },
+        cause,
+      });
+    }
+    const objectId = object && typeof object === 'object'
+      ? (object as Record<string, unknown>).objectId
+      : undefined;
+    if (typeof objectId !== 'string' || !objectId) {
+      throw new BrowserPilotError('stale_ref', 'Ref no longer resolves to the observed element', {
+        context: { ...(targetId ? { targetId } : {}), ref },
+      });
+    }
+    return { objectId, ref, entry };
+  }
+
+  const { result } = await transport.send('Runtime.evaluate', {
+    expression: `document.querySelector(${JSON.stringify(target)})`,
+  }, sessionId);
+  if (!result.objectId) throw new Error(`Element not found: ${target}`);
+  return { objectId: result.objectId };
+}
+
 export async function resolveTarget(
   transport: Transport,
   sessionId: string,
@@ -390,21 +470,5 @@ export async function resolveTarget(
   targetId?: string,
   refStore: RefStore = legacyRefStore,
 ): Promise<string> {
-  if (isRef(target)) {
-    const refs = refStore.load(targetId);
-    const ref = parseInt(target, 10);
-    if (ref < 1 || ref > refs.length) {
-      throw new Error(`Ref [${ref}] not found. Run 'bp snapshot' to refresh.`);
-    }
-    const { object } = await transport.send('DOM.resolveNode', {
-      backendNodeId: refs[ref - 1].backendNodeId,
-    }, sessionId);
-    return object.objectId;
-  }
-
-  const { result } = await transport.send('Runtime.evaluate', {
-    expression: `document.querySelector(${JSON.stringify(target)})`,
-  }, sessionId);
-  if (!result.objectId) throw new Error(`Element not found: ${target}`);
-  return result.objectId;
+  return (await resolveTargetIdentity(transport, sessionId, target, targetId, refStore)).objectId;
 }
