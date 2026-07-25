@@ -312,14 +312,18 @@ Preserve Browser Pilot advantages:
     covers all eleven Observation invalidation reasons and asserts the typed
     owner-visible `stale_ref` result. Expiry now preserves its `expired` reason
     for the owning context while remaining opaque across Workspace boundaries.
-- [ ] **B6.2** Add action verification tests for obstruction, checkbox/radio,
+- [x] **B6.2** Add action verification tests for obstruction, checkbox/radio,
   controlled inputs, contenteditable, focus loss, popup, and navigation.
   - Covers: AC-8.
-  - Progress: isolated system-Chrome tests cover trusted controlled-input
+  - Complete: isolated system-Chrome tests cover trusted controlled-input
     events and rollback, canceled `beforeinput`, native email/number selection,
     nested contenteditable replacement/append, blocked fields, special value
-    controls, Shadow DOM readback, keyboard clear, press effects, upload
-    readback, public loader replacement, and real-Chrome composite focus loss.
+    controls, native checkbox and radio click success plus prevented-default
+    mismatch, Shadow DOM readback, keyboard clear, press effects, upload
+    readback, real obstruction, and composite focus loss. Public tool-surface
+    tests verify typed obstruction failure, loader replacement cancellation,
+    and merged navigation, Document, dialog, and popup evidence for click and
+    press actions.
 - [ ] **B6.3** Add real-site canaries that report drift without making release
   tests depend on third-party availability.
   - Covers: FR-8.

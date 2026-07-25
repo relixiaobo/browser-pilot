@@ -53,7 +53,12 @@ function findNodeById(node, id) {
   return undefined;
 }
 
-async function createRefHarness(html, id, readbackDelayMs = 40) {
+async function createRefHarness(
+  html,
+  id,
+  readbackDelayMs = 40,
+  ref = { role: 'textbox', name: id },
+) {
   const page = await browser.newPage();
   await page.setContent(html);
   const client = await page.context().newCDPSession(page);
@@ -62,7 +67,7 @@ async function createRefHarness(html, id, readbackDelayMs = 40) {
   assert.ok(node?.backendNodeId, `Expected a backend node for #${id}`);
 
   const refs = new MemoryRefStore();
-  refs.save('target:editable', [{ backendNodeId: node.backendNodeId, role: 'textbox', name: id }]);
+  refs.save('target:editable', [{ backendNodeId: node.backendNodeId, ...ref }]);
   const transport = new CdpTransport(client);
   const service = new ActionService(transport, 'session:editable', 'target:editable', {
     refStore: refs,
@@ -308,6 +313,47 @@ test('press evidence observes native checked and focus changes', async () => {
     assert.equal(await page.evaluate(() => document.activeElement?.id), 'next');
   } finally {
     await page.close();
+  }
+});
+
+test('click evidence verifies native checkbox and radio state transitions', async () => {
+  for (const type of ['checkbox', 'radio']) {
+    const accepted = await createRefHarness(
+      `<input id="control" type="${type}" name="choice">`,
+      'control',
+      20,
+      { role: type, name: `Native ${type}` },
+    );
+    try {
+      const result = await accepted.service.click({ kind: 'ref', ref: '1' });
+      assert.equal(result.evidence.action, 'click');
+      assert.equal(result.evidence.status, 'verified');
+      assert.equal(result.evidence.kind, type);
+      assert.equal(result.evidence.checked, true);
+      assert.ok(result.evidence.effects.includes('checked_changed'));
+      assert.equal(await accepted.page.locator('#control').isChecked(), true);
+    } finally {
+      await accepted.page.close();
+    }
+
+    const prevented = await createRefHarness(
+      `<input id="control" type="${type}" name="choice">
+       <script>control.addEventListener('click', event => event.preventDefault())</script>`,
+      'control',
+      20,
+      { role: type, name: `Prevented ${type}` },
+    );
+    try {
+      const result = await prevented.service.click({ kind: 'ref', ref: '1' });
+      assert.equal(result.evidence.action, 'click');
+      assert.equal(result.evidence.status, 'mismatch');
+      assert.equal(result.evidence.kind, type);
+      assert.equal(result.evidence.checked, false);
+      assert.equal(result.evidence.reason, 'expected_state_unchanged');
+      assert.equal(await prevented.page.locator('#control').isChecked(), false);
+    } finally {
+      await prevented.page.close();
+    }
   }
 });
 
