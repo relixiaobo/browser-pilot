@@ -150,17 +150,20 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   - Covers: FR-5, NFR-2, NFR-5.
   - Complete: Workspace, Lease, target assignment, Command, idempotency, and
     per-Workspace event stores are bounded and live in daemon memory.
-- [ ] **A3.2** Implement heartbeat, expiry, release, crash recovery, and
+- [x] **A3.2** Implement heartbeat, expiry, release, crash recovery, and
   idempotent cleanup for Workspaces and Leases.
   - Covers: AC-5, NFR-5.
   - Broker restart invalidates transient state; clients initialize, list, and
     observe again. Do not recover stale browser state from disk.
-  - Progress: Lease heartbeat/expiry/release, EOF cleanup, idle Connection and
+  - Complete: Lease heartbeat/expiry/release, EOF cleanup, idle Connection and
     Workspace reclamation, and idempotent Workspace release are implemented.
     Target, auth, network, frame, Observation, Artifact, and partial download
     cleanup is connected. Browser connection loss now rejects tools, invalidates
     sessions/refs, rediscovers the selected profile, and advances generation on
-    restoration. Broker-process crash cleanup of browser-owned targets remains.
+    restoration. A private child janitor creates managed targets over an
+    independent CDP connection, tracks verified popup descendants, and closes
+    them on daemon-pipe EOF, including `SIGKILL`, without persisting target IDs
+    or grouping by browser window. Process-level tests prove user tabs survive.
 - [x] **A3.3** Implement command accepted/dispatched/completed,
   `unknown_outcome`, deadline, cancellation, and duplicate-call behavior.
   - Covers: BR-8 through BR-12, AC-5.

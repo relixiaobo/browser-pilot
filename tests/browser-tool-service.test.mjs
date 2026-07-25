@@ -432,11 +432,19 @@ test('production tools/list exposes only fully wired Browser tools', async () =>
 
 test('tools/call lists user tabs, creates a managed target, and preserves user tabs on release', async () => {
   const transport = new BrowserFixtureTransport();
+  const managedTargetCreates = [];
   const runtime = new MemoryBrokerRuntime({
     serviceVersion: '1.0.0',
     brokerProcessIdentity: 'broker:test',
     browsers: [binding],
-    toolExecutor: new BrowserToolService(transport, binding),
+    toolExecutor: new BrowserToolService(transport, binding, {
+      managedTargets: {
+        async createTarget(params) {
+          managedTargetCreates.push(params);
+          return transport.send('Target.createTarget', params);
+        },
+      },
+    }),
   });
   const client = await createClient(runtime, 'bridge:tabs', 'com.example.agent', 'instance:tabs');
 
@@ -453,6 +461,7 @@ test('tools/call lists user tabs, creates a managed target, and preserves user t
   assert.equal(opened.url, 'https://managed.test/task');
   assert.equal(opened.elements[0].name, 'Submit');
   assert.match(opened.observationId, /^observation:/);
+  assert.deepEqual(managedTargetCreates, [{ url: 'about:blank', newWindow: true }]);
 
   const listed = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
   assert.deepEqual(listed.targets.map(target => target.origin).sort(), ['managed', 'user_tab']);

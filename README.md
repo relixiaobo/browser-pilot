@@ -118,7 +118,10 @@ dispatch, event replay, protected Artifacts, and protocol 1.1 transport limit
 negotiation are implemented. Browser disconnect/reconnect handling, scoped
 download Artifacts, Workspace resource isolation, and typed watchdog events for
 stalled navigation, selected-frame detach, pending dialogs, and repeated
-browser-observable no-progress actions are also implemented.
+browser-observable no-progress actions are also implemented. An internal
+managed-target janitor owns Broker-created tabs through a separate CDP
+connection and closes only those tabs and their managed popup descendants if
+the daemon exits or crashes; it does not persist target IDs or close user tabs.
 Embedded products should still use the documented release gate while multi-browser
 discovery and browser-capability conformance work remain in progress.
 

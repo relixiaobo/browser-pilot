@@ -65,6 +65,10 @@ import { MemoryObservationStore, type StoredObservation } from './observation-st
 import { ObservationService } from './observation-service.js';
 import { PageContentService } from './page-content-service.js';
 import { RefRevalidationService } from './ref-revalidation-service.js';
+import {
+  TransportManagedTargetLifecycle,
+  type ManagedTargetLifecycle,
+} from './managed-target-lifecycle.js';
 import { TargetInventoryService, type TargetInventoryContext } from './target-inventory-service.js';
 import { UploadService, type UploadVerificationEvidence } from './upload-service.js';
 import {
@@ -241,6 +245,7 @@ function refsChanged(before: StoredObservation, after: StoredObservation): boole
 export interface BrowserToolServiceOptions {
   observations?: MemoryObservationStore;
   artifactStore?: ArtifactStore;
+  managedTargets?: ManagedTargetLifecycle;
   navigationTimeoutMs?: number;
   dialogTimeoutMs?: number;
   noProgressThreshold?: number;
@@ -270,6 +275,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly popupSignals: PopupSignal[] = [];
   private popupSequence = 0;
   private readonly artifactStore?: ArtifactStore;
+  private readonly managedTargets: ManagedTargetLifecycle;
   private readonly downloads?: DownloadController;
   private readonly network: WorkspaceNetworkController;
   private readonly watchdogs: BrowserWatchdogService;
@@ -284,6 +290,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   ) {
     this.observations = options.observations ?? new MemoryObservationStore();
     this.artifactStore = options.artifactStore;
+    this.managedTargets = options.managedTargets ?? new TransportManagedTargetLifecycle(transport);
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.navigationTimeoutMs) || this.navigationTimeoutMs <= 0) {
       throw new Error('navigationTimeoutMs must be a positive integer');
@@ -1252,7 +1259,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): Promise<ControlledTargetId> {
     const { managedTabSet } = this.requireWorkspaceContext(context);
     const windowId = this.managedWindowIds.get(managedTabSet.id);
-    const created = await this.transport.send('Target.createTarget', {
+    const created = await this.managedTargets.createTarget({
       url: 'about:blank',
       ...(windowId !== undefined ? { windowId } : { newWindow: true }),
     });

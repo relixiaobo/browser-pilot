@@ -25,6 +25,7 @@ export * from './controlled-target-registry.js';
 export * from './target-inventory-service.js';
 export * from './browser-target-catalog.js';
 export * from './browser-watchdog-service.js';
+export * from './managed-target-lifecycle.js';
 export * from './browser-tool-service.js';
 export { CompatibilityBrokerClient } from '../compatibility-broker-client.js';
 export { PageLoadTimeoutError } from '../session.js';

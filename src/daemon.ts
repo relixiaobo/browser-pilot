@@ -16,6 +16,7 @@ import { BrowserToolService } from './services/browser-tool-service.js';
 import { ArtifactStore } from './services/artifact-store.js';
 import { CompatibilityDialogService } from './services/compatibility-dialog-service.js';
 import { discoverChromeAtDataDir } from './chrome.js';
+import { ManagedTargetJanitorClient } from './managed-target-janitor-client.js';
 
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
@@ -175,7 +176,15 @@ async function main() {
     maxArtifactBytes: DEFAULT_PROTOCOL_LIMITS.maxArtifactBytes,
   });
   await artifactStore.initialize();
-  const browserTools = new BrowserToolService(cdp, browserBinding, { artifactStore });
+  const janitor = new ManagedTargetJanitorClient({
+    onLog: message => process.stderr.write(`Managed target cleanup: ${message}\n`),
+  });
+  await janitor.connect(initialWsUrl);
+  let janitorResetTask = Promise.resolve();
+  const browserTools = new BrowserToolService(cdp, browserBinding, {
+    artifactStore,
+    managedTargets: janitor,
+  });
   const compatibilityDialogs = new CompatibilityDialogService(
     cdp,
     sessionId => browserTools.ownsSession(sessionId),
@@ -225,6 +234,8 @@ async function main() {
       try {
         await cdp.connect(chrome.wsUrl);
         await cdp.send('Target.setDiscoverTargets', { discover: true });
+        await janitorResetTask;
+        await janitor.connect(chrome.wsUrl);
         currentWsUrl = chrome.wsUrl;
         broker.updateBrowserConnection(browserInstanceId, {
           state: 'connected',
@@ -241,6 +252,9 @@ async function main() {
   };
   cdp.onConnectionState(event => {
     if (event.state !== 'disconnected' || terminating) return;
+    janitorResetTask = janitor.browserDisconnected().catch(error => {
+      process.stderr.write(`Managed target cleanup reset error: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
     resetDisconnectedState();
     if (browserBinding.instance.state === 'connected') {
       try {
@@ -482,6 +496,7 @@ async function main() {
           clearInterval(leaseSweepTimer);
           broker.close();
           server.close();
+          await janitor.close();
           cdp.close();
           await artifactStore.clear().catch(() => {});
           cleanup();
@@ -602,6 +617,7 @@ async function main() {
     clearInterval(leaseSweepTimer);
     broker.close();
     server.close();
+    await janitor.close();
     cdp.close();
     await artifactStore.clear().catch(() => {});
     cleanup();

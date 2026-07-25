@@ -413,6 +413,13 @@ Workspaces are also reclaimed by bounded daemon sweeps. Releasing a Workspace
 will eventually close only its Broker-managed targets. It must never close a
 user tab merely because a client disconnected or a Workspace expired.
 
+The daemon also starts a private managed-target janitor with an independent CDP
+connection. It creates and tracks only Broker-managed targets and their managed
+popup descendants. Daemon EOF, including an ungraceful process exit, makes the
+janitor perform bounded cleanup without consulting disk or grouping tabs by
+browser window. This internal process is not a public SDK, tool, or transport;
+embedded clients still launch only `browser-pilot bridge --stdio`.
+
 The current lifecycle runtime uses finite limits for live Connections,
 per-Principal Workspaces, per-Connection Leases, and retained terminal records.
 It does not persist target mappings, refs, cookies, credentials, network bodies,

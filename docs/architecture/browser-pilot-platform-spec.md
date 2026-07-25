@@ -546,6 +546,17 @@ Only installation identity, browser preference, Broker locator/version data,
 and explicit user configuration may persist. DOM snapshots, refs, cookies,
 passwords, network bodies, and transient control state never persist.
 
+Broker-created targets cross one additional private ownership boundary. A
+janitor child process uses an independent root CDP connection to create and
+track only managed targets plus popup descendants with a verified managed
+opener chain. Its parent pipe is the liveness signal: daemon EOF, including
+`SIGKILL`, causes bounded descendant-first target cleanup. User targets are
+never adopted merely because they share a browser window. If the janitor exits
+while the daemon remains live, its replacement adopts the still-live IDs held
+in daemon memory. Browser disconnect clears that transient ownership before a
+new connection generation is exposed. No janitor method or raw target ID is
+part of the CLI or stdio protocol, and no ownership record is written to disk.
+
 ## Observation and Ref Semantics
 
 Observation v1 has these required public fields: `workspaceId`, `leaseId`,

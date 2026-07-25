@@ -11,6 +11,10 @@ export default defineConfig([
     format: ['esm'],
   },
   {
+    entry: ['src/managed-target-janitor.ts'],
+    format: ['esm'],
+  },
+  {
     entry: { protocol: 'src/protocol/index.ts' },
     format: ['esm'],
   },
