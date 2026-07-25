@@ -245,17 +245,17 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 
 ### A7. Agent-neutral integration kit
 
-- [ ] **A7.1** Publish the process adapter contract: launch, initialize,
+- [x] **A7.1** Publish the process adapter contract: launch, initialize,
   manifest registration, tool calls, event handling, Artifact conversion, and
   cleanup.
   - Covers: AC-2, AC-6.
-- [ ] **A7.2** Build a language-neutral conformance runner that treats the
+- [x] **A7.2** Build a language-neutral conformance runner that treats the
   executable as a black box.
   - Covers: FR-2 through FR-7.
 - [ ] **A7.3** Add Tenon and OpenClaw adapters as separate examples or consumer
   changes. Keep their lifecycle mapping out of Browser Pilot production code.
   - Covers: DEC-1, CON-3.
-- [ ] **A7.4** Update the Agent skill to teach direct one-shot use and embedded
+- [x] **A7.4** Update the Agent skill to teach direct one-shot use and embedded
   stdio use without assuming a particular Agent runtime.
   - Covers: FR-1, AC-1.
 

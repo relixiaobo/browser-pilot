@@ -426,3 +426,8 @@ and event replay.
 An embedding adapter should not ship against this work-in-progress bridge until
 multi-browser discovery, remaining browser capability families, and conformance
 coverage meet the release gate.
+
+Before shipping an adapter, run the black-box
+[stdio conformance suite](stdio-conformance.md) against the exact bundled launch
+command. The suite exercises only the public NDJSON protocol and creates no
+user-tab control state.

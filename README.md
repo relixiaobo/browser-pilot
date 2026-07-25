@@ -98,6 +98,7 @@ The approved architecture and execution plans are:
 - [Universal Agent integration plan](docs/plans/universal-agent-integration.md)
 - [Browser capability and reliability plan](docs/plans/browser-capability-evolution.md)
 - [Stdio bridge integration contract](docs/integration/stdio-bridge.md)
+- [Stdio black-box conformance suite](docs/integration/stdio-conformance.md)
 
 The public integration direction remains CLI-only: one-shot commands for direct
 Agent use and a persistent `bridge --stdio` mode for products that embed the
