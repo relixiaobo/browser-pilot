@@ -2,6 +2,17 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { REFS_FILE } from './paths.js';
 import { PAGE_INFO } from './page-scripts.js';
 import {
+  DOM_SNAPSHOT_CAPTURE_PARAMS,
+  domElementChecked,
+  domElementInsideDialog,
+  domElementName,
+  domElementRole,
+  domElementState,
+  domElementValue,
+  isDomOnlyCandidate,
+  parseDomSnapshot,
+} from './dom-snapshot.js';
+import {
   OBSERVATION_TRUNCATION_REASONS,
   OBSERVATION_V1_LIMITS,
   type ObservationElement,
@@ -153,21 +164,26 @@ export async function takeSnapshot(
     ? Math.min(Number(value), 32)
     : 0;
 
-  const { nodes } = await transport.send(
-    'Accessibility.getFullAXTree',
-    context.frameId ? { frameId: context.frameId } : {},
-    sessionId,
-  );
+  const [axSnapshot, rawDomSnapshot] = await Promise.all([
+    transport.send(
+      'Accessibility.getFullAXTree',
+      context.frameId ? { frameId: context.frameId } : {},
+      sessionId,
+    ),
+    transport.send('DOMSnapshot.captureSnapshot', DOM_SNAPSHOT_CAPTURE_PARAMS, sessionId),
+  ]);
+  const nodes = Array.isArray(axSnapshot.nodes) ? axSnapshot.nodes : [];
+  const domDocument = parseDomSnapshot(rawDomSnapshot).document(context.frameId);
 
   // Build tree using childIds ordering
   const map = new Map<string, any>();
   for (const n of nodes) map.set(n.nodeId, { ...n, children: [] as any[] });
-  let root: any = null;
+  const roots: any[] = [];
   for (const [, node] of map) {
     if (node.childIds) {
       node.children = node.childIds.map((id: string) => map.get(id)).filter(Boolean);
     }
-    if (!node.parentId) root = node;
+    if (!node.parentId) roots.push(node);
   }
 
   // Walk depth-first, collect interactive elements
@@ -178,9 +194,58 @@ export async function takeSnapshot(
   const filterRefs: number[] = [];
   let modalCount = 0;
   let eligibleCount = 0;
+  const axClaimedBackendNodeIds = new Set<number>();
+  const emittedBackendNodeIds = new Set<number>();
   let serializedBytes = Buffer.byteLength(JSON.stringify({ title, url, elements: [] }), 'utf8');
   let byteBudgetExhausted = serializedBytes > OBSERVATION_V1_LIMITS.maxSerializedBytes;
   if (byteBudgetExhausted) truncation.add('byte_limit');
+
+  function addElement(input: {
+    backendNodeId: number;
+    role: string;
+    rawName: string;
+    rawValue?: string;
+    checked?: boolean;
+    autocomplete?: string;
+    insideDialog: boolean;
+  }): void {
+    const effectiveRole = input.role.slice(0, 128);
+    const hasIdentity = input.rawName || input.rawValue || ALLOW_EMPTY_NAME.has(effectiveRole);
+    if (!hasIdentity || emittedBackendNodeIds.has(input.backendNodeId)) return;
+    eligibleCount += 1;
+    if (refs.length >= limit || byteBudgetExhausted) return;
+
+    const name = boundedText(input.rawName, OBSERVATION_V1_LIMITS.maxElementNameCharacters);
+    const value = input.rawValue === undefined
+      ? undefined
+      : boundedText(input.rawValue, OBSERVATION_V1_LIMITS.maxElementValueCharacters);
+    const el: SnapshotData['elements'][number] = { ref: refs.length + 1, role: effectiveRole, name };
+    if (value !== undefined && value !== '') el.value = value;
+    if (input.checked !== undefined) el.checked = input.checked;
+    const elementBytes = Buffer.byteLength(JSON.stringify(el), 'utf8') + 1;
+    if (serializedBytes + elementBytes > OBSERVATION_V1_LIMITS.maxSerializedBytes) {
+      byteBudgetExhausted = true;
+      truncation.add('byte_limit');
+      return;
+    }
+
+    serializedBytes += elementBytes;
+    emittedBackendNodeIds.add(input.backendNodeId);
+    refs.push({ backendNodeId: input.backendNodeId, role: effectiveRole, name });
+    elements.push(el);
+    const ref = el.ref;
+    const autocomplete = input.autocomplete?.trim().toLowerCase() ?? '';
+    if (
+      effectiveRole === 'combobox' &&
+      autocomplete !== '' && autocomplete !== 'none' &&
+      autocompleteRefs.length < 32
+    ) autocompleteRefs.push(ref);
+    if (input.insideDialog && modalRefs.length < 32) modalRefs.push(ref);
+    if (
+      filterRefs.length < 32 &&
+      /(^|[\s_:-])(filter|filters|sort|sorting|refine|refinement)([\s_:-]|$)|筛选|过滤|排序/i.test(name)
+    ) filterRefs.push(ref);
+  }
 
   function walk(node: any, insideDialog = false, depth = 0): void {
     if (!node) return;
@@ -206,46 +271,38 @@ export async function takeSnapshot(
       const isInteractive = role && (INTERACTIVE_ROLES.has(role) || isEditable);
 
       if (isInteractive && node.backendDOMNodeId !== undefined) {
-        const rawName = typeof node.name?.value === 'string' ? node.name.value : '';
-        const rawValue = typeof node.value?.value === 'string' ? node.value.value : undefined;
-        const effectiveRole = String(isEditable && role === 'generic' ? 'textbox' : role).slice(0, 128);
-
-        // Allow empty name for input-like roles and editables; require name/value for buttons/links
-        const hasIdentity = rawName || rawValue || ALLOW_EMPTY_NAME.has(effectiveRole) || isEditable;
-        if (!props.disabled && hasIdentity) {
-          eligibleCount += 1;
-        }
-        if (!props.disabled && hasIdentity && refs.length < limit && !byteBudgetExhausted) {
-          const name = boundedText(rawName, OBSERVATION_V1_LIMITS.maxElementNameCharacters);
-          const value = rawValue === undefined
-            ? undefined
-            : boundedText(rawValue, OBSERVATION_V1_LIMITS.maxElementValueCharacters);
-          const checked = props.checked === 'true' || props.checked === true ? true : undefined;
-          const el: SnapshotData['elements'][number] = { ref: refs.length + 1, role: effectiveRole, name };
-          if (value !== undefined && value !== '') el.value = value;
-          if (checked) el.checked = true;
-          const elementBytes = Buffer.byteLength(JSON.stringify(el), 'utf8') + 1;
-          if (serializedBytes + elementBytes > OBSERVATION_V1_LIMITS.maxSerializedBytes) {
-            byteBudgetExhausted = true;
-            truncation.add('byte_limit');
-          } else {
-            serializedBytes += elementBytes;
-            refs.push({ backendNodeId: node.backendDOMNodeId, role: effectiveRole, name });
-            elements.push(el);
-            const ref = el.ref;
-            const autocomplete = typeof props.autocomplete === 'string'
-              ? props.autocomplete.trim().toLowerCase()
-              : '';
-            if (
-              effectiveRole === 'combobox' &&
-              autocomplete !== '' && autocomplete !== 'none' &&
-              autocompleteRefs.length < 32
-            ) autocompleteRefs.push(ref);
-            if (childInsideDialog && modalRefs.length < 32) modalRefs.push(ref);
-            if (
-              filterRefs.length < 32 &&
-              /(^|[\s_:-])(filter|filters|sort|sorting|refine|refinement)([\s_:-]|$)|筛选|过滤|排序/i.test(name)
-            ) filterRefs.push(ref);
+        const backendNodeId = Number(node.backendDOMNodeId);
+        if (Number.isSafeInteger(backendNodeId) && backendNodeId > 0) {
+          axClaimedBackendNodeIds.add(backendNodeId);
+          const domFact = domDocument?.byBackendNodeId.get(backendNodeId);
+          const domState = domFact && domDocument ? domElementState(domDocument, domFact) : undefined;
+          const rawName = typeof node.name?.value === 'string' && node.name.value
+            ? node.name.value
+            : domFact && domDocument ? domElementName(domDocument, domFact) : '';
+          const rawValue = typeof node.value?.value === 'string'
+            ? node.value.value
+            : domFact && domDocument ? domElementValue(domDocument, domFact) : undefined;
+          const effectiveRole = String(isEditable && role === 'generic' ? 'textbox' : role).slice(0, 128);
+          const checked = props.checked === true || props.checked === 'true'
+            ? true
+            : props.checked === false || props.checked === 'false'
+              ? false
+              : domFact ? domElementChecked(domFact) : undefined;
+          const blocked = props.disabled === true || props.disabled === 'true' ||
+            props.readonly === true || props.readonly === 'true' ||
+            (domState !== undefined && (!domState.visible || domState.disabled || domState.readonly || domState.inert));
+          if (!blocked) {
+            addElement({
+              backendNodeId,
+              role: effectiveRole,
+              rawName,
+              rawValue,
+              checked,
+              autocomplete: typeof props.autocomplete === 'string'
+                ? props.autocomplete
+                : domFact?.attributes.get('autocomplete'),
+              insideDialog: childInsideDialog,
+            });
           }
         }
       }
@@ -255,7 +312,26 @@ export async function takeSnapshot(
     for (const child of node.children) walk(child, childInsideDialog, depth + 1);
   }
 
-  if (root) walk(root);
+  for (const root of roots) walk(root);
+
+  if (domDocument) {
+    for (const node of domDocument.nodes) {
+      if (axClaimedBackendNodeIds.has(node.backendNodeId) || !isDomOnlyCandidate(domDocument, node)) continue;
+      if (node.depth > OBSERVATION_V1_LIMITS.maxTreeDepth) {
+        truncation.add('depth_limit');
+        continue;
+      }
+      addElement({
+        backendNodeId: node.backendNodeId,
+        role: domElementRole(node),
+        rawName: domElementName(domDocument, node),
+        rawValue: domElementValue(domDocument, node),
+        checked: domElementChecked(node),
+        autocomplete: node.attributes.get('autocomplete'),
+        insideDialog: domElementInsideDialog(domDocument, node),
+      });
+    }
+  }
   refStore.save(targetId, refs);
 
   // Format text

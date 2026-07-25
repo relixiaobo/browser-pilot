@@ -16,13 +16,14 @@ function tool(name) {
   return TOOL_DEFINITIONS.find(definition => definition.name === name);
 }
 
-function snapshotTransport(pageInfo, nodes) {
+function snapshotTransport(pageInfo, nodes, domSnapshot = { documents: [], strings: [] }) {
   return {
     async send(method) {
       if (method === 'Runtime.evaluate') {
         return { result: { value: JSON.stringify(pageInfo) } };
       }
       if (method === 'Accessibility.getFullAXTree') return { nodes };
+      if (method === 'DOMSnapshot.captureSnapshot') return domSnapshot;
       throw new Error(`Unexpected CDP method: ${method}`);
     },
     close() {},
@@ -45,10 +46,96 @@ function axTree(elements) {
       role: { value: element.role ?? 'button' },
       name: { value: element.name },
       ...(element.value !== undefined ? { value: { value: element.value } } : {}),
-      properties: [],
+      properties: Object.entries(element.properties ?? {}).map(([name, value]) => ({
+        name,
+        value: { value },
+      })),
       backendDOMNodeId: index + 1,
     })),
   ];
+}
+
+function domSnapshotFixture(elements, frameId = 'frame:test') {
+  const strings = [];
+  const intern = value => {
+    const normalized = String(value);
+    const existing = strings.indexOf(normalized);
+    if (existing >= 0) return existing;
+    strings.push(normalized);
+    return strings.length - 1;
+  };
+  const nodes = {
+    parentIndex: [],
+    nodeType: [],
+    nodeName: [],
+    nodeValue: [],
+    backendNodeId: [],
+    attributes: [],
+    isClickable: { index: [] },
+    inputValue: { index: [], value: [] },
+    inputChecked: { index: [] },
+    optionSelected: { index: [] },
+    contentDocumentIndex: { index: [], value: [] },
+  };
+  const layout = { nodeIndex: [], styles: [], bounds: [], paintOrders: [] };
+  const append = ({ parentIndex, nodeType, nodeName, nodeValue = '', backendNodeId, attributes = {} }) => {
+    const nodeIndex = nodes.backendNodeId.length;
+    nodes.parentIndex.push(parentIndex);
+    nodes.nodeType.push(nodeType);
+    nodes.nodeName.push(intern(nodeName));
+    nodes.nodeValue.push(intern(nodeValue));
+    nodes.backendNodeId.push(backendNodeId);
+    nodes.attributes.push(Object.entries(attributes).flatMap(([name, value]) => [intern(name), intern(value)]));
+    return nodeIndex;
+  };
+  append({ parentIndex: -1, nodeType: 9, nodeName: '#document', backendNodeId: 9_000 });
+  append({ parentIndex: 0, nodeType: 1, nodeName: 'HTML', backendNodeId: 9_001 });
+  append({ parentIndex: 1, nodeType: 1, nodeName: 'BODY', backendNodeId: 9_002 });
+  for (const element of elements) {
+    const nodeIndex = append({
+      parentIndex: 2,
+      nodeType: 1,
+      nodeName: element.nodeName ?? 'DIV',
+      backendNodeId: element.backendNodeId,
+      attributes: element.attributes,
+    });
+    if (element.text) {
+      append({
+        parentIndex: nodeIndex,
+        nodeType: 3,
+        nodeName: '#text',
+        nodeValue: element.text,
+        backendNodeId: element.backendNodeId + 10_000,
+      });
+    }
+    if (element.clickable) nodes.isClickable.index.push(nodeIndex);
+    if (element.inputValue !== undefined) {
+      nodes.inputValue.index.push(nodeIndex);
+      nodes.inputValue.value.push(intern(element.inputValue));
+    }
+    if (element.checked) nodes.inputChecked.index.push(nodeIndex);
+    if (element.layout !== false) {
+      layout.nodeIndex.push(nodeIndex);
+      layout.styles.push([
+        intern(element.display ?? 'block'),
+        intern(element.visibility ?? 'visible'),
+        intern(element.opacity ?? '1'),
+        intern(element.pointerEvents ?? 'auto'),
+      ]);
+      layout.bounds.push(element.bounds ?? [10, 10, 120, 30]);
+      layout.paintOrders.push(layout.paintOrders.length + 1);
+    }
+  }
+  return {
+    strings,
+    documents: [{
+      frameId,
+      documentURL: intern('https://example.test/fusion'),
+      baseURL: intern('https://example.test/'),
+      nodes,
+      layout,
+    }],
+  };
 }
 
 function storeInput(overrides = {}) {
@@ -157,6 +244,47 @@ test('Observation snapshots enforce a UTF-8 serialized byte budget', async () =>
   assert.ok(result.data.elements.length > 0 && result.data.elements.length < elements.length);
   assert.ok(result.truncationReasons.includes('byte_limit'));
   assert.ok(Buffer.byteLength(JSON.stringify(result.data), 'utf8') <= OBSERVATION_V1_LIMITS.maxSerializedBytes);
+});
+
+test('Observation fuses AX semantics with DOM layout, state, names, and form values', async () => {
+  const nodes = axTree([
+    { name: 'AX Primary', role: 'button' },
+    { name: 'Hidden AX', role: 'button' },
+    { name: 'Disabled AX', role: 'button' },
+    { name: 'Consent', role: 'checkbox', properties: { checked: false } },
+    { name: 'Email', role: 'textbox' },
+  ]).map(node => {
+    if (!node.backendDOMNodeId) return node;
+    return { ...node, backendDOMNodeId: node.backendDOMNodeId + 100 };
+  });
+  const domSnapshot = domSnapshotFixture([
+    { backendNodeId: 101, attributes: { 'aria-label': 'DOM fallback' }, clickable: true },
+    { backendNodeId: 102, text: 'Hidden AX', clickable: true, layout: false },
+    { backendNodeId: 103, text: 'Disabled AX', clickable: true, attributes: { disabled: '' } },
+    { backendNodeId: 104, nodeName: 'INPUT', attributes: { type: 'checkbox' }, clickable: true },
+    { backendNodeId: 105, nodeName: 'INPUT', attributes: { type: 'email' }, inputValue: 'person@example.test' },
+    { backendNodeId: 200, text: 'DOM Command', clickable: true, attributes: { 'data-action': 'command' } },
+    { backendNodeId: 201, text: 'Hidden DOM Command', clickable: true, attributes: { hidden: '' } },
+  ]);
+  const refs = new MemoryRefStore();
+  const result = await new ObservationService(
+    snapshotTransport(
+      { title: 'Fusion', url: 'https://example.test/fusion', guidance: {} },
+      nodes,
+      domSnapshot,
+    ),
+    'session:fusion',
+    'target:fusion',
+    { refStore: refs },
+  ).observe(20);
+
+  assert.deepEqual(result.data.elements, [
+    { ref: 1, role: 'button', name: 'AX Primary' },
+    { ref: 2, role: 'checkbox', name: 'Consent', checked: false },
+    { ref: 3, role: 'textbox', name: 'Email', value: 'person@example.test' },
+    { ref: 4, role: 'button', name: 'DOM Command' },
+  ]);
+  assert.deepEqual(refs.load('target:fusion').map(ref => ref.backendNodeId), [101, 104, 105, 200]);
 });
 
 test('Observation store validates full internal identity and reports same-context invalidation reasons', () => {

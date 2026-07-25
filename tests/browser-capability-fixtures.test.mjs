@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test, { after, before } from 'node:test';
 import { chromium } from 'playwright';
+import { MemoryRefStore, ObservationService } from '../dist/services.js';
 import {
   BROWSER_CAPABILITY_FIXTURES,
   REQUIRED_BROWSER_CAPABILITY_SCENARIOS,
@@ -46,6 +47,27 @@ function closeServer(server) {
 
 function axValue(node, key) {
   return node[key]?.value;
+}
+
+function observeWithCdp(client, targetId) {
+  const transport = {
+    send(method, params) {
+      return client.send(method, params);
+    },
+    close() {},
+  };
+  return new ObservationService(transport, 'isolated-session', targetId, {
+    refStore: new MemoryRefStore(),
+  }).observe(50);
+}
+
+async function observePage(page, targetId) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    return await observeWithCdp(client, targetId);
+  } finally {
+    await client.detach();
+  }
 }
 
 before(async () => {
@@ -94,6 +116,10 @@ test('AX-only and DOM-only fixtures expose deliberately different browser signal
     let client = await page.context().newCDPSession(page);
     let tree = await client.send('Accessibility.getFullAXTree');
     assert.ok(tree.nodes.some(node => axValue(node, 'role') === 'button' && axValue(node, 'name') === 'AX Command'));
+    const axObservation = await observeWithCdp(client, 'ax-only');
+    assert.ok(axObservation.data.elements.some(element => (
+      element.role === 'button' && element.name === 'AX Command'
+    )));
     await client.detach();
 
     await page.goto(`${primaryOrigin}/capability/dom-only`);
@@ -101,6 +127,12 @@ test('AX-only and DOM-only fixtures expose deliberately different browser signal
     client = await page.context().newCDPSession(page);
     tree = await client.send('Accessibility.getFullAXTree');
     assert.equal(tree.nodes.some(node => axValue(node, 'role') === 'button' && axValue(node, 'name') === 'DOM Command'), false);
+    const domObservation = await observeWithCdp(client, 'dom-only');
+    assert.ok(domObservation.data.elements.some(element => (
+      element.role === 'button' && element.name === 'DOM Command'
+    )));
+    assert.equal(domObservation.data.elements.some(element => element.name === 'Hidden DOM Command'), false);
+    assert.equal(domObservation.data.elements.some(element => element.name === 'Disabled DOM Command'), false);
     await client.detach();
   } finally {
     await page.close();
@@ -111,6 +143,8 @@ test('shadow, overlay, contenteditable, and controlled-input fixtures preserve t
   const page = await browser.newPage();
   try {
     await page.goto(`${primaryOrigin}/capability/shadow-dom`);
+    const shadowObservation = await observePage(page, 'shadow-dom');
+    assert.ok(shadowObservation.data.elements.some(element => element.name === 'Shadow Command'));
     await page.locator('#shadow-host').getByRole('button', { name: 'Shadow Command' }).click();
     assert.equal(await page.evaluate(() => window.shadowActivated), true);
 
@@ -127,12 +161,20 @@ test('shadow, overlay, contenteditable, and controlled-input fixtures preserve t
     assert.equal(await editor.getAttribute('contenteditable'), 'true');
     await editor.fill('replacement');
     assert.equal(await editor.innerText(), 'replacement');
+    const editorObservation = await observePage(page, 'contenteditable');
+    assert.ok(editorObservation.data.elements.some(element => (
+      element.role === 'textbox' && element.name === 'Fixture editor' && element.value === 'replacement'
+    )));
 
     await page.goto(`${primaryOrigin}/capability/react-controlled`);
     await page.getByRole('textbox', { name: 'Controlled field' }).fill('mutation');
     await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
     assert.equal(await page.locator('#controlled').inputValue(), 'fixed');
     assert.equal(await page.evaluate(() => window.fixtureRollbackCount), 1);
+    const controlledObservation = await observePage(page, 'react-controlled');
+    assert.ok(controlledObservation.data.elements.some(element => (
+      element.role === 'textbox' && element.name === 'Controlled field' && element.value === 'fixed'
+    )));
   } finally {
     await page.close();
   }

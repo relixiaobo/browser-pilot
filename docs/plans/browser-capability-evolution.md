@@ -79,12 +79,26 @@ Preserve Browser Pilot advantages:
 
 ### B1. Build the observation engine
 
-- [ ] **B1.1** Collect DOMSnapshot layout and frame metadata alongside AX
+- [x] **B1.1** Collect DOMSnapshot layout and frame metadata alongside AX
   nodes, without exposing raw page dumps to the Agent.
   - Covers: BR-16, CON-5.
-- [ ] **B1.2** Fuse AX semantics, DOM attributes, layout bounds, visibility,
+  - Complete: every Observation now captures DOMSnapshot documents, shared
+    strings, frame/document relationships, backend-node identity, attributes,
+    browser clickable state, form state, computed display/visibility/opacity/
+    pointer behavior, layout bounds, and paint order in an ephemeral internal
+    index. Raw DOMSnapshot data, attributes, selectors, layout, and CDP IDs are
+    never returned or persisted.
+- [x] **B1.2** Fuse AX semantics, DOM attributes, layout bounds, visibility,
   editability, and form state into normalized observable elements.
   - Covers: AC-8.
+  - Complete: AX role/name/value remain authoritative while DOM facts fill
+    missing names, values, checked state, autocomplete state, and modal
+    ancestry. Visible browser-marked clickable nodes absent from the semantic
+    AX surface become bounded DOM-only controls in stable document order.
+    Hidden, zero-layout, disabled, readonly, inert, and duplicate candidates
+    are excluded. Unit and isolated system-Chrome fixtures cover AX-only,
+    DOM-only, hidden/disabled controls, Shadow DOM, contenteditable, and
+    controlled-input readback without changing Observation v1 fields.
 - [ ] **B1.3** Preserve Shadow DOM traversal and add session-aware frame/OOPIF
   traversal with deterministic ordering.
   - Covers: AC-8.

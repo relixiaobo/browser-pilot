@@ -25,9 +25,13 @@ export const BROWSER_CAPABILITY_FIXTURES = Object.freeze([
     signals: ['dom_click_handler', 'no_interactive_semantics'],
     html: () => `<title>DOM-only interaction</title>
 <div id="dom-control" data-action="command">DOM Command</div>
+<div id="hidden-dom-control" hidden>Hidden DOM Command</div>
+<div id="disabled-dom-control" aria-disabled="true">Disabled DOM Command</div>
 <script>
   window.domActivated = false;
   document.getElementById('dom-control').addEventListener('click', () => { window.domActivated = true; });
+  document.getElementById('hidden-dom-control').addEventListener('click', () => {});
+  document.getElementById('disabled-dom-control').addEventListener('click', () => {});
 </script>`,
   },
   {

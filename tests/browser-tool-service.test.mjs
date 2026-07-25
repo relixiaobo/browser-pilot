@@ -202,6 +202,7 @@ class BrowserFixtureTransport {
           ],
         };
       }
+      case 'DOMSnapshot.captureSnapshot': return { documents: [], strings: [] };
       case 'DOM.resolveNode': return { object: { objectId: `object:${params.backendNodeId}` } };
       case 'DOM.describeNode':
         if (String(params.objectId).startsWith('document:')) {

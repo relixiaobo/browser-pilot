@@ -57,6 +57,7 @@ test('ObservationService stores refs in the injected store', async () => {
         ],
       };
     }
+    if (method === 'DOMSnapshot.captureSnapshot') return { documents: [], strings: [] };
     throw new Error(`Unexpected method: ${method}`);
   });
 
