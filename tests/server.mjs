@@ -1,6 +1,7 @@
 // Fixture server for bp compatibility tests.
 // Serves Playwright-style fixture pages plus extra bp-specific pages.
 import http from 'node:http';
+import { renderBrowserCapabilityFixture } from './fixtures/browser-capability-matrix.mjs';
 
 const PORT = parseInt(process.argv[2] || '18274', 10);
 
@@ -358,7 +359,9 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const html = PAGES[path];
+  const html = PAGES[path] ?? renderBrowserCapabilityFixture(path, {
+    crossOrigin: `http://localhost:${PORT}`,
+  });
   if (html) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${html}</body></html>`);

@@ -47,10 +47,17 @@ Preserve Browser Pilot advantages:
 
 - [x] **B0.1** Record browser-use ideas to adopt, adapt, and reject.
   - Covers: FR-8, AC-8.
-- [ ] **B0.2** Build a fixture matrix for AX-only, DOM-only, shadow DOM,
+- [x] **B0.2** Build a fixture matrix for AX-only, DOM-only, shadow DOM,
   same-origin iframe, cross-origin/OOPIF, overlays, contenteditable, React
   controlled input, navigation, and document replacement.
   - Covers: AC-8.
+  - Complete: a reusable local fixture catalog defines every listed scenario
+    with bounded explicit signals and no third-party dependency. Isolated
+    system-Chrome tests verify AX-vs-DOM semantics, open Shadow DOM, overlay hit
+    testing, rich editing, asynchronous controlled-input rollback, same-origin
+    frames, a forced cross-origin OOPIF target, top-level navigation, and same-URL
+    Document replacement. The compatibility fixture server exposes the same
+    catalog for later public-surface regression tests.
 - [ ] **B0.3** Freeze Observation v1 public fields, internal node identity,
   invalidation reasons, limits, and truncation metadata with Workstream A.
   - Covers: BR-13 through BR-16, NFR-1.
