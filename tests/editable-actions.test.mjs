@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 import { chromium } from 'playwright';
-import { ActionService, MemoryRefStore } from '../dist/services.js';
+import { ActionService, MemoryRefStore, UploadService } from '../dist/services.js';
 
 let browser;
 
@@ -114,6 +117,7 @@ test('native editing drives controlled inputs with trusted events and detects ro
   try {
     const result = await rolledBack.service.type('1', '-rejected');
     assert.deepEqual(result.evidence, {
+      action: 'type',
       status: 'mismatch',
       kind: 'input',
       sensitive: false,
@@ -257,6 +261,85 @@ test('special value controls use input semantics without an early change event',
     ]);
   } finally {
     await harness.page.close();
+  }
+});
+
+test('press evidence observes native checked and focus changes', async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<input id="check" type="checkbox"><input id="next"><script>check.focus()</script>');
+    const client = await page.context().newCDPSession(page);
+    const service = new ActionService(
+      new CdpTransport(client),
+      'session:press',
+      'target:press',
+      {
+        readbackDelayMs: 20,
+        observationService: {
+          async observeAfterAction() { return observation; },
+          async locate() { return { x: 0, y: 0 }; },
+        },
+      },
+    );
+
+    const toggled = await service.press('Space');
+    assert.deepEqual(toggled.evidence, {
+      action: 'press',
+      status: 'verified',
+      kind: 'checkbox',
+      effects: ['checked_changed'],
+      sensitive: false,
+    });
+    assert.equal(await page.locator('#check').isChecked(), true);
+
+    const moved = await service.press('Tab');
+    assert.deepEqual(moved.evidence, {
+      action: 'press',
+      status: 'verified',
+      kind: 'input',
+      effects: ['focus_changed'],
+      sensitive: false,
+    });
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'next');
+  } finally {
+    await page.close();
+  }
+});
+
+test('upload evidence reads back the selected browser file', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'browser-pilot-upload-evidence-'));
+  const filePath = join(directory, 'resume.txt');
+  await writeFile(filePath, 'resume');
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<input id="upload" type="file">');
+    const client = await page.context().newCDPSession(page);
+    const { root } = await client.send('DOM.getDocument', { depth: -1, pierce: true });
+    const node = findNodeById(root, 'upload');
+    assert.ok(node?.backendNodeId);
+    const service = new UploadService(
+      new CdpTransport(client),
+      'session:upload',
+      { async observeAfterAction() { return observation; } },
+      { readbackDelayMs: 20 },
+    );
+
+    const result = await service.upload(filePath, { backendNodeId: node.backendNodeId });
+
+    assert.deepEqual(result.evidence, {
+      action: 'upload',
+      status: 'verified',
+      expectedFileCount: 1,
+      fileCount: 1,
+      nameMatched: true,
+    });
+    assert.deepEqual(
+      await page.evaluate(() => Array.from(document.querySelector('#upload').files, file => file.name)),
+      ['resume.txt'],
+    );
+  } finally {
+    await page.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

@@ -1,7 +1,9 @@
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import {
   GET_POINTER_TARGET_STATE,
+  GET_DEEP_ACTIVE_ELEMENT,
   PREPARE_EDITABLE_TARGET,
+  READ_ACTIVE_CONTROL_STATE,
   READ_ACTIVE_EDITABLE_STATE,
   READ_CLICK_TARGET_STATE,
   READ_EDITABLE_STATE,
@@ -51,6 +53,7 @@ export interface KeyboardOptions extends TypeOptions {
 }
 
 export interface InputVerificationEvidence {
+  action: 'type' | 'keyboard';
   status: 'verified' | 'mismatch' | 'unavailable';
   kind: 'input' | 'contenteditable' | 'unsupported';
   sensitive: boolean;
@@ -58,6 +61,36 @@ export interface InputVerificationEvidence {
   expectedLength?: number;
   afterLength?: number;
   reason?: 'active_element_not_readable' | 'value_mismatch';
+}
+
+export type PressEffect =
+  | 'value_changed'
+  | 'checked_changed'
+  | 'selected_changed'
+  | 'pressed_changed'
+  | 'expanded_changed'
+  | 'focus_changed'
+  | 'navigation'
+  | 'document_changed'
+  | 'dialog_opened'
+  | 'popup_opened';
+
+export type PressTargetKind =
+  | 'input'
+  | 'contenteditable'
+  | 'checkbox'
+  | 'radio'
+  | 'select'
+  | 'control'
+  | 'other';
+
+export interface PressVerificationEvidence {
+  action: 'press';
+  status: 'verified' | 'unavailable';
+  kind: PressTargetKind;
+  effects: PressEffect[];
+  sensitive: boolean;
+  reason?: 'target_unavailable' | 'no_observable_effect';
 }
 
 export type ClickEffect =
@@ -104,6 +137,11 @@ export interface InputActionResult {
   evidence: InputVerificationEvidence;
 }
 
+export interface PressActionResult {
+  observation: SnapshotResult;
+  evidence: PressVerificationEvidence;
+}
+
 interface EditableState {
   kind: 'input' | 'contenteditable' | 'unsupported';
   value: string;
@@ -113,6 +151,17 @@ interface EditableState {
   editMode?: 'text' | 'value';
   selectionMode?: 'range' | 'select';
   reason?: EditableBlockReason;
+}
+
+interface PressTargetState {
+  focusToken?: string;
+  kind: PressTargetKind;
+  sensitive: boolean;
+  valueToken?: string;
+  selectedToken?: string;
+  checked?: boolean | 'mixed';
+  pressed?: boolean | 'mixed';
+  expanded?: boolean;
 }
 
 type EditableBlockReason =
@@ -132,6 +181,16 @@ const EDITABLE_BLOCK_REASONS: ReadonlySet<EditableBlockReason> = new Set([
   'unsupported_input_type',
   'unsupported_element',
   'selection_unavailable',
+]);
+
+const PRESS_TARGET_KINDS = new Set<PressTargetKind>([
+  'input',
+  'contenteditable',
+  'checkbox',
+  'radio',
+  'select',
+  'control',
+  'other',
 ]);
 
 type PointerTargetFailureReason =
@@ -338,9 +397,16 @@ function parseEditableState(value: unknown): EditableState {
   };
 }
 
-function inputEvidence(before: EditableState, after: EditableState, text: string, clear: boolean): InputVerificationEvidence {
+function inputEvidence(
+  action: InputVerificationEvidence['action'],
+  before: EditableState,
+  after: EditableState,
+  text: string,
+  clear: boolean,
+): InputVerificationEvidence {
   if (before.kind === 'unsupported' || after.kind === 'unsupported') {
     return {
+      action,
       status: 'unavailable',
       kind: 'unsupported',
       sensitive: false,
@@ -353,6 +419,7 @@ function inputEvidence(before: EditableState, after: EditableState, text: string
   const expected = clear ? insertion : before.value + insertion;
   const matched = after.value === expected;
   return {
+    action,
     status: matched ? 'verified' : 'mismatch',
     kind: after.kind,
     sensitive: before.sensitive || after.sensitive,
@@ -360,6 +427,90 @@ function inputEvidence(before: EditableState, after: EditableState, text: string
     expectedLength: expected.length,
     afterLength: after.value.length,
     ...(matched ? {} : { reason: 'value_mismatch' as const }),
+  };
+}
+
+function parsePressTargetState(value: unknown, focusToken?: string): PressTargetState {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid key verification state');
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !PRESS_TARGET_KINDS.has(record.kind as PressTargetKind) ||
+    typeof record.sensitive !== 'boolean' ||
+    (record.valueToken !== undefined && (typeof record.valueToken !== 'string' || record.valueToken.length > 64)) ||
+    (record.selectedToken !== undefined && (typeof record.selectedToken !== 'string' || record.selectedToken.length > 64)) ||
+    (record.checked !== undefined && typeof record.checked !== 'boolean' && record.checked !== 'mixed') ||
+    (record.pressed !== undefined && typeof record.pressed !== 'boolean' && record.pressed !== 'mixed') ||
+    (record.expanded !== undefined && typeof record.expanded !== 'boolean')
+  ) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid key verification state');
+  }
+  return {
+    ...(focusToken ? { focusToken } : {}),
+    kind: record.kind as PressTargetKind,
+    sensitive: record.sensitive,
+    ...(record.valueToken !== undefined ? { valueToken: record.valueToken } : {}),
+    ...(record.selectedToken !== undefined ? { selectedToken: record.selectedToken } : {}),
+    ...(record.checked !== undefined ? { checked: record.checked as PressTargetState['checked'] } : {}),
+    ...(record.pressed !== undefined ? { pressed: record.pressed as PressTargetState['pressed'] } : {}),
+    ...(record.expanded !== undefined ? { expanded: record.expanded } : {}),
+  };
+}
+
+function pressEvidence(before: PressTargetState, after?: PressTargetState): PressVerificationEvidence {
+  if (!after) {
+    return {
+      action: 'press',
+      status: 'unavailable',
+      kind: before.kind,
+      effects: [],
+      sensitive: before.sensitive,
+      reason: 'target_unavailable',
+    };
+  }
+  const effects: PressEffect[] = [];
+  const identitiesReadable = before.focusToken !== undefined && after.focusToken !== undefined;
+  const sameTarget = identitiesReadable && before.focusToken === after.focusToken;
+  if (
+    sameTarget && before.valueToken !== after.valueToken &&
+    (before.valueToken !== undefined || after.valueToken !== undefined)
+  ) {
+    effects.push('value_changed');
+  }
+  if (
+    sameTarget && before.checked !== after.checked &&
+    (before.checked !== undefined || after.checked !== undefined)
+  ) {
+    effects.push('checked_changed');
+  }
+  if (
+    sameTarget &&
+    before.selectedToken !== after.selectedToken &&
+    (before.selectedToken !== undefined || after.selectedToken !== undefined)
+  ) {
+    effects.push('selected_changed');
+  }
+  if (
+    sameTarget && before.pressed !== after.pressed &&
+    (before.pressed !== undefined || after.pressed !== undefined)
+  ) {
+    effects.push('pressed_changed');
+  }
+  if (
+    sameTarget && before.expanded !== after.expanded &&
+    (before.expanded !== undefined || after.expanded !== undefined)
+  ) {
+    effects.push('expanded_changed');
+  }
+  if (identitiesReadable && !sameTarget) effects.push('focus_changed');
+  return {
+    action: 'press',
+    status: effects.length > 0 ? 'verified' : 'unavailable',
+    kind: after.kind,
+    effects,
+    sensitive: before.sensitive || after.sensitive,
+    ...(effects.length > 0 ? {} : { reason: 'no_observable_effect' as const }),
   };
 }
 
@@ -424,6 +575,7 @@ export class ActionService {
         const state = parsePointerTargetState(result.value);
         if (state.status === 'blocked') {
           const context = {
+            action: 'click',
             targetId: this.targetId,
             ref: target.ref,
             reason: state.reason,
@@ -466,9 +618,22 @@ export class ActionService {
     };
   }
 
-  async press(key: string, observationLimit = 50): Promise<SnapshotResult> {
+  async press(key: string, observationLimit = 50): Promise<PressActionResult> {
+    const before = await this.readActiveControlState();
     await this.input.press(key);
-    return this.observations.observeAfterAction(observationLimit);
+    if (this.readbackDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
+    }
+    let after: PressTargetState | undefined;
+    try {
+      after = await this.readActiveControlState();
+    } catch (error) {
+      if (error instanceof BrowserPilotError && error.code === 'browser_disconnected') throw error;
+    }
+    return {
+      observation: await this.observations.observeAfterAction(observationLimit),
+      evidence: pressEvidence(before, after),
+    };
   }
 
   async type(ref: string, text: string, options: TypeOptions = {}): Promise<InputActionResult> {
@@ -506,7 +671,7 @@ export class ActionService {
         await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
       }
       const after = await this.readElementState(objectId);
-      evidence = inputEvidence(before, after, text, !!options.clear);
+      evidence = inputEvidence('type', before, after, text, !!options.clear);
       this.requireVerification(evidence, options.verification);
       if (options.submit) await this.input.press('Enter');
     } finally {
@@ -535,7 +700,7 @@ export class ActionService {
     await this.input.typeText(text, options.delayMs);
     if (this.readbackDelayMs > 0) await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
     const after = await this.readActiveState();
-    const evidence = inputEvidence(before, after, text, !!options.clear);
+    const evidence = inputEvidence('keyboard', before, after, text, !!options.clear);
     this.requireVerification(evidence, options.verification);
     if (options.submit) await this.input.press('Enter');
 
@@ -574,6 +739,31 @@ export class ActionService {
     return parseEditableState(result.value);
   }
 
+  private async readActiveControlState(): Promise<PressTargetState> {
+    const params: Record<string, unknown> = {
+      expression: GET_DEEP_ACTIVE_ELEMENT,
+    };
+    if (this.executionContextId) params.contextId = this.executionContextId;
+    const { result: active } = await this.transport.send('Runtime.evaluate', params, this.sessionId);
+    if (!active.objectId) return { kind: 'other', sensitive: false };
+    try {
+      const { node } = await this.transport.send('DOM.describeNode', {
+        objectId: active.objectId,
+      }, this.sessionId);
+      if (!Number.isSafeInteger(node?.backendNodeId) || Number(node.backendNodeId) < 1) {
+        throw new BrowserPilotError('internal_error', 'Chrome returned invalid focused node identity');
+      }
+      const { result } = await this.transport.send('Runtime.callFunctionOn', {
+        objectId: active.objectId,
+        functionDeclaration: READ_ACTIVE_CONTROL_STATE,
+        returnByValue: true,
+      }, this.sessionId);
+      return parsePressTargetState(result.value, `backend:${node.backendNodeId}`);
+    } finally {
+      await this.transport.send('Runtime.releaseObject', { objectId: active.objectId }, this.sessionId).catch(() => {});
+    }
+  }
+
   private requireVerification(
     evidence: InputVerificationEvidence,
     verification: TypeOptions['verification'],
@@ -582,6 +772,7 @@ export class ActionService {
     throw new BrowserPilotError('action_not_verified', 'Input value did not match the requested result', {
       retryable: true,
       context: {
+        action: evidence.action,
         status: evidence.status,
         kind: evidence.kind,
         sensitive: evidence.sensitive,
@@ -596,6 +787,7 @@ export class ActionService {
   private requireEditableTarget(state: EditableState, ref: string): void {
     if (state.editable) return;
     const context = {
+      action: 'type',
       targetId: this.targetId,
       ref,
       kind: state.kind,

@@ -300,3 +300,60 @@ test('browser.click result schema accepts bounded typed click evidence', () => {
     error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
   );
 });
+
+test('action result schemas require discriminated input, press, and upload evidence', () => {
+  const base = {
+    workspaceId: 'workspace:123',
+    leaseId: 'lease:123',
+    targetId: 'target:123',
+    url: 'https://example.com/form',
+    observationId: 'observation:123',
+    title: 'Form',
+    elements: [],
+    truncated: false,
+    truncationReasons: [],
+  };
+  const typed = {
+    ...base,
+    evidence: {
+      action: 'type',
+      status: 'verified',
+      kind: 'input',
+      sensitive: false,
+      beforeLength: 3,
+      expectedLength: 7,
+      afterLength: 7,
+    },
+  };
+  const pressed = {
+    ...base,
+    evidence: {
+      action: 'press',
+      status: 'verified',
+      kind: 'checkbox',
+      effects: ['checked_changed'],
+      sensitive: false,
+    },
+  };
+  const uploaded = {
+    ...base,
+    evidence: {
+      action: 'upload',
+      status: 'verified',
+      expectedFileCount: 1,
+      fileCount: 1,
+      nameMatched: true,
+    },
+  };
+
+  assert.deepEqual(validateToolResult('browser.type', typed), typed);
+  assert.deepEqual(validateToolResult('browser.press', pressed), pressed);
+  assert.deepEqual(validateToolResult('browser.upload', uploaded), uploaded);
+  assert.throws(
+    () => validateToolResult('browser.type', {
+      ...typed,
+      evidence: { ...typed.evidence, action: undefined },
+    }),
+    error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+  );
+});

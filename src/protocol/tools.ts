@@ -97,6 +97,7 @@ const elementSchema = objectSchema({
 }, ['ref', 'role', 'name']);
 
 const inputEvidenceSchema = objectSchema({
+  action: stringSchema({ enum: ['type', 'keyboard'] }),
   status: stringSchema({ enum: ['verified', 'mismatch', 'unavailable'] }),
   kind: stringSchema({ enum: ['input', 'contenteditable', 'unsupported'] }),
   sensitive: booleanSchema(),
@@ -104,7 +105,7 @@ const inputEvidenceSchema = objectSchema({
   expectedLength: integerSchema({ minimum: 0 }),
   afterLength: integerSchema({ minimum: 0 }),
   reason: stringSchema({ enum: ['active_element_not_readable', 'value_mismatch'] }),
-}, ['status', 'kind', 'sensitive']);
+}, ['action', 'status', 'kind', 'sensitive']);
 
 const clickEvidenceSchema = objectSchema({
   action: stringSchema({ const: 'click' }),
@@ -132,6 +133,39 @@ const clickEvidenceSchema = objectSchema({
     'coordinate_target', 'target_unavailable', 'expected_state_unchanged', 'no_observable_effect',
   ] }),
 }, ['action', 'status', 'kind', 'effects']);
+
+const pressEvidenceSchema = objectSchema({
+  action: stringSchema({ const: 'press' }),
+  status: stringSchema({ enum: ['verified', 'unavailable'] }),
+  kind: stringSchema({ enum: [
+    'input', 'contenteditable', 'checkbox', 'radio', 'select', 'control', 'other',
+  ] }),
+  effects: arraySchema(stringSchema({ enum: [
+    'value_changed',
+    'checked_changed',
+    'selected_changed',
+    'pressed_changed',
+    'expanded_changed',
+    'focus_changed',
+    'navigation',
+    'document_changed',
+    'dialog_opened',
+    'popup_opened',
+  ] }), { maxItems: 10, uniqueItems: true }),
+  sensitive: booleanSchema(),
+  reason: stringSchema({ enum: ['target_unavailable', 'no_observable_effect'] }),
+}, ['action', 'status', 'kind', 'effects', 'sensitive']);
+
+const uploadEvidenceSchema = objectSchema({
+  action: stringSchema({ const: 'upload' }),
+  status: stringSchema({ enum: ['verified', 'mismatch', 'unavailable'] }),
+  expectedFileCount: integerSchema({ const: 1 }),
+  fileCount: integerSchema({ minimum: 0 }),
+  nameMatched: booleanSchema(),
+  reason: stringSchema({ enum: [
+    'target_unavailable', 'file_count_mismatch', 'file_name_mismatch',
+  ] }),
+}, ['action', 'status', 'expectedFileCount']);
 
 const artifactSchema = objectSchema({
   id: opaqueIdSchema,
@@ -177,7 +211,7 @@ const observationOutput = resultSchema('target', {
   truncationReasons: arraySchema(stringSchema({
     enum: ['element_limit', 'text_limit', 'depth_limit', 'byte_limit'],
   }), { uniqueItems: true }),
-  evidence: { oneOf: [inputEvidenceSchema, clickEvidenceSchema] },
+  evidence: { oneOf: [inputEvidenceSchema, clickEvidenceSchema, pressEvidenceSchema, uploadEvidenceSchema] },
 }, ['observationId', 'title', 'elements', 'truncated', 'truncationReasons']);
 
 const artifactOutput = resultSchema('target', {
@@ -353,7 +387,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tool({
     name: 'browser.press',
     title: 'Press key',
-    description: 'Dispatch a key or key combination to the controlled target.',
+    description: 'Dispatch a key or key combination and report bounded observable effects.',
     context: 'target',
     inputSchema: objectSchema({ key: stringSchema({ minLength: 1, maxLength: 128 }) }, ['key']),
     outputSchema: observationOutput,
@@ -399,7 +433,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tool({
     name: 'browser.upload',
     title: 'Upload file',
-    description: 'Assign a client-authorized local file to a page file input.',
+    description: 'Assign a client-authorized local file and verify the browser selection.',
     context: 'target',
     inputSchema: {
       oneOf: [

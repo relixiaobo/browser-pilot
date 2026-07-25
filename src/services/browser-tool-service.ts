@@ -27,6 +27,9 @@ import {
   type ClickEffect,
   type ClickVerificationEvidence,
   type InputVerificationEvidence,
+  type PressActionResult,
+  type PressEffect,
+  type PressVerificationEvidence,
 } from './action-service.js';
 import { ArtifactStore } from './artifact-store.js';
 import { DownloadController } from './download-controller.js';
@@ -43,7 +46,7 @@ import { MemoryObservationStore, type StoredObservation } from './observation-st
 import { ObservationService } from './observation-service.js';
 import { PageContentService } from './page-content-service.js';
 import { TargetInventoryService, type TargetInventoryContext } from './target-inventory-service.js';
-import { UploadService } from './upload-service.js';
+import { UploadService, type UploadVerificationEvidence } from './upload-service.js';
 import {
   WorkspaceNetworkController,
   type WorkspaceNetworkRuleInput,
@@ -124,6 +127,19 @@ interface ActionServiceHarness {
   service: ActionService;
   observation(): CreatedObservation | undefined;
 }
+
+interface ActionSignalSnapshot {
+  loaderId: string;
+  url?: string;
+  dialogSequence: number;
+  popupSequence: number;
+}
+
+type BrokerActionEffect =
+  | 'navigation'
+  | 'document_changed'
+  | 'dialog_opened'
+  | 'popup_opened';
 
 type DialogType = 'alert' | 'confirm' | 'prompt' | 'beforeunload';
 
@@ -733,7 +749,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.interact');
     this.markDispatched(context);
-    return this.runAction(context, targetId, session, undefined, service => service.press(args.key as string));
+    return this.runPressAction(context, targetId, session, service => service.press(args.key as string));
   }
 
   private async upload(
@@ -769,7 +785,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       },
     };
     this.markDispatched(context);
-    await new UploadService(this.transport, session.sessionId, observations).upload(artifact.path, {
+    const result = await new UploadService(this.transport, session.sessionId, observations).upload(artifact.path, {
       inputIndex: args.inputIndex as number | undefined,
       ...(backendNodeId !== undefined ? { backendNodeId } : {}),
       ...(session.activeFrame?.executionContextId !== undefined
@@ -778,7 +794,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
     if (!next) throw new BrowserPilotError('internal_error', 'Upload did not produce an Observation');
     this.publishDocumentChanged(context, targetId, next);
-    return this.observationResult(context, targetId, next);
+    return this.observationResult(context, targetId, next, result.evidence);
   }
 
   private async capture(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
@@ -1219,19 +1235,42 @@ export class BrowserToolService implements BrowserToolExecutor {
     return observation;
   }
 
-  private async runAction(
-    context: BrokerToolCallContext,
-    targetId: ControlledTargetId,
+  private async captureActionSignals(
     session: TargetSession,
-    observation: StoredObservation | undefined,
-    action: (service: ActionService) => Promise<SnapshotResult>,
-  ): Promise<JsonValue> {
-    const harness = this.createActionHarness(context, targetId, session, observation);
-    await action(harness.service);
-    const next = harness.observation();
-    if (!next) throw new BrowserPilotError('internal_error', 'Action did not produce an Observation');
-    this.publishDocumentChanged(context, targetId, next);
-    return this.observationResult(context, targetId, next);
+    observation?: StoredObservation,
+  ): Promise<ActionSignalSnapshot> {
+    return {
+      loaderId: observation?.loaderId ?? await this.loaderId(session),
+      url: observation?.url ?? await this.currentUrl(session),
+      dialogSequence: this.dialogOpenSequenceBySession.get(session.sessionId) ?? 0,
+      popupSequence: this.popupSequence,
+    };
+  }
+
+  private collectActionSignalEffects(
+    session: TargetSession,
+    before: ActionSignalSnapshot,
+    next: CreatedObservation,
+    observation?: StoredObservation,
+  ): BrokerActionEffect[] {
+    const effects: BrokerActionEffect[] = [];
+    const navigated = before.loaderId !== next.record.loaderId ||
+      (before.url !== undefined && before.url !== next.record.url);
+    const documentChanged = before.loaderId !== next.record.loaderId ||
+      (observation !== undefined && (
+        observation.title !== next.record.title || refsChanged(observation, next.record)
+      ));
+    if (navigated) effects.push('navigation');
+    if (documentChanged) effects.push('document_changed');
+    if ((this.dialogOpenSequenceBySession.get(session.sessionId) ?? 0) > before.dialogSequence) {
+      effects.push('dialog_opened');
+    }
+    if (this.popupSignals.some(signal => (
+      signal.sequence > before.popupSequence && signal.openerCdpTargetId === session.cdpTargetId
+    ))) {
+      effects.push('popup_opened');
+    }
+    return effects;
   }
 
   private async runClickAction(
@@ -1241,34 +1280,30 @@ export class BrowserToolService implements BrowserToolExecutor {
     observation: StoredObservation | undefined,
     action: (service: ActionService) => Promise<ClickActionResult>,
   ): Promise<JsonValue> {
-    const beforeLoaderId = observation?.loaderId ?? await this.loaderId(session);
-    const beforeUrl = observation?.url ?? await this.currentUrl(session);
-    const beforeDialogSequence = this.dialogOpenSequenceBySession.get(session.sessionId) ?? 0;
-    const beforePopupSequence = this.popupSequence;
+    const before = await this.captureActionSignals(session, observation);
     const harness = this.createActionHarness(context, targetId, session, observation);
     const result = await action(harness.service);
     const next = harness.observation();
     if (!next) throw new BrowserPilotError('internal_error', 'Click did not produce an Observation');
-
-    const extraEffects: ClickEffect[] = [];
-    const navigated = beforeLoaderId !== next.record.loaderId ||
-      (beforeUrl !== undefined && beforeUrl !== next.record.url);
-    const documentChanged = beforeLoaderId !== next.record.loaderId ||
-      (observation !== undefined && (
-        observation.title !== next.record.title || refsChanged(observation, next.record)
-      ));
-    if (navigated) extraEffects.push('navigation');
-    if (documentChanged) extraEffects.push('document_changed');
-    if ((this.dialogOpenSequenceBySession.get(session.sessionId) ?? 0) > beforeDialogSequence) {
-      extraEffects.push('dialog_opened');
-    }
-    if (this.popupSignals.some(signal => (
-      signal.sequence > beforePopupSequence && signal.openerCdpTargetId === session.cdpTargetId
-    ))) {
-      extraEffects.push('popup_opened');
-    }
-
+    const extraEffects = this.collectActionSignalEffects(session, before, next, observation);
     const evidence = this.mergeClickEvidence(result.evidence, extraEffects);
+    this.publishDocumentChanged(context, targetId, next);
+    return this.observationResult(context, targetId, next, evidence);
+  }
+
+  private async runPressAction(
+    context: BrokerToolCallContext,
+    targetId: ControlledTargetId,
+    session: TargetSession,
+    action: (service: ActionService) => Promise<PressActionResult>,
+  ): Promise<JsonValue> {
+    const before = await this.captureActionSignals(session);
+    const harness = this.createActionHarness(context, targetId, session, undefined);
+    const result = await action(harness.service);
+    const next = harness.observation();
+    if (!next) throw new BrowserPilotError('internal_error', 'Key action did not produce an Observation');
+    const extraEffects = this.collectActionSignalEffects(session, before, next);
+    const evidence = this.mergePressEvidence(result.evidence, extraEffects);
     this.publishDocumentChanged(context, targetId, next);
     return this.observationResult(context, targetId, next, evidence);
   }
@@ -1332,7 +1367,11 @@ export class BrowserToolService implements BrowserToolExecutor {
     context: BrokerToolCallContext,
     targetId: ControlledTargetId,
     created: CreatedObservation,
-    evidence?: InputVerificationEvidence | ClickVerificationEvidence,
+    evidence?:
+      | InputVerificationEvidence
+      | ClickVerificationEvidence
+      | PressVerificationEvidence
+      | UploadVerificationEvidence,
   ): JsonValue {
     return asJson({
       ...this.targetResult(context, targetId, created.snapshot.data.url),
@@ -1688,6 +1727,22 @@ export class BrowserToolService implements BrowserToolExecutor {
     evidence: ClickVerificationEvidence,
     extraEffects: readonly ClickEffect[],
   ): ClickVerificationEvidence {
+    const effects = [...new Set([...evidence.effects, ...extraEffects])];
+    if (evidence.status !== 'unavailable' || extraEffects.length === 0) {
+      return { ...evidence, effects };
+    }
+    const { reason: _reason, ...rest } = evidence;
+    return {
+      ...rest,
+      status: 'verified',
+      effects,
+    };
+  }
+
+  private mergePressEvidence(
+    evidence: PressVerificationEvidence,
+    extraEffects: readonly PressEffect[],
+  ): PressVerificationEvidence {
     const effects = [...new Set([...evidence.effects, ...extraEffects])];
     if (evidence.status !== 'unavailable' || extraEffects.length === 0) {
       return { ...evidence, effects };

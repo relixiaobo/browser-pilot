@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { ArtifactStore, BrowserToolService, MemoryBrokerRuntime } from '../dist/services.js';
 
@@ -42,7 +42,11 @@ class BrowserFixtureTransport {
   pointerReadbackState = { connected: true, kind: 'control', focused: true };
   editableState;
   nextInputClear = false;
+  selectedFileName;
+  pressStates = [];
+  pressReadIndex = 0;
   onMouseReleased;
+  onKeyUp;
 
   async send(method, params = {}, sessionId) {
     this.calls.push({ method, params, sessionId });
@@ -105,6 +109,9 @@ class BrowserFixtureTransport {
           },
         };
       case 'Runtime.evaluate': {
+        if (String(params.expression).includes('shadowRoot.activeElement')) {
+          return { result: { objectId: `press-active-${this.pressReadIndex}` } };
+        }
         if (params.expression === '1') return { result: { value: 1 } };
         if (params.expression === 'document.readyState') return { result: { value: 'complete' } };
         if (params.expression === '6 * 7') return { result: { value: 42 } };
@@ -167,12 +174,21 @@ class BrowserFixtureTransport {
         };
       }
       case 'DOM.resolveNode': return { object: { objectId: `object:${params.backendNodeId}` } };
-      case 'DOM.describeNode': return {
-        node: { backendNodeId: 72, nodeName: 'INPUT', attributes: ['type', 'file'] },
-      };
-      case 'DOM.setFileInputFiles': return {};
+      case 'DOM.describeNode':
+        if (String(params.objectId).startsWith('press-active-')) {
+          return { node: { backendNodeId: this.pressStates[this.pressReadIndex]?.backendNodeId ?? 80 } };
+        }
+        return { node: { backendNodeId: 72, nodeName: 'INPUT', attributes: ['type', 'file'] } };
+      case 'DOM.setFileInputFiles':
+        this.selectedFileName = basename(params.files[0]);
+        return {};
       case 'Runtime.releaseObject': return {};
       case 'Runtime.callFunctionOn':
+        if (String(params.functionDeclaration).includes('valueToken') && this.pressStates.length > 0) {
+          const { backendNodeId: _backendNodeId, ...value } = this.pressStates[this.pressReadIndex];
+          this.pressReadIndex += 1;
+          return { result: { value } };
+        }
         if (String(params.functionDeclaration).includes('elementsFromPoint')) {
           return { result: { value: this.pointerTargetState } };
         }
@@ -191,11 +207,20 @@ class BrowserFixtureTransport {
           }
           return {};
         }
+        if (String(params.functionDeclaration).includes('firstFileName')) {
+          return { result: { value: {
+            status: 'ready',
+            fileCount: this.selectedFileName ? 1 : 0,
+            ...(this.selectedFileName ? { firstFileName: this.selectedFileName } : {}),
+          } } };
+        }
         return { result: { value: undefined } };
       case 'Input.dispatchMouseEvent':
         if (params.type === 'mouseReleased') this.onMouseReleased?.(sessionId);
         return {};
-      case 'Input.dispatchKeyEvent': return {};
+      case 'Input.dispatchKeyEvent':
+        if (params.type === 'keyUp') this.onKeyUp?.(params, sessionId);
+        return {};
       case 'Input.insertText':
         if (this.editableState) {
           this.editableState.value = `${this.nextInputClear ? '' : this.editableState.value}${params.text}`;
@@ -713,6 +738,13 @@ test('browser.upload consumes only imported upload_input Artifacts and preserves
     artifactId: imported.artifact.id,
   }, targetId);
   assert.match(uploaded.observationId, /^observation:/);
+  assert.deepEqual(uploaded.evidence, {
+    action: 'upload',
+    status: 'verified',
+    expectedFileCount: 1,
+    fileCount: 1,
+    nameMatched: true,
+  });
   const dispatch = transport.calls.find(call => call.method === 'DOM.setFileInputFiles');
   assert.equal(dispatch.params.files[0] === source, false);
   assert.equal(dispatch.params.files[0].endsWith('/resume.txt'), true);
@@ -762,6 +794,7 @@ test('browser.type exposes verified readback through the public tool surface', a
 
   assert.notEqual(typed.observationId, observed.observationId);
   assert.deepEqual(typed.evidence, {
+    action: 'type',
     status: 'verified',
     kind: 'input',
     sensitive: false,
@@ -891,6 +924,59 @@ test('browser.click merges element, navigation, document, dialog, and popup evid
       'popup_opened',
     ],
     focused: true,
+  });
+});
+
+test('browser.press merges control, navigation, document, dialog, and popup evidence', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.pressStates = [
+    { backendNodeId: 80, kind: 'input', sensitive: false, valueToken: '0:1' },
+    { backendNodeId: 80, kind: 'input', sensitive: false, valueToken: '1:2' },
+  ];
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:press-effects', 'com.example.agent', 'instance:press-effects');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  transport.onKeyUp = (params, sessionId) => {
+    if (params.key !== 'Enter') return;
+    const target = transport.targets.get('user-form');
+    target.url = 'https://example.test/pressed';
+    target.title = 'Pressed';
+    transport.loaders.set('user-form', 'loader:user-form:pressed');
+    transport.emit('Page.javascriptDialogOpening', {
+      type: 'alert',
+      message: 'Pressed',
+      url: target.url,
+    }, sessionId);
+    transport.emit('Target.targetCreated', {
+      targetInfo: {
+        targetId: 'press-popup',
+        type: 'page',
+        url: 'https://example.test/press-popup',
+        openerId: 'user-form',
+      },
+    });
+  };
+
+  const pressed = await tool(runtime, client, 'browser.press', { key: 'Enter' }, targetId);
+
+  assert.equal(pressed.url, 'https://example.test/pressed');
+  assert.deepEqual(pressed.evidence, {
+    action: 'press',
+    status: 'verified',
+    kind: 'input',
+    effects: [
+      'value_changed',
+      'navigation',
+      'document_changed',
+      'dialog_opened',
+      'popup_opened',
+    ],
+    sensitive: false,
   });
 });
 

@@ -127,12 +127,16 @@ Preserve Browser Pilot advantages:
     sanitization, and editor interception. Password evidence contains lengths
     only, deep open-Shadow-DOM focus is readable, and keyboard clear uses
     Chrome's `SelectAll` editing command.
-- [ ] **B3.4** Return typed action evidence and failure reasons instead of
+- [x] **B3.4** Return typed action evidence and failure reasons instead of
   reporting success solely because CDP dispatch completed.
   - Covers: command reliability contract.
-  - Progress: input and click actions return bounded `verified`, `mismatch`, or
-    `unavailable` evidence. Machine input callers can require exact verification
-    and receive `action_not_verified`; the legacy CLI output remains compatible.
+  - Complete: click, type, keyboard, press, and upload results use bounded
+    discriminated evidence. Press combines focused-backend-node control changes
+    with Broker-owned navigation, document, dialog, and popup signals. Upload
+    verifies the selected file count and browser filename after dispatch.
+    Unsupported effects report `unavailable`; observable wrong states report
+    `mismatch`; exact machine input can raise `action_not_verified`. Legacy CLI
+    output remains compatible.
 - [ ] **B3.5** Stop any remaining composite action steps when target, frame,
   focus, loader, or document generation changes unexpectedly.
   - Covers: BR-10 through BR-12, AC-5.
@@ -194,7 +198,8 @@ Preserve Browser Pilot advantages:
   - Progress: isolated system-Chrome tests cover trusted controlled-input
     events and rollback, canceled `beforeinput`, native email/number selection,
     nested contenteditable replacement/append, blocked fields, special value
-    controls, Shadow DOM readback, and keyboard clear. Focus loss remains.
+    controls, Shadow DOM readback, keyboard clear, press effects, and upload
+    readback. Composite focus loss remains.
 - [ ] **B6.3** Add real-site canaries that report drift without making release
   tests depend on third-party availability.
   - Covers: FR-8.

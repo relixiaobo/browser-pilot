@@ -180,7 +180,7 @@ succeeded.
 page has had time to apply a controlled-field update:
 
 ```json
-{"status":"verified","kind":"input","sensitive":false,"beforeLength":3,"expectedLength":7,"afterLength":7}
+{"action":"type","status":"verified","kind":"input","sensitive":false,"beforeLength":3,"expectedLength":7,"afterLength":7}
 ```
 
 Use `verification: "require_exact"` when a mismatch must fail the command.
@@ -190,6 +190,18 @@ date/time/color/range controls use their native value setter and emit
 browser value sanitization, canceled `beforeinput`, and editor interception are
 reported from the effective value after the action. Password evidence never
 contains the value itself.
+
+`browser.press` returns `action: "press"` with bounded effects such as
+`value_changed`, `checked_changed`, `selected_changed`, `focus_changed`,
+`navigation`, `document_changed`, `dialog_opened`, or `popup_opened`. It returns
+`unavailable` with `no_observable_effect` when the key dispatch completed but no
+supported effect was visible.
+
+`browser.upload` reads the file input after assignment. It returns `verified`
+only when one file with the expected browser filename remains selected,
+`mismatch` when the page cleared or replaced the selection, and `unavailable`
+when the target could no longer be read. Evidence contains counts and a filename
+match boolean, never the Broker storage path.
 
 Inventory includes every eligible ordinary user tab plus the Workspace's
 managed tabs. A physical tab can be controlled by only one Lease at a time.

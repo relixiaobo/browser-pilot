@@ -331,6 +331,101 @@ export const READ_ACTIVE_EDITABLE_STATE = `(() => {
   return readState(active);
 })()`;
 
+const ACTIVE_CONTROL_STATE_FUNCTION = `function() {
+  const valueToken = value => {
+    const text = String(value ?? '');
+    let hash = 2166136261;
+    const take = Math.min(text.length, 2048);
+    for (let index = 0; index < take; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    for (let index = Math.max(take, text.length - 2048); index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return text.length + ':' + (hash >>> 0).toString(16);
+  };
+  const ariaState = (node, name, mixed) => {
+    const value = String(node.getAttribute?.(name) || '').trim().toLowerCase();
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return mixed && value === 'mixed' ? 'mixed' : undefined;
+  };
+
+  const target = this;
+  const base = {sensitive:false};
+  if (!target || target.nodeType !== 1 || !target.isConnected) return {...base, kind:'other'};
+  if (target instanceof HTMLInputElement) {
+    const inputType = String(target.type || 'text').toLowerCase();
+    if (inputType === 'checkbox' || inputType === 'radio') {
+      return {...base, kind:inputType, checked:target.indeterminate ? 'mixed' : !!target.checked};
+    }
+    return {
+      ...base, kind:'input', sensitive:inputType === 'password', valueToken:valueToken(target.value),
+    };
+  }
+  if (target instanceof HTMLTextAreaElement) {
+    return {...base, kind:'input', valueToken:valueToken(target.value)};
+  }
+  if (target instanceof HTMLSelectElement) {
+    const selected = Array.from(target.options).flatMap((option, index) => option.selected ? [index] : []);
+    return {...base, kind:'select', selectedToken:valueToken(selected.join(','))};
+  }
+  if (target.isContentEditable) {
+    let root = target;
+    while (root.parentElement && root.parentElement.isContentEditable) root = root.parentElement;
+    return {...base, kind:'contenteditable', valueToken:valueToken(root.innerText ?? root.textContent ?? '')};
+  }
+  return {
+    ...base,
+    kind:'control',
+    ...(ariaState(target, 'aria-checked', true) !== undefined
+      ? {checked:ariaState(target, 'aria-checked', true)} : {}),
+    ...(ariaState(target, 'aria-pressed', true) !== undefined
+      ? {pressed:ariaState(target, 'aria-pressed', true)} : {}),
+    ...(ariaState(target, 'aria-expanded', false) !== undefined
+      ? {expanded:ariaState(target, 'aria-expanded', false)} : {}),
+  };
+}`;
+
+/** Resolve the deepest focused element, including open Shadow DOM. */
+export const GET_DEEP_ACTIVE_ELEMENT = `(() => {
+  let active = document.activeElement;
+  while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+    active = active.shadowRoot.activeElement;
+  }
+  return active;
+})()`;
+
+/** Return bounded state for an already-resolved focused control. */
+export const READ_ACTIVE_CONTROL_STATE = ACTIVE_CONTROL_STATE_FUNCTION;
+
+/** Return a bounded file-input state before or after DOM.setFileInputFiles. */
+export const READ_FILE_INPUT_STATE = `function() {
+  const blocked = reason => ({status:'blocked', reason});
+  const composedParent = node => {
+    if (node && node.parentElement) return node.parentElement;
+    const root = node && typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    return root && root.host ? root.host : null;
+  };
+  if (!this || this.nodeType !== 1 || !this.isConnected) return blocked('detached');
+  if (!(this instanceof HTMLInputElement) || String(this.type).toLowerCase() !== 'file') {
+    return blocked('wrong_type');
+  }
+  for (let current = this; current; current = composedParent(current)) {
+    const ariaDisabled = String(current.getAttribute?.('aria-disabled') || '').trim().toLowerCase() === 'true';
+    if (current.inert === true || current.hasAttribute?.('inert')) return blocked('inert');
+    if (current.matches?.(':disabled') || current.disabled === true || ariaDisabled) return blocked('disabled');
+  }
+  const files = this.files ? Array.from(this.files) : [];
+  return {
+    status:'ready',
+    fileCount:files.length,
+    ...(files[0] ? {firstFileName:String(files[0].name || '').slice(0, 4096)} : {}),
+  };
+}`;
+
 /** Return {title, url} of the current page. */
 export const PAGE_INFO = `JSON.stringify({title:document.title,url:location.href})`;
 

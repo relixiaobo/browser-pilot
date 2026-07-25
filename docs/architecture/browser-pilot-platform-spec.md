@@ -395,6 +395,10 @@ popup signals. `verified` means at least one supported effect was observed,
 `mismatch` means an observable control did not reach its expected state, and
 `unavailable` means dispatch completed without conclusive evidence. Evidence is
 not a claim that the Agent's higher-level business goal succeeded.
+Input evidence is discriminated as `type` or `keyboard`; press evidence uses the
+focused backend node plus bounded control-state signatures and Broker-owned
+signals. Upload evidence reads the selected file count and compares its browser
+filename without returning the local source path.
 
 The initial controlled tool families are browser discovery/status, Workspace
 and Lease lifecycle, open/observe/read, click/type/keyboard/press,

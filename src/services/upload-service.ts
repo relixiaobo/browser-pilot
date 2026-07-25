@@ -1,3 +1,5 @@
+import { basename } from 'node:path';
+import { READ_FILE_INPUT_STATE } from '../page-scripts.js';
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import type { SnapshotResult } from '../snapshot.js';
 import type { Transport } from '../transport.js';
@@ -18,6 +20,37 @@ export interface UploadOptions {
 export interface UploadObservationService {
   observeAfterAction(limit?: number): Promise<SnapshotResult>;
 }
+
+export interface UploadVerificationEvidence {
+  action: 'upload';
+  status: 'verified' | 'mismatch' | 'unavailable';
+  expectedFileCount: 1;
+  fileCount?: number;
+  nameMatched?: boolean;
+  reason?: 'target_unavailable' | 'file_count_mismatch' | 'file_name_mismatch';
+}
+
+export interface UploadActionResult {
+  observation: SnapshotResult;
+  evidence: UploadVerificationEvidence;
+}
+
+export interface UploadServiceOptions {
+  readbackDelayMs?: number;
+}
+
+type FileInputBlockReason = 'detached' | 'disabled' | 'inert' | 'wrong_type';
+
+type FileInputState =
+  | { status: 'ready'; fileCount: number; firstFileName?: string }
+  | { status: 'blocked'; reason: FileInputBlockReason };
+
+const FILE_INPUT_BLOCK_REASONS = new Set<FileInputBlockReason>([
+  'detached',
+  'disabled',
+  'inert',
+  'wrong_type',
+]);
 
 function parseInputs(value: unknown): UploadInputInfo[] {
   if (typeof value !== 'string') {
@@ -40,14 +73,42 @@ function parseInputs(value: unknown): UploadInputInfo[] {
   return inputs as UploadInputInfo[];
 }
 
+function parseFileInputState(value: unknown): FileInputState {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid file input state');
+  }
+  const record = value as Record<string, unknown>;
+  if (record.status === 'blocked' && FILE_INPUT_BLOCK_REASONS.has(record.reason as FileInputBlockReason)) {
+    return { status: 'blocked', reason: record.reason as FileInputBlockReason };
+  }
+  if (
+    record.status !== 'ready' || !Number.isSafeInteger(record.fileCount) || Number(record.fileCount) < 0 ||
+    (record.firstFileName !== undefined && (
+      typeof record.firstFileName !== 'string' || record.firstFileName.length > 4096
+    ))
+  ) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid file input state');
+  }
+  return {
+    status: 'ready',
+    fileCount: Number(record.fileCount),
+    ...(record.firstFileName !== undefined ? { firstFileName: record.firstFileName } : {}),
+  };
+}
+
 export class UploadService {
+  private readonly readbackDelayMs: number;
+
   constructor(
     private readonly transport: Transport,
     private readonly sessionId: string,
     private readonly observations: UploadObservationService,
-  ) {}
+    options: UploadServiceOptions = {},
+  ) {
+    this.readbackDelayMs = options.readbackDelayMs ?? 50;
+  }
 
-  async upload(filePath: string, options: UploadOptions = {}): Promise<SnapshotResult> {
+  async upload(filePath: string, options: UploadOptions = {}): Promise<UploadActionResult> {
     if (!filePath) throw invalidArgument('Upload path must not be empty', 'filePath');
     const inputIndex = options.inputIndex ?? 1;
     if (!Number.isSafeInteger(inputIndex) || inputIndex < 1) {
@@ -59,8 +120,11 @@ export class UploadService {
         throw invalidArgument('backendNodeId must be a positive integer', 'backendNodeId');
       }
       await this.assertFileInput(options.backendNodeId);
-      await this.setFiles(filePath, options.backendNodeId);
-      return this.observations.observeAfterAction(options.observationLimit);
+      const evidence = await this.setFiles(filePath, options.backendNodeId);
+      return {
+        observation: await this.observations.observeAfterAction(options.observationLimit),
+        evidence,
+      };
     }
 
     const evaluationParams: Record<string, unknown> = {
@@ -94,14 +158,16 @@ export class UploadService {
       if (!Number.isSafeInteger(node?.backendNodeId)) {
         throw new BrowserPilotError('internal_error', 'Chrome returned an invalid file input node');
       }
-      await this.setFiles(filePath, node.backendNodeId);
+      const evidence = await this.setFiles(filePath, node.backendNodeId);
+      return {
+        observation: await this.observations.observeAfterAction(options.observationLimit),
+        evidence,
+      };
     } finally {
       await this.transport.send('Runtime.releaseObject', {
         objectId: element.objectId,
       }, this.sessionId).catch(() => {});
     }
-
-    return this.observations.observeAfterAction(options.observationLimit);
   }
 
   private async assertFileInput(backendNodeId: number): Promise<void> {
@@ -116,10 +182,79 @@ export class UploadService {
     }
   }
 
-  private async setFiles(filePath: string, backendNodeId: number): Promise<void> {
+  private async setFiles(filePath: string, backendNodeId: number): Promise<UploadVerificationEvidence> {
+    const before = await this.readFileInputState(backendNodeId);
+    this.requireFileInput(before);
     await this.transport.send('DOM.setFileInputFiles', {
       files: [filePath],
       backendNodeId,
     }, this.sessionId);
+    if (this.readbackDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
+    }
+    let after: FileInputState;
+    try {
+      after = await this.readFileInputState(backendNodeId);
+    } catch (error) {
+      if (error instanceof BrowserPilotError && error.code === 'browser_disconnected') throw error;
+      return {
+        action: 'upload',
+        status: 'unavailable',
+        expectedFileCount: 1,
+        reason: 'target_unavailable',
+      };
+    }
+    if (after.status === 'blocked') {
+      return {
+        action: 'upload',
+        status: 'unavailable',
+        expectedFileCount: 1,
+        reason: 'target_unavailable',
+      };
+    }
+    const nameMatched = after.firstFileName === basename(filePath);
+    const status = after.fileCount === 1 && nameMatched ? 'verified' : 'mismatch';
+    const reason = after.fileCount !== 1
+      ? 'file_count_mismatch' as const
+      : !nameMatched ? 'file_name_mismatch' as const : undefined;
+    return {
+      action: 'upload',
+      status,
+      expectedFileCount: 1,
+      fileCount: after.fileCount,
+      nameMatched,
+      ...(reason ? { reason } : {}),
+    };
+  }
+
+  private async readFileInputState(backendNodeId: number): Promise<FileInputState> {
+    const { object } = await this.transport.send('DOM.resolveNode', { backendNodeId }, this.sessionId);
+    if (!object?.objectId) {
+      return { status: 'blocked', reason: 'detached' };
+    }
+    try {
+      const { result } = await this.transport.send('Runtime.callFunctionOn', {
+        objectId: object.objectId,
+        functionDeclaration: READ_FILE_INPUT_STATE,
+        returnByValue: true,
+      }, this.sessionId);
+      return parseFileInputState(result.value);
+    } finally {
+      await this.transport.send('Runtime.releaseObject', { objectId: object.objectId }, this.sessionId).catch(() => {});
+    }
+  }
+
+  private requireFileInput(state: FileInputState): void {
+    if (state.status === 'ready') return;
+    if (state.reason === 'detached') {
+      throw new BrowserPilotError('stale_ref', 'File input is no longer connected');
+    }
+    if (state.reason === 'wrong_type') {
+      throw invalidArgument('Selected target is not a file input', 'ref');
+    }
+    throw new BrowserPilotError('action_not_verified', 'File input is not currently editable', {
+      retryable: true,
+      context: { action: 'upload', reason: state.reason },
+    });
   }
 }

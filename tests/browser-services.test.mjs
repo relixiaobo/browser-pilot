@@ -350,6 +350,80 @@ test('InputDispatcher rejects an unknown modifier with a stable error', async ()
   assert.equal(transport.calls.length, 0);
 });
 
+test('ActionService reports observable focus and control effects for key presses', async () => {
+  for (const fixture of [
+    {
+      before: { kind: 'input', sensitive: false, valueToken: '3:abc' },
+      after: { kind: 'input', sensitive: false, valueToken: '3:abc' },
+      identities: [80, 81],
+      effect: 'focus_changed',
+      key: 'Tab',
+    },
+    {
+      before: { kind: 'checkbox', sensitive: false, checked: false },
+      after: { kind: 'checkbox', sensitive: false, checked: true },
+      identities: [82, 82],
+      effect: 'checked_changed',
+      key: 'Space',
+    },
+  ]) {
+    const states = [fixture.before, fixture.after];
+    let readIndex = 0;
+    const transport = new FakeTransport((method, params) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: `active-${readIndex}` } };
+      if (method === 'DOM.describeNode') {
+        return { node: { backendNodeId: fixture.identities[Number(params.objectId.split('-')[1])] } };
+      }
+      if (method === 'Runtime.callFunctionOn' && params.returnByValue) {
+        const value = states[readIndex];
+        readIndex += 1;
+        return { result: { value } };
+      }
+      return {};
+    });
+    const service = new ActionService(transport, 'session-press', 'target-press', {
+      readbackDelayMs: 0,
+      observationService: { async observeAfterAction() { return snapshot; } },
+    });
+
+    const result = await service.press(fixture.key);
+
+    assert.deepEqual(result.observation, snapshot);
+    assert.deepEqual(result.evidence, {
+      action: 'press',
+      status: 'verified',
+      kind: fixture.after.kind,
+      effects: [fixture.effect],
+      sensitive: false,
+    });
+  }
+});
+
+test('ActionService reports unavailable when a key has no observable effect', async () => {
+  const state = { kind: 'control', sensitive: false };
+  const transport = new FakeTransport((method, params) => {
+    if (method === 'Runtime.evaluate') return { result: { objectId: 'active-control' } };
+    if (method === 'DOM.describeNode') return { node: { backendNodeId: 83 } };
+    if (method === 'Runtime.callFunctionOn' && params.returnByValue) return { result: { value: state } };
+    return {};
+  });
+  const service = new ActionService(transport, 'session-press-none', 'target-press-none', {
+    readbackDelayMs: 0,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  const result = await service.press('Escape');
+
+  assert.deepEqual(result.evidence, {
+    action: 'press',
+    status: 'unavailable',
+    kind: 'control',
+    effects: [],
+    sensitive: false,
+    reason: 'no_observable_effect',
+  });
+});
+
 test('ActionService types into a controlled input and returns value-length evidence', async () => {
   const refs = new MemoryRefStore();
   refs.save('target-8', [{ backendNodeId: 8, role: 'textbox', name: 'Query' }]);
@@ -380,6 +454,7 @@ test('ActionService types into a controlled input and returns value-length evide
 
   assert.deepEqual(result.observation, snapshot);
   assert.deepEqual(result.evidence, {
+    action: 'type',
     status: 'verified',
     kind: 'input',
     sensitive: false,
@@ -455,6 +530,7 @@ test('keyboard reports unavailable verification for canvas-style focus', async (
   const result = await service.keyboard('hello');
 
   assert.deepEqual(result.evidence, {
+    action: 'keyboard',
     status: 'unavailable',
     kind: 'unsupported',
     sensitive: false,
@@ -564,6 +640,7 @@ test('ActionService fails closed on malformed editable state', async () => {
 });
 
 test('UploadService selects a file input, uploads, releases, and observes', async () => {
+  let selected = false;
   const transport = new FakeTransport((method, params) => {
     if (method === 'Runtime.evaluate' && params.returnByValue) {
       return { result: { value: JSON.stringify([
@@ -573,19 +650,83 @@ test('UploadService selects a file input, uploads, releases, and observes', asyn
     }
     if (method === 'Runtime.evaluate') return { result: { objectId: 'file-input-2' } };
     if (method === 'DOM.describeNode') return { node: { backendNodeId: 72 } };
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'resolved-file-input' } };
+    if (method === 'Runtime.callFunctionOn') {
+      return { result: { value: {
+        status: 'ready',
+        fileCount: selected ? 1 : 0,
+        ...(selected ? { firstFileName: 'resume.pdf' } : {}),
+      } } };
+    }
+    if (method === 'DOM.setFileInputFiles') selected = true;
     return {};
   });
   const service = new UploadService(transport, 'session-11', {
     async observeAfterAction() { return snapshot; },
-  });
+  }, { readbackDelayMs: 0 });
 
-  assert.deepEqual(
-    await service.upload('/protected/resume.pdf', { inputIndex: 2 }),
-    snapshot,
-  );
+  const result = await service.upload('/protected/resume.pdf', { inputIndex: 2 });
+
+  assert.deepEqual(result.observation, snapshot);
+  assert.deepEqual(result.evidence, {
+    action: 'upload',
+    status: 'verified',
+    expectedFileCount: 1,
+    fileCount: 1,
+    nameMatched: true,
+  });
   const upload = transport.calls.find(call => call.method === 'DOM.setFileInputFiles');
   assert.deepEqual(upload.params, { files: ['/protected/resume.pdf'], backendNodeId: 72 });
   assert.equal(transport.calls.at(-1).method, 'Runtime.releaseObject');
+});
+
+test('UploadService rejects blocked inputs before assigning files', async () => {
+  const transport = new FakeTransport(method => {
+    if (method === 'DOM.describeNode') {
+      return { node: { backendNodeId: 73, nodeName: 'INPUT', attributes: ['type', 'file'] } };
+    }
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'disabled-file-input' } };
+    if (method === 'Runtime.callFunctionOn') {
+      return { result: { value: { status: 'blocked', reason: 'disabled' } } };
+    }
+    return {};
+  });
+  const service = new UploadService(transport, 'session-upload-blocked', {
+    async observeAfterAction() { return snapshot; },
+  }, { readbackDelayMs: 0 });
+
+  await assert.rejects(
+    () => service.upload('/protected/resume.pdf', { backendNodeId: 73 }),
+    error => error.code === 'action_not_verified' && error.context?.reason === 'disabled',
+  );
+  assert.equal(transport.calls.some(call => call.method === 'DOM.setFileInputFiles'), false);
+});
+
+test('UploadService reports a page-cleared selection as a mismatch', async () => {
+  const transport = new FakeTransport(method => {
+    if (method === 'DOM.describeNode') {
+      return { node: { backendNodeId: 74, nodeName: 'INPUT', attributes: ['type', 'file'] } };
+    }
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'cleared-file-input' } };
+    if (method === 'Runtime.callFunctionOn') {
+      return { result: { value: { status: 'ready', fileCount: 0 } } };
+    }
+    return {};
+  });
+  const service = new UploadService(transport, 'session-upload-cleared', {
+    async observeAfterAction() { return snapshot; },
+  }, { readbackDelayMs: 0 });
+
+  const result = await service.upload('/protected/resume.pdf', { backendNodeId: 74 });
+
+  assert.deepEqual(result.evidence, {
+    action: 'upload',
+    status: 'mismatch',
+    expectedFileCount: 1,
+    fileCount: 0,
+    nameMatched: false,
+    reason: 'file_count_mismatch',
+  });
 });
 
 test('PageContentService evaluates values and parses bounded reads', async () => {

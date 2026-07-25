@@ -393,11 +393,12 @@ program.command('press <key>')
   .action(action(async (key, opts) => {
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
-      emitSnapshot(await new ActionService(
+      const result = await new ActionService(
         transport,
         sessionId,
         state.activeTargetId,
-      ).press(key, limit));
+      ).press(key, limit);
+      emitSnapshot(result.observation);
     });
   }));
 
@@ -481,9 +482,10 @@ program.command('upload <filepath>')
     if (isNaN(inputIndex) || inputIndex < 1) throw new Error('--nth must be a positive integer');
     await withPilot(async ({ transport, sessionId, state }) => {
       const observations = new ObservationService(transport, sessionId, state.activeTargetId);
-      emitSnapshot(await new UploadService(transport, sessionId, observations).upload(absPath, {
+      const result = await new UploadService(transport, sessionId, observations).upload(absPath, {
         inputIndex,
-      }));
+      });
+      emitSnapshot(result.observation);
     });
   }));
 
