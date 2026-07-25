@@ -264,11 +264,13 @@ export class TargetInventoryService {
   releaseTarget(
     context: TargetInventoryContext,
     targetId: ControlledTargetId,
-  ): void {
+  ): boolean {
     const target = this.registry.get(context, targetId);
     if (this.registry.release(context, context.leaseId, targetId)) {
       this.notify(this.onControlReleased, target, context.leaseId);
+      return true;
     }
+    return false;
   }
 
   releaseLease(leaseId: ControlLeaseId): void {

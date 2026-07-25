@@ -98,12 +98,15 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     Every CLI command calls canonical tools; active targets, frames, sessions,
     Observations, refs, auth, rules, and request identity remain only in daemon
     memory. No `state.json` or `refs.json` compatibility mapping remains.
-- [ ] **A2.4** Serialize commands through a per-target actor and implement
+- [x] **A2.4** Serialize commands through a per-target actor and implement
   explicit control transfer.
   - Covers: BR-5, BR-6, NFR-4.
-  - Progress: reads and mutations now share the same per-target actor, while
-    different targets can proceed concurrently. Lease release provides safe
-    reacquisition; an explicit transfer operation remains.
+  - Complete: reads and mutations for one physical CDP target share the same
+    actor across Workspace-local opaque IDs, while different physical targets
+    proceed concurrently. `browser.tabs.release` provides idempotent two-step
+    handoff: the owner releases and fully retires its scoped target session,
+    then another Lease acquires through its own opaque ID. Foreign Lease IDs,
+    silent stealing, and tab closure are not part of transfer.
 - [x] **A2.5** Scope auth, network rules, request journals, downloads, and
   cleanup to their owner.
   - Covers: BR-3, BR-4, AC-3.

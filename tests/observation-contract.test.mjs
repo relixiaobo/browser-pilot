@@ -386,6 +386,10 @@ test('Observation invalidation matrix returns every canonical reason to its owne
       reason: 'target_closed',
       transition: (store, record) => store.invalidateTarget(record.targetId, 'target_closed'),
     },
+    {
+      reason: 'control_released',
+      transition: (store, record) => store.invalidateTarget(record.targetId, 'control_released'),
+    },
     { reason: 'expired', expire: true },
   ];
   assert.deepEqual(

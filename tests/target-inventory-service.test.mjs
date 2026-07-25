@@ -205,7 +205,8 @@ test('target control is exclusive per Lease and opaque IDs cannot cross Workspac
     error => error.code === 'target_busy',
   );
 
-  harness.inventory.releaseLease(harness.contextA.leaseId);
+  assert.equal(harness.inventory.releaseTarget(harness.contextA, form.targetId), true);
+  assert.equal(harness.inventory.releaseTarget(harness.contextA, form.targetId), false);
   await assert.doesNotReject(() => harness.inventory.activate(harness.contextB, form.targetId));
 });
 

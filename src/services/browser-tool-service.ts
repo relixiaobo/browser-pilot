@@ -97,6 +97,7 @@ const BASE_SUPPORTED_TOOLS = [
   'browser.tabs.list',
   'browser.tabs.switch',
   'browser.tabs.close',
+  'browser.tabs.release',
   'browser.frames.list',
   'browser.frames.switch',
   'browser.dialogs.list',
@@ -449,6 +450,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       case 'browser.tabs.list': return this.listTabs(context, args);
       case 'browser.tabs.switch': return this.switchTab(context, args);
       case 'browser.tabs.close': return this.closeTab(context);
+      case 'browser.tabs.release': return this.releaseTab(context);
       case 'browser.frames.list': return this.listFrames(context);
       case 'browser.frames.switch': return this.switchFrame(context, args);
       case 'browser.open': return this.open(context, args);
@@ -489,7 +491,17 @@ export class BrowserToolService implements BrowserToolExecutor {
       return `${browserId}\u0000dialogs\u0000${context.workspace?.id ?? context.connection.id}`;
     }
     const targetId = this.commandTargetId(context, definition, argsValue);
-    if (targetId) return `${browserId}\u0000target\u0000${targetId}`;
+    if (targetId && context.workspace) {
+      try {
+        const target = this.registry.get({
+          principalId: context.principal.id,
+          workspaceId: context.workspace.id,
+        }, targetId);
+        return `${browserId}\u0000target\u0000${target.cdpTargetId}`;
+      } catch {
+        return `${browserId}\u0000invalid-target\u0000${targetId}`;
+      }
+    }
     if (context.workspace) return `${browserId}\u0000workspace\u0000${context.workspace.id}`;
     return `${browserId}\u0000connection\u0000${context.connection.id}`;
   }
@@ -617,6 +629,34 @@ export class BrowserToolService implements BrowserToolExecutor {
       leaseId: inventoryContext.leaseId,
       closedTargetId: targetId,
     });
+  }
+
+  private async releaseTab(context: BrokerToolCallContext): Promise<JsonValue> {
+    const inventoryContext = this.inventoryContext(context);
+    const targetId = this.requireTargetId(context);
+    const target = this.registry.get(inventoryContext, targetId);
+    this.markDispatched(context);
+    const released = this.inventory.releaseTarget(inventoryContext, targetId);
+    if (released) {
+      this.watchdogs.resetTarget(inventoryContext.leaseId, targetId);
+      this.observations.invalidateTarget(targetId, 'control_released');
+      this.publishEvent({
+        workspaceId: inventoryContext.workspaceId,
+        browserConnectionGeneration: inventoryContext.browserConnectionGeneration,
+        leaseId: inventoryContext.leaseId,
+        targetId,
+        type: 'observation.invalidated',
+        sensitivity: 'browser_data',
+        payload: { reason: 'control_released' },
+      });
+      const key = sessionKey(inventoryContext.leaseId, targetId);
+      const session = this.sessions.get(key);
+      if (session) await this.retireSessionAndWait(key, session);
+      this.deleteDialogs(dialog => (
+        dialog.leaseId === inventoryContext.leaseId && dialog.targetId === targetId
+      ));
+    }
+    return asJson({ ...this.targetResult(context, targetId, target.url), released });
   }
 
   private async listFrames(context: BrokerToolCallContext): Promise<JsonValue> {
@@ -2188,15 +2228,19 @@ export class BrowserToolService implements BrowserToolExecutor {
   }
 
   private retireSession(key: string, session: TargetSession): void {
+    void this.retireSessionAndWait(key, session).catch(() => {});
+  }
+
+  private async retireSessionAndWait(key: string, session: TargetSession): Promise<void> {
     if (this.sessions.get(key) === session) this.sessions.delete(key);
     this.guidanceBySession.delete(session.sessionId);
     this.downloads?.detachSession(session.sessionId, 'session_replaced');
-    for (const child of [...(this.childFrameSessions.get(session.sessionId)?.values() ?? [])]) {
-      void this.detachFrameTargetSession(session, child, true, 'session_replaced');
-    }
-    void this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId })
-      .finally(() => this.forgetSession(session.sessionId))
-      .catch(() => {});
+    await Promise.all(
+      [...(this.childFrameSessions.get(session.sessionId)?.values() ?? [])]
+        .map(child => this.detachFrameTargetSession(session, child, true, 'session_replaced')),
+    );
+    await this.transport.send('Target.detachFromTarget', { sessionId: session.sessionId }).catch(() => {});
+    this.forgetSession(session.sessionId);
   }
 
   private forgetSession(sessionId: string): void {

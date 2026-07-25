@@ -1643,6 +1643,97 @@ test('the same physical user tab is exclusive across unrelated Agent Leases', as
   assert.equal(observed.elements[0].name, 'Submit');
 });
 
+test('same physical target commands share one actor across Workspace-local target IDs', async () => {
+  let releaseAx;
+  let markAxStarted;
+  const axStarted = new Promise(resolve => { markAxStarted = resolve; });
+  class BlockingTransport extends BrowserFixtureTransport {
+    blockNextAx = true;
+
+    async send(method, params, sessionId) {
+      if (method === 'Accessibility.getFullAXTree' && this.blockNextAx) {
+        this.blockNextAx = false;
+        markAxStarted();
+        await new Promise(resolve => { releaseAx = resolve; });
+      }
+      return super.send(method, params, sessionId);
+    }
+  }
+  const transport = new BlockingTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:physical-actor',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const first = await createClient(runtime, 'bridge:actor-first', 'com.first.agent', 'instance:actor-first');
+  const second = await createClient(runtime, 'bridge:actor-second', 'com.second.agent', 'instance:actor-second');
+  const firstTarget = (await tool(runtime, first, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const secondTarget = (await tool(runtime, second, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+
+  const firstCall = tool(runtime, first, 'browser.observe', { limit: 10 }, firstTarget);
+  await axStarted;
+  const callsBeforeSecond = transport.calls.length;
+  const secondCall = tool(runtime, second, 'browser.observe', { limit: 10 }, secondTarget);
+  const secondRejected = assert.rejects(secondCall, error => error.code === 'target_busy');
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(transport.calls.length, callsBeforeSecond);
+
+  releaseAx();
+  await firstCall;
+  await secondRejected;
+});
+
+test('explicit target release cleans the old session before another Lease acquires control', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:target-release',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const first = await createClient(runtime, 'bridge:release-first', 'com.first.agent', 'instance:release-first');
+  const second = await createClient(runtime, 'bridge:release-second', 'com.second.agent', 'instance:release-second');
+  const firstTarget = (await tool(runtime, first, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const secondTarget = (await tool(runtime, second, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+
+  await tool(runtime, first, 'browser.observe', { limit: 10 }, firstTarget);
+  await assert.rejects(
+    () => tool(runtime, second, 'browser.observe', { limit: 10 }, secondTarget),
+    error => error.code === 'target_busy',
+  );
+  const detachedBefore = transport.calls.filter(call => call.method === 'Target.detachFromTarget').length;
+  const released = await tool(runtime, first, 'browser.tabs.release', {}, firstTarget);
+  assert.equal(released.released, true);
+  assert.equal(
+    transport.calls.filter(call => call.method === 'Target.detachFromTarget').length,
+    detachedBefore + 1,
+  );
+  const firstEvents = await runtime.call(first.bridge, 'events/poll', {
+    workspaceId: first.workspace.id,
+    cursor: first.eventCursor,
+  });
+  assert.deepEqual(
+    firstEvents.events
+      .map(event => event.type)
+      .filter(type => type.startsWith('target_control.')),
+    ['target_control.acquired', 'target_control.released'],
+  );
+  assert.equal(
+    firstEvents.events.find(event => (
+      event.type === 'observation.invalidated' && event.payload.reason === 'control_released'
+    )).targetId,
+    firstTarget,
+  );
+
+  const observed = await tool(runtime, second, 'browser.observe', { limit: 10 }, secondTarget);
+  assert.equal(observed.elements[0].name, 'Submit');
+  const repeated = await tool(runtime, first, 'browser.tabs.release', {}, firstTarget);
+  assert.equal(repeated.released, false);
+  await assert.doesNotReject(() => tool(runtime, second, 'browser.observe', { limit: 10 }, secondTarget));
+  assert.equal(transport.targets.has('user-form'), true);
+});
+
 test('tools/call enforces envelope context, schemas, and negotiated capabilities before CDP', async () => {
   const transport = new BrowserFixtureTransport();
   const runtime = new MemoryBrokerRuntime({

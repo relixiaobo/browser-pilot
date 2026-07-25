@@ -229,6 +229,7 @@ test('tool arguments are validated from the same schemas returned by the manifes
     error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
   );
   assert.deepEqual(validateToolArguments('browser.tabs.list', { scope: 'all' }), { scope: 'all' });
+  assert.deepEqual(validateToolArguments('browser.tabs.release', {}), {});
   assert.throws(
     () => validateToolArguments('browser.tabs.list', { scope: 'all_authorized' }),
     error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
@@ -335,6 +336,19 @@ test('tool result schemas require controlled-target context', () => {
     ],
   };
   assert.deepEqual(validateToolResult('browser.tabs.list', tabsResult), tabsResult);
+  assert.deepEqual(validateToolResult('browser.tabs.release', {
+    workspaceId: 'workspace:123',
+    leaseId: 'lease:123',
+    targetId: 'target:user-1',
+    url: 'https://example.com/form',
+    released: true,
+  }), {
+    workspaceId: 'workspace:123',
+    leaseId: 'lease:123',
+    targetId: 'target:user-1',
+    url: 'https://example.com/form',
+    released: true,
+  });
 });
 
 test('browser.click result schema accepts bounded typed click evidence', () => {

@@ -308,7 +308,7 @@ Preserve Browser Pilot advantages:
   - Complete: the local system-Chrome benchmark manifest is exhaustively tied
     to all ten B0.2 scenarios and observes same-process frames and OOPIFs through
     their actual session models. A canonical transition matrix exhaustively
-    covers all eleven Observation invalidation reasons and asserts the typed
+    covers all twelve Observation invalidation reasons and asserts the typed
     owner-visible `stale_ref` result. Expiry now preserves its `expired` reason
     for the owning context while remaining opaque across Workspace boundaries.
 - [x] **B6.2** Add action verification tests for obstruction, checkbox/radio,

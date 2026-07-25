@@ -75,7 +75,7 @@ the structured hint and current browser state.
 | `action_not_verified` | Inspect fresh tab/frame/Observation state. Retry only after correcting the stated condition. |
 | `unknown_outcome` | Query `commands/get`, inspect current browser state, and never automatically replay the mutation. |
 | `browser_disconnected` | Wait for `connection.restored`, relist tabs, reselect target/frame, and re-observe. Old target/frame/ref IDs are invalid. |
-| `target_busy` | Another Lease controls the physical target. Choose another tab or wait for release; do not steal control. |
+| `target_busy` | Another Lease controls the physical target. Choose another tab or wait for `target_control.released`; do not steal control. |
 | `target_not_owned` | Rebuild inventory in the owning Workspace; do not substitute a raw target ID. |
 | `lease_expired` | Create a new Lease, reacquire target control, and rebuild transient state. |
 | `cursor_expired` | Rebuild tab and Observation state, then obtain a new cursor baseline with `workspaces/get`. |
@@ -113,6 +113,12 @@ React to these state transitions:
 
 Process events in sequence order and advance the cursor only after downstream
 state has accepted each event.
+
+For an intentional handoff, the current controller calls
+`browser.tabs.release` with its Workspace-local target ID and waits for the
+completed result. The receiving Lease then uses its own target ID from
+`browser.tabs.list`. Never pass another Agent's Lease or target ID, and never
+simulate transfer by closing a user tab.
 
 ## Artifacts and Native Model Content
 

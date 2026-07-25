@@ -351,6 +351,7 @@ export const OBSERVATION_INVALIDATION_REASONS = [
   'browser_reconnected',
   'target_ineligible',
   'target_closed',
+  'control_released',
   'expired',
 ] as const;
 

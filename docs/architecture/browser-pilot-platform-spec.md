@@ -469,12 +469,16 @@ Artifacts. Raw CDP is never listed. `eval` requires `developer.eval`.
   affects only its own mappings, rules, credentials, journals, and Artifacts.
 - **BR-4:** Network and auth configuration is not global. Precedence and cleanup
   are deterministic within the owning Workspace.
-- **BR-5:** Each ControlledTarget serializes state-changing commands. Reads that
-  depend on document state join the same ordering boundary.
+- **BR-5:** Each physical browser target serializes state-changing commands.
+  Reads that depend on document state join that same actor even when separate
+  Workspaces address the target through different opaque ControlledTarget IDs.
 - **BR-6:** A physical target has at most one controlling Lease at a time.
   Multiple Workspaces may inventory it under different opaque IDs, but a
   conflicting acquisition reports `target_busy` and never silently steals
-  control.
+  control. The controlling Lease may call `browser.tabs.release` with its own
+  opaque target ID. The Broker retires its target session and scoped state
+  before a different Lease can acquire control with that Lease's own opaque ID.
+  No handoff call accepts a foreign Lease or target ID.
 - **BR-7:** The Pilot window visibly identifies the controlling client without
   injecting mutable content into the page DOM.
 - **BR-21:** Invoking the CLI or bridge is the browser-control authorization
@@ -601,7 +605,8 @@ node identity. Resolution verifies all of them before live-node revalidation.
 Same-context failures expose one of these stable invalidation reasons when
 known: `navigation`, `loader_replaced`, `document_replaced`, `frame_changed`,
 `frame_detached`, `session_replaced`, `target_detached`,
-`browser_reconnected`, `target_ineligible`, `target_closed`, or `expired`.
+`browser_reconnected`, `target_ineligible`, `target_closed`,
+`control_released`, or `expired`.
 Ownership mismatches remain an undifferentiated `stale_ref` so they do not
 disclose another Workspace's state.
 

@@ -265,7 +265,13 @@ match boolean, never the Broker storage path.
 
 Inventory includes every eligible ordinary user tab plus the Workspace's
 managed tabs. A physical tab can be controlled by only one Lease at a time.
-Releasing a Workspace closes managed tabs but leaves user tabs open.
+Commands for the same physical tab share one actor even though each Workspace
+has a different opaque target ID. A controlling Lease can call
+`browser.tabs.release` for one target without closing it. After that command
+completes and emits `target_control.released`, another Lease may use its own
+opaque ID to acquire the tab. This two-step handoff never accepts a destination
+Lease ID and never silently steals control. Releasing a Workspace closes managed
+tabs but leaves user tabs open.
 
 ## Events
 
