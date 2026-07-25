@@ -1,10 +1,21 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import test, { after, before } from 'node:test';
 import { chromium } from 'playwright';
-import { MemoryRefStore, ObservationService, RefRevalidationService } from '../dist/services.js';
 import {
+  ActionService,
+  FrameService,
+  MemoryRefStore,
+  ObservationService,
+  RefRevalidationService,
+} from '../dist/services.js';
+import { OBSERVATION_V1_LIMITS } from '../dist/protocol.js';
+import {
+  BROWSER_CAPABILITY_ACTION_FAILURE_CASES,
+  BROWSER_CAPABILITY_BENCHMARK_CASES,
   BROWSER_CAPABILITY_FIXTURES,
+  BROWSER_CAPABILITY_STALE_REF_CASES,
   REQUIRED_BROWSER_CAPABILITY_SCENARIOS,
   renderBrowserCapabilityFixture,
 } from './fixtures/browser-capability-matrix.mjs';
@@ -16,6 +27,31 @@ let secondaryServer;
 let primaryOrigin;
 let secondaryOrigin;
 let nestedCdpRequestId = 1;
+const benchmarkObservations = new Map();
+const detectedActionFailures = new Set();
+const detectedStaleRefs = new Set();
+
+function benchmarkTargetKey(element) {
+  return `${element.role}\0${element.name}`;
+}
+
+function recordBenchmarkObservation(id, observation) {
+  assert.equal(benchmarkObservations.has(id), false, `Duplicate benchmark Observation: ${id}`);
+  let normalizedUrl = observation.data.url;
+  try {
+    normalizedUrl = new URL(observation.data.url).pathname;
+  } catch {}
+  const normalizedData = { ...observation.data, url: normalizedUrl };
+  benchmarkObservations.set(id, {
+    targets: observation.data.elements.map(benchmarkTargetKey),
+    normalizedBytes: Buffer.byteLength(JSON.stringify(normalizedData), 'utf8'),
+  });
+}
+
+function recordExpectedDetection(id, expectedCases, detections) {
+  assert.ok(expectedCases.includes(id), `Unknown benchmark case: ${id}`);
+  detections.add(id);
+}
 
 function listen(handler) {
   return new Promise((resolve, reject) => {
@@ -78,7 +114,7 @@ function sendToTargetSession(client, sessionId, method, params = {}) {
   });
 }
 
-function observeWithCdp(client, targetId) {
+function observeWithCdp(client, targetId, options = {}) {
   const transport = {
     send(method, params) {
       return client.send(method, params);
@@ -87,6 +123,7 @@ function observeWithCdp(client, targetId) {
   };
   return new ObservationService(transport, 'isolated-session', targetId, {
     refStore: new MemoryRefStore(),
+    ...options,
   }).observe(50);
 }
 
@@ -150,6 +187,7 @@ test('AX-only and DOM-only fixtures expose deliberately different browser signal
     const axObservation = await new ObservationService(transport, 'isolated-session', 'ax-only', {
       refStore: axRefs,
     }).observe(50);
+    recordBenchmarkObservation('ax_only', axObservation);
     assert.ok(axObservation.data.elements.some(element => (
       element.role === 'button' && element.name === 'AX Command'
     )));
@@ -165,6 +203,21 @@ test('AX-only and DOM-only fixtures expose deliberately different browser signal
         () => revalidator.validateResolved(object.objectId, observedRef, { targetId: 'ax-only', ref: 1 }),
         error => error.code === 'stale_ref',
       );
+      recordExpectedDetection(
+        'semantic_mutation',
+        BROWSER_CAPABILITY_STALE_REF_CASES,
+        detectedStaleRefs,
+      );
+      await page.locator('#ax-control').evaluate(element => element.remove());
+      await assert.rejects(
+        () => revalidator.validateResolved(object.objectId, observedRef, { targetId: 'ax-only', ref: 1 }),
+        error => error.code === 'stale_ref',
+      );
+      recordExpectedDetection(
+        'node_detach',
+        BROWSER_CAPABILITY_STALE_REF_CASES,
+        detectedStaleRefs,
+      );
     } finally {
       await client.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => {});
     }
@@ -176,6 +229,7 @@ test('AX-only and DOM-only fixtures expose deliberately different browser signal
     tree = await client.send('Accessibility.getFullAXTree');
     assert.equal(tree.nodes.some(node => axValue(node, 'role') === 'button' && axValue(node, 'name') === 'DOM Command'), false);
     const domObservation = await observeWithCdp(client, 'dom-only');
+    recordBenchmarkObservation('dom_only', domObservation);
     assert.ok(domObservation.data.elements.some(element => (
       element.role === 'button' && element.name === 'DOM Command'
     )));
@@ -192,6 +246,7 @@ test('shadow, overlay, contenteditable, and controlled-input fixtures preserve t
   try {
     await page.goto(`${primaryOrigin}/capability/shadow-dom`);
     const shadowObservation = await observePage(page, 'shadow-dom');
+    recordBenchmarkObservation('shadow_dom', shadowObservation);
     assert.ok(shadowObservation.data.elements.some(element => element.name === 'Shadow Command'));
     await page.locator('#shadow-host').getByRole('button', { name: 'Shadow Command' }).click();
     assert.equal(await page.evaluate(() => window.shadowActivated), true);
@@ -203,6 +258,35 @@ test('shadow, overlay, contenteditable, and controlled-input fixtures preserve t
       const hit = document.elementFromPoint(x, y);
       return hit?.id || hit?.closest('[role="dialog"]')?.id;
     }, { x: box.x + box.width / 2, y: box.y + box.height / 2 }), 'fixture-overlay');
+    let client = await page.context().newCDPSession(page);
+    let refs = new MemoryRefStore();
+    let transport = { send: (method, params) => client.send(method, params), close() {} };
+    let observationService = new ObservationService(transport, 'isolated-session', 'overlay', {
+      refStore: refs,
+      settleDelayMs: 0,
+    });
+    const overlayObservation = await observationService.observe(50);
+    recordBenchmarkObservation('overlay', overlayObservation);
+    const behindRef = overlayObservation.data.elements.find(element => element.name === 'Behind Overlay')?.ref;
+    assert.ok(behindRef);
+    const actionService = new ActionService(transport, 'isolated-session', 'overlay', {
+      refStore: refs,
+      observationService,
+      refValidator: input => new RefRevalidationService(
+        transport,
+        'isolated-session',
+      ).validateResolved(input.objectId, input.entry, { targetId: 'overlay', ref: input.ref }),
+    });
+    await assert.rejects(
+      () => actionService.click({ kind: 'ref', ref: String(behindRef) }),
+      error => error.code === 'action_not_verified' && error.context?.reason === 'obscured',
+    );
+    recordExpectedDetection(
+      'overlay_obstruction',
+      BROWSER_CAPABILITY_ACTION_FAILURE_CASES,
+      detectedActionFailures,
+    );
+    await client.detach();
 
     await page.goto(`${primaryOrigin}/capability/contenteditable`);
     const editor = page.locator('#editor');
@@ -210,6 +294,7 @@ test('shadow, overlay, contenteditable, and controlled-input fixtures preserve t
     await editor.fill('replacement');
     assert.equal(await editor.innerText(), 'replacement');
     const editorObservation = await observePage(page, 'contenteditable');
+    recordBenchmarkObservation('contenteditable', editorObservation);
     assert.ok(editorObservation.data.elements.some(element => (
       element.role === 'textbox' && element.name === 'Fixture editor' && element.value === 'replacement'
     )));
@@ -219,10 +304,53 @@ test('shadow, overlay, contenteditable, and controlled-input fixtures preserve t
     await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
     assert.equal(await page.locator('#controlled').inputValue(), 'fixed');
     assert.equal(await page.evaluate(() => window.fixtureRollbackCount), 1);
-    const controlledObservation = await observePage(page, 'react-controlled');
+    client = await page.context().newCDPSession(page);
+    refs = new MemoryRefStore();
+    transport = { send: (method, params) => client.send(method, params), close() {} };
+    observationService = new ObservationService(transport, 'isolated-session', 'react-controlled', {
+      refStore: refs,
+      settleDelayMs: 0,
+    });
+    const controlledObservation = await observationService.observe(50);
+    recordBenchmarkObservation('react_controlled_input', controlledObservation);
     assert.ok(controlledObservation.data.elements.some(element => (
       element.role === 'textbox' && element.name === 'Controlled field' && element.value === 'fixed'
     )));
+    const controlledRef = controlledObservation.data.elements.find(
+      element => element.name === 'Controlled field',
+    )?.ref;
+    assert.ok(controlledRef);
+    const controlledActionService = new ActionService(
+      transport,
+      'isolated-session',
+      'react-controlled',
+      {
+        refStore: refs,
+        observationService,
+        readbackDelayMs: 40,
+        focusDelayMs: 0,
+        refValidator: input => new RefRevalidationService(
+          transport,
+          'isolated-session',
+        ).validateResolved(input.objectId, input.entry, {
+          targetId: 'react-controlled',
+          ref: input.ref,
+        }),
+      },
+    );
+    await assert.rejects(
+      () => controlledActionService.type(String(controlledRef), 'mutation', {
+        clear: true,
+        verification: 'require_exact',
+      }),
+      error => error.code === 'action_not_verified' && error.context?.reason === 'value_mismatch',
+    );
+    recordExpectedDetection(
+      'controlled_input_rollback',
+      BROWSER_CAPABILITY_ACTION_FAILURE_CASES,
+      detectedActionFailures,
+    );
+    await client.detach();
   } finally {
     await page.close();
   }
@@ -236,6 +364,23 @@ test('same-origin frames and forced cross-origin OOPIFs are independently observ
     assert.ok(sameFrame);
     assert.equal(new URL(sameFrame.url()).origin, primaryOrigin);
     assert.equal(await sameFrame.getByRole('button').innerText(), 'Same Frame Command');
+    let frameClient = await page.context().newCDPSession(page);
+    try {
+      const transport = { send: (method, params) => frameClient.send(method, params), close() {} };
+      const frames = await new FrameService(transport, 'isolated-session').list();
+      const frame = frames.find(candidate => candidate.url.endsWith('/capability/frame-same-inner'));
+      assert.ok(frame);
+      const selection = await new FrameService(transport, 'isolated-session').selectById(frame.id);
+      recordBenchmarkObservation(
+        'same_origin_iframe',
+        await observeWithCdp(frameClient, 'same-origin-frame', {
+          frameId: frame.id,
+          executionContextId: selection.executionContextId,
+        }),
+      );
+    } finally {
+      await frameClient.detach();
+    }
 
     await page.goto(`${primaryOrigin}/capability/frame-cross`);
     await page.waitForFunction(
@@ -246,6 +391,15 @@ test('same-origin frames and forced cross-origin OOPIFs are independently observ
     assert.ok(crossFrame);
     assert.notEqual(new URL(crossFrame.url()).origin, primaryOrigin);
     assert.equal(await crossFrame.getByRole('button').innerText(), 'Cross Frame Command');
+    frameClient = await page.context().newCDPSession(crossFrame);
+    try {
+      recordBenchmarkObservation(
+        'cross_origin_oopif',
+        await observeWithCdp(frameClient, 'cross-origin-frame'),
+      );
+    } finally {
+      await frameClient.detach();
+    }
     const targets = await browserCdp.send('Target.getTargets');
     const oopif = targets.targetInfos.find(target => (
       target.type === 'iframe' && target.url.startsWith(secondaryOrigin)
@@ -293,6 +447,7 @@ test('navigation and same-URL document replacement fixtures produce distinct tra
   const page = await browser.newPage();
   try {
     await page.goto(`${primaryOrigin}/capability/navigation`);
+    recordBenchmarkObservation('navigation', await observePage(page, 'navigation'));
     await Promise.all([
       page.waitForURL('**/capability/navigation-next'),
       page.locator('#navigate').click(),
@@ -300,6 +455,10 @@ test('navigation and same-URL document replacement fixtures produce distinct tra
     assert.equal(await page.locator('#navigation-complete').innerText(), 'navigation complete');
 
     await page.goto(`${primaryOrigin}/capability/document-replacement`);
+    recordBenchmarkObservation(
+      'document_replacement',
+      await observePage(page, 'document-replacement'),
+    );
     const url = page.url();
     await page.locator('#replace-document').click();
     await page.locator('#replacement').waitFor();
@@ -308,4 +467,118 @@ test('navigation and same-URL document replacement fixtures produce distinct tra
   } finally {
     await page.close();
   }
+});
+
+test('capability metrics do not regress from the versioned Chrome baseline', async t => {
+  const expectedIds = BROWSER_CAPABILITY_BENCHMARK_CASES.map(candidate => candidate.id);
+  assert.deepEqual([...benchmarkObservations.keys()].sort(), [...expectedIds].sort());
+
+  let expectedTargets = 0;
+  let matchedTargets = 0;
+  let observedTargets = 0;
+  let falseInteractableTargets = 0;
+  let maxNormalizedObservationBytes = 0;
+  const unclassifiedTargets = [];
+  for (const benchmarkCase of BROWSER_CAPABILITY_BENCHMARK_CASES) {
+    const measurement = benchmarkObservations.get(benchmarkCase.id);
+    assert.ok(measurement);
+    const unmatchedActionableTargets = [...benchmarkCase.actionableTargets];
+    const unmatchedFalseTargets = [...benchmarkCase.falseInteractableTargets];
+    expectedTargets += unmatchedActionableTargets.length;
+    observedTargets += measurement.targets.length;
+    maxNormalizedObservationBytes = Math.max(
+      maxNormalizedObservationBytes,
+      measurement.normalizedBytes,
+    );
+    for (const target of measurement.targets) {
+      const actionableIndex = unmatchedActionableTargets.indexOf(target);
+      if (actionableIndex >= 0) {
+        unmatchedActionableTargets.splice(actionableIndex, 1);
+        matchedTargets += 1;
+        continue;
+      }
+      falseInteractableTargets += 1;
+      const falseIndex = unmatchedFalseTargets.indexOf(target);
+      if (falseIndex >= 0) unmatchedFalseTargets.splice(falseIndex, 1);
+      else {
+        unclassifiedTargets.push(`${benchmarkCase.id}:${target.replace('\0', ':')}`);
+      }
+    }
+  }
+  assert.deepEqual(unclassifiedTargets, []);
+
+  const report = {
+    schemaVersion: 1,
+    corpus: {
+      observationCases: BROWSER_CAPABILITY_BENCHMARK_CASES.length,
+      actionFailureCases: BROWSER_CAPABILITY_ACTION_FAILURE_CASES.length,
+      staleRefCases: BROWSER_CAPABILITY_STALE_REF_CASES.length,
+    },
+    observableTargetRecall: { matchedTargets, expectedTargets },
+    falseInteractableRate: { falseInteractableTargets, observedTargets },
+    actionFailureDetection: {
+      detectedFailures: detectedActionFailures.size,
+      expectedFailures: BROWSER_CAPABILITY_ACTION_FAILURE_CASES.length,
+    },
+    staleRefDetection: {
+      detectedStaleRefs: detectedStaleRefs.size,
+      expectedStaleRefs: BROWSER_CAPABILITY_STALE_REF_CASES.length,
+    },
+    outputSize: {
+      samples: benchmarkObservations.size,
+      maxNormalizedObservationBytes,
+      protocolBudgetBytes: OBSERVATION_V1_LIMITS.maxSerializedBytes,
+    },
+  };
+  const baseline = JSON.parse(await readFile(
+    new URL('./baselines/browser-capability.v1.json', import.meta.url),
+    'utf8',
+  ));
+  assert.equal(baseline.schemaVersion, report.schemaVersion);
+  assert.deepEqual(report.corpus, baseline.corpus);
+  assert.equal(baseline.outputSize.samples, benchmarkObservations.size);
+  assert.equal(
+    baseline.outputSize.protocolBudgetBytes,
+    OBSERVATION_V1_LIMITS.maxSerializedBytes,
+  );
+
+  const rateAtLeast = (current, currentTotal, recorded, recordedTotal) => (
+    current * recordedTotal >= recorded * currentTotal
+  );
+  const rateAtMost = (current, currentTotal, recorded, recordedTotal) => (
+    current * recordedTotal <= recorded * currentTotal
+  );
+  assert.ok(rateAtLeast(
+    matchedTargets,
+    expectedTargets,
+    baseline.observableTargetRecall.matchedTargets,
+    baseline.observableTargetRecall.expectedTargets,
+  ), 'observable target recall regressed');
+  assert.ok(rateAtMost(
+    falseInteractableTargets,
+    observedTargets,
+    baseline.falseInteractableRate.falseInteractableTargets,
+    baseline.falseInteractableRate.observedTargets,
+  ), 'false interactable rate increased');
+  assert.ok(rateAtLeast(
+    detectedActionFailures.size,
+    BROWSER_CAPABILITY_ACTION_FAILURE_CASES.length,
+    baseline.actionFailureDetection.detectedFailures,
+    baseline.actionFailureDetection.expectedFailures,
+  ), 'action failure detection regressed');
+  assert.ok(rateAtLeast(
+    detectedStaleRefs.size,
+    BROWSER_CAPABILITY_STALE_REF_CASES.length,
+    baseline.staleRefDetection.detectedStaleRefs,
+    baseline.staleRefDetection.expectedStaleRefs,
+  ), 'stale ref detection regressed');
+  assert.ok(
+    maxNormalizedObservationBytes <= baseline.outputSize.maxNormalizedObservationBytes,
+    'normalized Observation output exceeded the recorded baseline',
+  );
+  assert.ok(
+    maxNormalizedObservationBytes <= OBSERVATION_V1_LIMITS.maxSerializedBytes,
+    'normalized Observation output exceeded the protocol budget',
+  );
+  t.diagnostic(`browser capability metrics: ${JSON.stringify(report)}`);
 });

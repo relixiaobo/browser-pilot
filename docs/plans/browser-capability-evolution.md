@@ -72,10 +72,17 @@ Preserve Browser Pilot advantages:
     `stale_ref.context.reason` under protocol 1.0 and 1.1. Older clients already
     branch on `stale_ref` and rebuild state; no capability or version change is
     required.
-- [ ] **B0.4** Add quantitative baselines: observable target recall, false
+- [x] **B0.4** Add quantitative baselines: observable target recall, false
   interactable rate, action verification failures, stale-ref detection, and
   output size.
   - Covers: FR-8.
+  - Complete: a versioned, local-only system-Chrome corpus now measures all ten
+    capability fixtures through Browser Pilot Observations, including selected
+    same-process and OOPIF frames. The recorded v1 baseline is 10/10 actionable
+    target recall, 2/12 false interactable refs, 2/2 expected action failures
+    detected, 2/2 same-document stale refs detected, and a 208-byte maximum
+    normalized Observation sample. Ground truth uses only public role/name
+    pairs; ephemeral origins, selectors, and CDP identity are excluded.
 
 ### B1. Build the observation engine
 
@@ -310,9 +317,15 @@ Preserve Browser Pilot advantages:
 - [ ] **B6.3** Add real-site canaries that report drift without making release
   tests depend on third-party availability.
   - Covers: FR-8.
-- [ ] **B6.4** Compare metrics against B0.4 and reject changes that increase
+- [x] **B6.4** Compare metrics against B0.4 and reject changes that increase
   unsafe false-positive interactions or unbounded output.
   - Covers: NFR-1, AC-8.
+  - Complete: `npm run test:capabilities` compares the live isolated-Chrome
+    report with the versioned B0.4 baseline using directional gates. Recall,
+    action-failure detection, and stale-ref detection may increase; the false
+    interactable rate may decrease. Corpus drift, unclassified refs, any metric
+    regression, output growth beyond the recorded maximum, or violation of the
+    protocol byte budget fails the gate.
 
 ## Parallel Work Rules
 

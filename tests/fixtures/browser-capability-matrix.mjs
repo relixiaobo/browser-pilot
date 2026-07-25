@@ -129,6 +129,55 @@ export const BROWSER_CAPABILITY_FIXTURES = Object.freeze([
   },
 ]);
 
+// Ground truth for the isolated capability benchmark. A target key is the
+// public role/name pair an Agent receives, not a selector or browser identity.
+export const BROWSER_CAPABILITY_BENCHMARK_CASES = Object.freeze([
+  { id: 'ax_only', actionableTargets: ['button\0AX Command'], falseInteractableTargets: [] },
+  { id: 'dom_only', actionableTargets: ['button\0DOM Command'], falseInteractableTargets: [] },
+  { id: 'shadow_dom', actionableTargets: ['button\0Shadow Command'], falseInteractableTargets: [] },
+  {
+    id: 'same_origin_iframe',
+    actionableTargets: ['button\0Same Frame Command'],
+    falseInteractableTargets: [],
+  },
+  {
+    id: 'cross_origin_oopif',
+    actionableTargets: ['button\0Cross Frame Command'],
+    falseInteractableTargets: [],
+  },
+  {
+    id: 'overlay',
+    actionableTargets: ['button\0Resolve Overlay'],
+    falseInteractableTargets: ['button\0Behind Overlay'],
+  },
+  {
+    id: 'contenteditable',
+    actionableTargets: ['textbox\0Fixture editor'],
+    falseInteractableTargets: ['StaticText\0replacement'],
+  },
+  {
+    id: 'react_controlled_input',
+    actionableTargets: ['textbox\0Controlled field'],
+    falseInteractableTargets: [],
+  },
+  { id: 'navigation', actionableTargets: ['button\0Navigate'], falseInteractableTargets: [] },
+  {
+    id: 'document_replacement',
+    actionableTargets: ['button\0Replace document'],
+    falseInteractableTargets: [],
+  },
+]);
+
+export const BROWSER_CAPABILITY_ACTION_FAILURE_CASES = Object.freeze([
+  'overlay_obstruction',
+  'controlled_input_rollback',
+]);
+
+export const BROWSER_CAPABILITY_STALE_REF_CASES = Object.freeze([
+  'semantic_mutation',
+  'node_detach',
+]);
+
 const fixturesByPath = new Map(BROWSER_CAPABILITY_FIXTURES.map(fixture => [fixture.path, fixture]));
 
 const SUPPORT_PAGES = new Map([

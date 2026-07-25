@@ -13,6 +13,7 @@
     "start": "node dist/cli.js",
     "test": "tsup && node --test tests/*.test.mjs && npx playwright test --project core --project compat --project network",
     "test:unit": "tsup && node --test tests/*.test.mjs",
+    "test:capabilities": "tsup && node --test tests/browser-capability-fixtures.test.mjs",
     "test:protocol": "tsup && node --test tests/protocol.test.mjs",
     "test:integration": "tsup && npx playwright test --project integration",
     "test:all": "tsup && npx playwright test",
