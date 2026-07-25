@@ -66,7 +66,12 @@ test('Broker initializes one connection and filters the canonical tool manifest'
   ]);
 
   const manifest = await runtime.call('bridge:one', 'tools/list', {});
-  assert.ok(manifest.tools.some(tool => tool.name === 'browser.observe'));
+  const observe = manifest.tools.find(tool => tool.name === 'browser.observe');
+  assert.ok(observe);
+  assert.deepEqual(
+    observe.outputSchema.properties.elements.items.properties.value['x-browser-pilot-sensitivity'],
+    ['browser_data', 'credential'],
+  );
   assert.ok(manifest.tools.some(tool => tool.name === 'browser.capture'));
   assert.equal(manifest.tools.some(tool => tool.name === 'browser.eval'), false);
   assert.deepEqual(runtime.stats(), {

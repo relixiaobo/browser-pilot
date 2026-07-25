@@ -1,6 +1,7 @@
 import { invalidArgument } from './errors.js';
 import {
   CAPABILITIES,
+  SENSITIVITIES,
   type ArtifactDescriptor,
   type Capability,
   type JsonValue,
@@ -46,13 +47,22 @@ export interface ToolManifest {
 }
 
 const emptyInput = objectSchema({});
-const boundedText = stringSchema({ minLength: 1, maxLength: 1_000_000 });
-const boundedSelector = stringSchema({ minLength: 1, maxLength: 4096 });
-const boundedUrl = stringSchema({ minLength: 1, maxLength: 16_384 });
+
+function sensitive(schema: JsonSchema, ...sensitivity: Sensitivity[]): JsonSchema {
+  return { ...schema, 'x-browser-pilot-sensitivity': sensitivity };
+}
+
+const boundedText = sensitive(
+  stringSchema({ minLength: 1, maxLength: 1_000_000 }),
+  'browser_data',
+  'credential',
+);
+const boundedSelector = sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data');
+const boundedUrl = sensitive(stringSchema({ minLength: 1, maxLength: 16_384 }), 'browser_data');
 const opaqueIdSchema = stringSchema({ minLength: 3, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]+$' });
 const headerSchema = objectSchema({
-  name: stringSchema({ minLength: 1, maxLength: 256 }),
-  value: stringSchema({ maxLength: 8192 }),
+  name: sensitive(stringSchema({ minLength: 1, maxLength: 256 }), 'browser_data'),
+  value: sensitive(stringSchema({ maxLength: 8192 }), 'browser_data', 'credential'),
 }, ['name', 'value']);
 const networkRuleSchema = objectSchema({
   ruleId: opaqueIdSchema,
@@ -68,15 +78,15 @@ const networkRequestDetailSchema = objectSchema({
   url: boundedUrl,
   type: stringSchema({ maxLength: 128 }),
   requestHeaders: arraySchema(headerSchema, { maxItems: 256 }),
-  postData: stringSchema({ maxLength: 65_536 }),
+  postData: sensitive(stringSchema({ maxLength: 65_536 }), 'browser_data', 'credential'),
   postDataTruncated: booleanSchema(),
   status: integerSchema({ minimum: 100, maximum: 999 }),
-  statusText: stringSchema({ maxLength: 4096 }),
+  statusText: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
   responseHeaders: arraySchema(headerSchema, { maxItems: 256 }),
   mimeType: stringSchema({ maxLength: 256 }),
   size: integerSchema({ minimum: 0 }),
   durationMs: numberSchema({ minimum: 0 }),
-  error: stringSchema({ maxLength: 4096 }),
+  error: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
   bodyAvailable: booleanSchema(),
 }, [
   'requestId',
@@ -91,8 +101,8 @@ const networkRequestDetailSchema = objectSchema({
 const elementSchema = objectSchema({
   ref: integerSchema({ minimum: 1 }),
   role: stringSchema({ minLength: 1, maxLength: 128 }),
-  name: stringSchema({ maxLength: 4096 }),
-  value: stringSchema({ maxLength: 65_536 }),
+  name: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+  value: sensitive(stringSchema({ maxLength: 65_536 }), 'browser_data', 'credential'),
   checked: booleanSchema(),
 }, ['ref', 'role', 'name']);
 
@@ -281,7 +291,7 @@ function resultSchema(
 
 const observationOutput = resultSchema('target', {
   observationId: opaqueIdSchema,
-  title: stringSchema({ maxLength: 4096 }),
+  title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
   elements: arraySchema(elementSchema, { maxItems: 10_000 }),
   truncated: booleanSchema(),
   truncationReasons: arraySchema(stringSchema({
@@ -312,7 +322,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         id: opaqueIdSchema,
         product: stringSchema({ minLength: 1, maxLength: 128 }),
         channel: stringSchema({ maxLength: 128 }),
-        profile: stringSchema({ maxLength: 4096 }),
+        profile: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
         state: stringSchema({ enum: ['ready', 'not_running', 'remote_debugging_disabled', 'authorization_required', 'disconnected'] }),
       }, ['id', 'product', 'state'])),
     }, ['browsers']),
@@ -357,7 +367,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['browser_data'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
     artifactKinds: [],
   }),
   tool({
@@ -371,7 +381,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: false,
     idempotency: 'read_only',
     cancellation: 'best_effort',
-    sensitivity: { input: [], output: ['browser_data'] },
+    sensitivity: { input: [], output: ['browser_data', 'credential'] },
     artifactKinds: [],
   }),
   tool({
@@ -384,8 +394,8 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       limit: integerSchema({ minimum: 1, maximum: 1_000_000 }),
     }),
     outputSchema: resultSchema('target', {
-      title: stringSchema({ maxLength: 4096 }),
-      text: stringSchema({ maxLength: 1_000_000 }),
+      title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+      text: sensitive(stringSchema({ maxLength: 1_000_000 }), 'browser_data'),
       length: integerSchema({ minimum: 0 }),
       truncated: booleanSchema(),
     }, ['title', 'text', 'length', 'truncated']),
@@ -393,7 +403,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: false,
     idempotency: 'read_only',
     cancellation: 'best_effort',
-    sensitivity: { input: [], output: ['browser_data'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data'] },
     artifactKinds: [],
   }),
   tool({
@@ -416,7 +426,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['browser_data'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
     artifactKinds: [],
   }),
   tool({
@@ -437,7 +447,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data'] },
+    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data', 'credential'] },
     artifactKinds: [],
   }),
   tool({
@@ -458,7 +468,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data'] },
+    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data', 'credential'] },
     artifactKinds: [],
   }),
   tool({
@@ -472,7 +482,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['browser_data'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
     artifactKinds: [],
   }),
   tool({
@@ -490,7 +500,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: false,
     idempotency: 'idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: [], output: ['browser_data'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data'] },
     artifactKinds: ['screenshot', 'screenshot_preview'],
   }),
   tool({
@@ -515,15 +525,15 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     inputSchema: {
       oneOf: [
         objectSchema({
-          artifactId: opaqueIdSchema,
+          artifactId: sensitive(opaqueIdSchema, 'user_file'),
           observationId: opaqueIdSchema,
           ref: integerSchema({ minimum: 1 }),
         }, ['artifactId', 'observationId', 'ref']),
         objectSchema({
-          artifactId: opaqueIdSchema,
+          artifactId: sensitive(opaqueIdSchema, 'user_file'),
           inputIndex: integerSchema({ minimum: 1 }),
         }, ['artifactId', 'inputIndex']),
-        objectSchema({ artifactId: opaqueIdSchema }, ['artifactId']),
+        objectSchema({ artifactId: sensitive(opaqueIdSchema, 'user_file') }, ['artifactId']),
       ],
     },
     outputSchema: observationOutput,
@@ -531,7 +541,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['user_file'], output: ['browser_data'] },
+    sensitivity: { input: ['user_file'], output: ['browser_data', 'credential'] },
     artifactKinds: [],
   }),
   tool({
@@ -545,7 +555,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     outputSchema: resultSchema('workspace', {
       targets: arraySchema(objectSchema({
         targetId: opaqueIdSchema,
-        title: stringSchema({ maxLength: 4096 }),
+        title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
         url: boundedUrl,
         active: booleanSchema(),
         origin: stringSchema({ enum: ['managed', 'managed_popup', 'user_tab'] }),
@@ -599,7 +609,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         frameId: opaqueIdSchema,
         parentFrameId: opaqueIdSchema,
         url: boundedUrl,
-        name: stringSchema({ maxLength: 4096 }),
+        name: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
       }, ['frameId', 'url', 'name'])),
     }, ['frames']),
     requiredCapabilities: ['observation.read'],
@@ -639,7 +649,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         dialogId: opaqueIdSchema,
         targetId: opaqueIdSchema,
         type: stringSchema({ enum: ['alert', 'confirm', 'prompt', 'beforeunload'] }),
-        message: stringSchema({ maxLength: 65_536 }),
+        message: sensitive(stringSchema({ maxLength: 65_536 }), 'browser_data'),
       }, ['dialogId', 'targetId', 'type', 'message'])),
     }, ['dialogs']),
     requiredCapabilities: ['event.read'],
@@ -657,14 +667,14 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     inputSchema: objectSchema({
       dialogId: opaqueIdSchema,
       action: stringSchema({ enum: ['accept', 'dismiss'] }),
-      promptText: stringSchema({ maxLength: 65_536 }),
+      promptText: sensitive(stringSchema({ maxLength: 65_536 }), 'browser_data', 'credential'),
     }, ['dialogId', 'action']),
     outputSchema: resultSchema('target', { dialogId: opaqueIdSchema, action: stringSchema({ enum: ['accept', 'dismiss'] }) }, ['dialogId', 'action']),
     requiredCapabilities: ['action.input'],
     mutating: true,
     idempotency: 'idempotent',
     cancellation: 'before_dispatch',
-    sensitivity: { input: ['browser_data'], output: ['browser_data'] },
+    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data'] },
     artifactKinds: [],
   }),
   tool({
@@ -673,8 +683,8 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     description: 'Set Workspace-scoped HTTP authentication credentials.',
     context: 'workspace',
     inputSchema: objectSchema({
-      username: stringSchema({ minLength: 1, maxLength: 4096 }),
-      password: stringSchema({ maxLength: 65_536 }),
+      username: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'credential'),
+      password: sensitive(stringSchema({ maxLength: 65_536 }), 'credential'),
     }, ['username', 'password']),
     outputSchema: resultSchema('workspace', { configured: booleanSchema({ const: true }) }, ['configured']),
     requiredCapabilities: ['auth.manage'],
@@ -703,13 +713,15 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     title: 'List cookies',
     description: 'List cookies available to a controlled target with sensitivity metadata.',
     context: 'target',
-    inputSchema: objectSchema({ domain: stringSchema({ minLength: 1, maxLength: 2048 }) }),
+    inputSchema: objectSchema({
+      domain: sensitive(stringSchema({ minLength: 1, maxLength: 2048 }), 'browser_data'),
+    }),
     outputSchema: resultSchema('target', {
       cookies: arraySchema(objectSchema({
-        name: stringSchema({ maxLength: 4096 }),
-        value: stringSchema({ maxLength: 1_000_000 }),
-        domain: stringSchema({ maxLength: 2048 }),
-        path: stringSchema({ maxLength: 4096 }),
+        name: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+        value: sensitive(stringSchema({ maxLength: 1_000_000 }), 'credential'),
+        domain: sensitive(stringSchema({ maxLength: 2048 }), 'browser_data'),
+        path: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
         httpOnly: booleanSchema(),
         secure: booleanSchema(),
         expires: numberSchema(),
@@ -719,7 +731,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: false,
     idempotency: 'read_only',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['credential'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
     artifactKinds: [],
   }),
   tool({
@@ -730,7 +742,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     inputSchema: objectSchema({
       limit: integerSchema({ minimum: 1, maximum: 1000 }),
       after: integerSchema({ minimum: 0 }),
-      url: stringSchema({ maxLength: 16_384 }),
+      url: sensitive(stringSchema({ maxLength: 16_384 }), 'browser_data'),
       method: stringSchema({ maxLength: 32 }),
       status: stringSchema({ maxLength: 16 }),
       type: arraySchema(stringSchema({ minLength: 1, maxLength: 128 }), { uniqueItems: true }),
@@ -744,7 +756,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         type: stringSchema({ maxLength: 128 }),
         size: integerSchema({ minimum: 0 }),
         durationMs: numberSchema({ minimum: 0 }),
-        error: stringSchema({ maxLength: 4096 }),
+        error: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
       }, ['requestId', 'method', 'url', 'type'])),
       nextCursor: integerSchema({ minimum: 0 }),
       truncated: booleanSchema(),
@@ -764,7 +776,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     inputSchema: objectSchema({ requestId: opaqueIdSchema, includeBody: booleanSchema() }, ['requestId']),
     outputSchema: resultSchema('workspace', {
       request: networkRequestDetailSchema,
-      body: stringSchema({ maxLength: 1_000_000 }),
+      body: sensitive(stringSchema({ maxLength: 1_000_000 }), 'browser_data', 'credential'),
       bodyEncoding: stringSchema({ enum: ['utf8', 'base64'] }),
       mimeType: stringSchema({ maxLength: 256 }),
       bodyTruncated: booleanSchema(),
@@ -819,7 +831,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           pattern: boundedUrl,
           status: integerSchema({ minimum: 100, maximum: 999 }),
           headers: arraySchema(headerSchema, { maxItems: 256 }),
-          body: stringSchema({ maxLength: 1_000_000 }),
+          body: sensitive(stringSchema({ maxLength: 1_000_000 }), 'browser_data', 'credential'),
         }, ['type', 'pattern']),
         objectSchema({
           type: stringSchema({ const: 'headers' }),
@@ -862,7 +874,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     context: 'target',
     inputSchema: objectSchema({ expression: boundedText, awaitPromise: booleanSchema() }, ['expression']),
     outputSchema: resultSchema('target', {
-      value: {},
+      value: sensitive({}, 'browser_data', 'credential'),
       truncated: booleanSchema(),
     }, ['value', 'truncated']),
     requiredCapabilities: ['developer.eval'],
@@ -875,6 +887,17 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 ];
 
 const toolsByName = new Map(TOOL_DEFINITIONS.map(definition => [definition.name, definition]));
+
+function schemaSensitivities(schema: JsonSchema, result = new Set<Sensitivity>()): Set<Sensitivity> {
+  for (const value of schema['x-browser-pilot-sensitivity'] ?? []) result.add(value);
+  for (const property of Object.values(schema.properties ?? {})) schemaSensitivities(property, result);
+  for (const alternative of schema.oneOf ?? []) schemaSensitivities(alternative, result);
+  if (schema.items) schemaSensitivities(schema.items, result);
+  if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+    schemaSensitivities(schema.additionalProperties, result);
+  }
+  return result;
+}
 
 export function assertToolManifest(definitions: readonly ToolDefinition[] = TOOL_DEFINITIONS): void {
   const names = new Set<string>();
@@ -895,6 +918,31 @@ export function assertToolManifest(definitions: readonly ToolDefinition[] = TOOL
     }
     if (definition.mutating && definition.cancellation === 'not_applicable') {
       throw new Error(`Mutating tool ${definition.name} must declare cancellation semantics`);
+    }
+    for (const direction of ['input', 'output'] as const) {
+      const sensitivity = definition.sensitivity[direction];
+      if (new Set(sensitivity).size !== sensitivity.length) {
+        throw new Error(`Tool ${definition.name} has duplicate ${direction} sensitivity`);
+      }
+      for (const value of sensitivity) {
+        if (!(SENSITIVITIES as readonly string[]).includes(value)) {
+          throw new Error(`Tool ${definition.name} references unknown sensitivity ${value}`);
+        }
+      }
+      for (const value of schemaSensitivities(
+        direction === 'input' ? definition.inputSchema : definition.outputSchema,
+      )) {
+        if (!(SENSITIVITIES as readonly string[]).includes(value)) {
+          throw new Error(
+            `Tool ${definition.name} ${direction} schema contains unknown sensitivity ${value}`,
+          );
+        }
+        if (!sensitivity.includes(value)) {
+          throw new Error(
+            `Tool ${definition.name} ${direction} schema marks ${value} without declaring it`,
+          );
+        }
+      }
     }
     assertSchemaDefinition(definition.inputSchema, `${definition.name}.inputSchema`);
     assertSchemaDefinition(definition.outputSchema, `${definition.name}.outputSchema`);

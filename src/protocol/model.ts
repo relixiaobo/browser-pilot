@@ -391,7 +391,14 @@ export interface CommandOutcome {
   error?: JsonRpcErrorObject;
 }
 
-export type Sensitivity = 'public' | 'browser_data' | 'credential' | 'user_file';
+export const SENSITIVITIES = [
+  'public',
+  'browser_data',
+  'credential',
+  'user_file',
+] as const;
+
+export type Sensitivity = (typeof SENSITIVITIES)[number];
 
 export interface ArtifactDescriptor {
   id: ArtifactId;

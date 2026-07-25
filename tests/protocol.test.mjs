@@ -144,6 +144,73 @@ test('canonical tool manifest is internally consistent and capability-filtered',
   assert.equal(TOOL_DEFINITIONS.some(tool => tool.name.startsWith('browser.access.')), false);
 });
 
+test('canonical schemas propagate field-level sensitivity without changing values', () => {
+  const tool = name => TOOL_DEFINITIONS.find(definition => definition.name === name);
+  const sensitivity = schema => schema['x-browser-pilot-sensitivity'];
+
+  const read = tool('browser.read');
+  assert.deepEqual(sensitivity(read.inputSchema.properties.selector), ['browser_data']);
+  assert.deepEqual(sensitivity(read.outputSchema.properties.text), ['browser_data']);
+
+  const observe = tool('browser.observe');
+  const element = observe.outputSchema.properties.elements.items;
+  assert.deepEqual(sensitivity(element.properties.value), ['browser_data', 'credential']);
+  assert.deepEqual(observe.sensitivity.output, ['browser_data', 'credential']);
+
+  const auth = tool('browser.auth.set');
+  assert.deepEqual(sensitivity(auth.inputSchema.properties.username), ['credential']);
+  assert.deepEqual(sensitivity(auth.inputSchema.properties.password), ['credential']);
+
+  const cookies = tool('browser.cookies.list');
+  const cookie = cookies.outputSchema.properties.cookies.items;
+  assert.deepEqual(sensitivity(cookie.properties.value), ['credential']);
+  assert.deepEqual(sensitivity(cookie.properties.domain), ['browser_data']);
+
+  const network = tool('browser.network.request');
+  assert.deepEqual(sensitivity(network.outputSchema.properties.body), ['browser_data', 'credential']);
+  assert.deepEqual(
+    sensitivity(network.outputSchema.properties.request.properties.postData),
+    ['browser_data', 'credential'],
+  );
+  assert.deepEqual(
+    sensitivity(network.outputSchema.properties.request.properties.requestHeaders.items.properties.value),
+    ['browser_data', 'credential'],
+  );
+
+  const upload = tool('browser.upload');
+  for (const alternative of upload.inputSchema.oneOf) {
+    assert.deepEqual(sensitivity(alternative.properties.artifactId), ['user_file']);
+  }
+
+  assert.deepEqual(
+    validateToolArguments('browser.auth.set', { username: 'alice', password: 'secret' }),
+    { username: 'alice', password: 'secret' },
+  );
+});
+
+test('tool manifest rejects invalid or undeclared schema sensitivity', () => {
+  const discover = TOOL_DEFINITIONS.find(tool => tool.name === 'browser.discover');
+  assert.throws(
+    () => assertToolManifest([{
+      ...discover,
+      inputSchema: {
+        ...discover.inputSchema,
+        'x-browser-pilot-sensitivity': ['private_unknown'],
+      },
+    }]),
+    /unknown sensitivity private_unknown/,
+  );
+
+  const observe = TOOL_DEFINITIONS.find(tool => tool.name === 'browser.observe');
+  assert.throws(
+    () => assertToolManifest([{
+      ...observe,
+      sensitivity: { ...observe.sensitivity, output: ['browser_data'] },
+    }]),
+    /output schema marks credential without declaring it/,
+  );
+});
+
 test('tool arguments are validated from the same schemas returned by the manifest', () => {
   assert.deepEqual(
     validateToolArguments('browser.capture', { fullPage: true, includeOriginal: true }),

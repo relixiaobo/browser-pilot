@@ -137,6 +137,22 @@ Connection tools omit Workspace fields. Workspace tools require
 session IDs are never public inputs. The Broker validates the negotiated
 capability, Lease ownership, tool schema, and target control before dispatch.
 
+Each tool's `sensitivity.input` and `sensitivity.output` arrays list the classes
+that may occur anywhere in that direction. Specific content-bearing schema
+nodes carry `x-browser-pilot-sensitivity`, for example:
+
+```json
+{"type":"string","maxLength":1000000,"x-browser-pilot-sensitivity":["browser_data"]}
+```
+
+Use the field annotation when mapping `browser.read.result.text`, Observation
+element values, auth fields, cookie values, network headers/bodies, upload
+Artifact references, prompt text, or eval values into the Agent runtime. Keep
+the annotation attached to derived model content; do not infer sensitivity from
+field names or English tool descriptions. The annotation does not wrap or alter
+the value. Artifact descriptors and BrowserEvents provide their actual runtime
+`sensitivity` and should be propagated directly.
+
 Every `tools/call` response is a Command outcome:
 
 ```json

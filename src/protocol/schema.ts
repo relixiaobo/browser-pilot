@@ -1,5 +1,5 @@
 import { invalidArgument } from './errors.js';
-import type { JsonValue } from './model.js';
+import { SENSITIVITIES, type JsonValue, type Sensitivity } from './model.js';
 
 export type JsonSchemaType = 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
 
@@ -23,6 +23,7 @@ export interface JsonSchema {
   pattern?: string;
   minimum?: number;
   maximum?: number;
+  'x-browser-pilot-sensitivity'?: Sensitivity[];
 }
 
 export interface SchemaValidationIssue {
@@ -157,6 +158,17 @@ export function assertSchemaValue(schema: JsonSchema, value: unknown, field = 'a
 }
 
 export function assertSchemaDefinition(schema: JsonSchema, path = '$schema'): void {
+  const sensitivity = schema['x-browser-pilot-sensitivity'];
+  if (sensitivity) {
+    if (sensitivity.length === 0 || new Set(sensitivity).size !== sensitivity.length) {
+      throw new Error(`${path}.x-browser-pilot-sensitivity must be non-empty and unique`);
+    }
+    for (const value of sensitivity) {
+      if (!(SENSITIVITIES as readonly string[]).includes(value)) {
+        throw new Error(`${path}.x-browser-pilot-sensitivity contains unknown value ${value}`);
+      }
+    }
+  }
   if (schema.type === 'object') {
     const properties = schema.properties ?? {};
     for (const required of schema.required ?? []) {

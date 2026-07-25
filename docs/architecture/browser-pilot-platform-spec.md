@@ -392,6 +392,14 @@ and cancellation control from overtaking a blocked action.
 - cancellation and idempotency semantics;
 - sensitivity classification.
 
+The tool-level `sensitivity.input` and `sensitivity.output` arrays declare every
+classification that may occur in that direction. Content-bearing input and
+output schema nodes use `x-browser-pilot-sensitivity` to identify the specific
+fields an adapter must taint when it maps values into model text, image, or file
+content. The manifest validator rejects unknown, duplicate, or field-level
+classifications missing from the tool-level declaration. Schema annotations do
+not change the call or result value shape.
+
 `tools/call` returns `{ command, result?, error? }`; each manifest output schema
 describes the inner `result`. Callers may provide an opaque Command ID,
 idempotency key, and relative deadline. `commands/get` and `commands/cancel`
@@ -670,7 +678,13 @@ Agent inventory; the same-user CDP limitation in **CON-7** remains.
 ## Security and Sensitive Data
 
 - Password inputs, cookies, auth credentials, network bodies, uploads,
-  downloads, and page captures carry sensitivity metadata.
+  downloads, page captures, and selected page text carry sensitivity metadata.
+- Tool schemas mark selected text and page/element values as `browser_data`,
+  with `credential` added where a field may carry a password, cookie, header,
+  request body, response body, prompt response, or arbitrary eval value.
+- Artifact descriptors and BrowserEvents carry runtime sensitivity because
+  their classification depends on the produced object or event. Their runtime
+  value takes precedence over a tool's possible schema classifications.
 - Secrets are accepted through protected stdin or structured machine input, not
   command-line arguments in recommended workflows.
 - Audit records store metadata and hashes where possible, not secret values.

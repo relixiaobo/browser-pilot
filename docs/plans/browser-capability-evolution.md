@@ -201,12 +201,21 @@ Preserve Browser Pilot advantages:
     and 1.1, with no new capability. It exposes no operation and derives only
     data already covered by `observation.read` or `event.read`; older clients
     ignore unknown response fields and older executors may omit it.
-- [ ] **B5.2** Mark passwords, cookies, auth, network bodies, uploads,
+- [x] **B5.2** Mark passwords, cookies, auth, network bodies, uploads,
   downloads, screenshots, and selected page text with sensitivity metadata.
   - Covers: CON-5.
-  - Progress: auth input, cookie/network output, screenshots, imported upload
-    inputs, and download events/Artifacts carry explicit sensitivity. Selected
-    text propagation remains.
+  - Complete: the canonical tool schemas now carry validated
+    `x-browser-pilot-sensitivity` annotations on selected page text,
+    Observation element values, auth fields, cookie values, network
+    headers/bodies, upload Artifact references, prompt text, and eval content.
+    Tool-level possible classifications must cover every field annotation.
+    Password-capable Observation results declare `credential`; existing
+    password action evidence remains value-free and reports only `sensitive`
+    plus bounded lengths. Artifacts and events retain their runtime sensitivity.
+  - A0 decision: field annotations are additive schema metadata under protocol
+    1.0 and 1.1 and do not change argument or result value shapes. No new
+    capability is required; older clients ignore the annotation, while updated
+    adapters propagate it when constructing model content.
 - [x] **B5.3** Return model-sized screenshot previews and original Artifacts
   through Workstream A's Artifact service.
   - Covers: BR-20, AC-6.
