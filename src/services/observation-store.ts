@@ -144,7 +144,7 @@ export class MemoryObservationStore {
   }
 
   resolve(input: ResolveObservationInput): StoredObservation {
-    this.sweep();
+    const now = this.now();
     const record = this.records.get(input.observationId);
     if (
       !record ||
@@ -152,9 +152,21 @@ export class MemoryObservationStore {
       record.leaseId !== input.leaseId ||
       record.targetId !== input.targetId
     ) {
+      this.sweepAt(now);
       throw this.stale(input);
     }
-    if (record.invalidatedBy) throw this.stale(input, record.invalidatedBy);
+    if (record.invalidatedBy) {
+      const reason = record.invalidatedBy;
+      this.sweepAt(now);
+      throw this.stale(input, reason);
+    }
+    if (record.expiresAt <= now) {
+      this.invalidateRecord(record, 'expired');
+      this.records.delete(record.id);
+      this.sweepAt(now);
+      throw this.stale(input, 'expired');
+    }
+    this.sweepAt(now);
     if (
       record.browserProcessIdentity !== input.browserProcessIdentity ||
       record.browserConnectionGeneration !== input.browserConnectionGeneration
@@ -214,7 +226,10 @@ export class MemoryObservationStore {
   }
 
   sweep(): number {
-    const now = this.now();
+    return this.sweepAt(this.now());
+  }
+
+  private sweepAt(now: number): number {
     let removed = 0;
     for (const [id, record] of this.records) {
       if (record.expiresAt > now) continue;

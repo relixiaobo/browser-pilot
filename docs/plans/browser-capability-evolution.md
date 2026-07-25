@@ -303,9 +303,15 @@ Preserve Browser Pilot advantages:
 
 ### B6. Reliability and regression gates
 
-- [ ] **B6.1** Add deterministic fixture tests for every B0.2 scenario and
+- [x] **B6.1** Add deterministic fixture tests for every B0.2 scenario and
   every invalidation transition.
   - Covers: AC-3, AC-5, AC-8.
+  - Complete: the local system-Chrome benchmark manifest is exhaustively tied
+    to all ten B0.2 scenarios and observes same-process frames and OOPIFs through
+    their actual session models. A canonical transition matrix exhaustively
+    covers all eleven Observation invalidation reasons and asserts the typed
+    owner-visible `stale_ref` result. Expiry now preserves its `expired` reason
+    for the owning context while remaining opaque across Workspace boundaries.
 - [ ] **B6.2** Add action verification tests for obstruction, checkbox/radio,
   controlled inputs, contenteditable, focus loss, popup, and navigation.
   - Covers: AC-8.

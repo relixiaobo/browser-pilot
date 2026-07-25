@@ -323,6 +323,89 @@ test('Observation store validates full internal identity and reports same-contex
   );
 });
 
+test('Observation invalidation matrix returns every canonical reason to its owner', () => {
+  const transitionCases = [
+    {
+      reason: 'navigation',
+      transition: (store, record) => store.invalidateTarget(record.targetId, 'navigation'),
+    },
+    { reason: 'loader_replaced', resolve: { loaderId: 'loader:two' } },
+    { reason: 'document_replaced', resolve: { documentGeneration: 'document:two' } },
+    { reason: 'frame_changed', resolve: { frameId: 'frame:two' } },
+    {
+      reason: 'frame_detached',
+      transition: (store, record) => store.invalidateTarget(record.targetId, 'frame_detached'),
+    },
+    {
+      reason: 'session_replaced',
+      transition: (store, record) => store.invalidateSession(record.sessionId),
+    },
+    {
+      reason: 'target_detached',
+      transition: (store, record) => store.invalidateTarget(record.targetId, 'target_detached'),
+    },
+    { reason: 'browser_reconnected', resolve: { browserConnectionGeneration: 2 } },
+    {
+      reason: 'target_ineligible',
+      transition: (store, record) => store.invalidateTarget(record.targetId, 'target_ineligible'),
+    },
+    {
+      reason: 'target_closed',
+      transition: (store, record) => store.invalidateTarget(record.targetId, 'target_closed'),
+    },
+    { reason: 'expired', expire: true },
+  ];
+  assert.deepEqual(
+    transitionCases.map(candidate => candidate.reason).sort(),
+    [...OBSERVATION_INVALIDATION_REASONS].sort(),
+  );
+
+  for (const [index, transitionCase] of transitionCases.entries()) {
+    let now = 1_000;
+    const observationId = `observation:transition:${index}`;
+    const store = new MemoryObservationStore({
+      ttlMs: 100,
+      now: () => now,
+      idFactory: () => observationId,
+    });
+    const record = store.create(storeInput());
+    transitionCase.transition?.(store, record);
+    if (transitionCase.expire) now = record.expiresAt;
+
+    assert.throws(
+      () => store.resolve({
+        ...storeInput(),
+        ...transitionCase.resolve,
+        observationId: record.id,
+        ref: 1,
+      }),
+      error => (
+        error.code === 'stale_ref' &&
+        error.context?.reason === transitionCase.reason &&
+        error.context?.observationId === record.id
+      ),
+      transitionCase.reason,
+    );
+  }
+
+  let now = 2_000;
+  const privateStore = new MemoryObservationStore({
+    ttlMs: 10,
+    now: () => now,
+    idFactory: () => 'observation:private-expiry',
+  });
+  const privateRecord = privateStore.create(storeInput());
+  now = privateRecord.expiresAt;
+  assert.throws(
+    () => privateStore.resolve({
+      ...storeInput({ workspaceId: 'workspace:other' }),
+      observationId: privateRecord.id,
+      ref: 1,
+    }),
+    error => error.code === 'stale_ref' && error.context?.reason === undefined,
+  );
+});
+
 test('Observation store rejects inconsistent bounds and truncation metadata', () => {
   const store = new MemoryObservationStore();
   assert.throws(

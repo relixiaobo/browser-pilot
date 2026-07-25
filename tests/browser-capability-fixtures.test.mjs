@@ -163,6 +163,10 @@ test('browser capability fixture matrix is complete, unique, bounded, and local'
     [...BROWSER_CAPABILITY_FIXTURES.map(fixture => fixture.id)].sort(),
     [...REQUIRED_BROWSER_CAPABILITY_SCENARIOS].sort(),
   );
+  assert.deepEqual(
+    [...BROWSER_CAPABILITY_BENCHMARK_CASES.map(benchmarkCase => benchmarkCase.id)].sort(),
+    [...REQUIRED_BROWSER_CAPABILITY_SCENARIOS].sort(),
+  );
   assert.equal(new Set(BROWSER_CAPABILITY_FIXTURES.map(fixture => fixture.id)).size, BROWSER_CAPABILITY_FIXTURES.length);
   assert.equal(new Set(BROWSER_CAPABILITY_FIXTURES.map(fixture => fixture.path)).size, BROWSER_CAPABILITY_FIXTURES.length);
   for (const fixture of BROWSER_CAPABILITY_FIXTURES) {
