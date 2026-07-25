@@ -323,6 +323,39 @@ test('Observation store validates full internal identity and reports same-contex
   );
 });
 
+test('Observation store returns only the newest live Observation for a target', () => {
+  let now = 1_000;
+  let nextId = 1;
+  const store = new MemoryObservationStore({
+    ttlMs: 100,
+    now: () => now,
+    idFactory: () => `observation:latest:${nextId++}`,
+  });
+  assert.throws(
+    () => store.latest('workspace:test', 'lease:test', 'target:test'),
+    error => error.code === 'stale_ref',
+  );
+
+  const first = store.create(storeInput());
+  now = 1_010;
+  const second = store.create(storeInput({ title: 'Newest' }));
+  assert.equal(store.latest(first.workspaceId, first.leaseId, first.targetId).id, second.id);
+
+  store.invalidateTarget(first.targetId, 'navigation');
+  assert.throws(
+    () => store.latest(first.workspaceId, first.leaseId, first.targetId),
+    error => error.code === 'stale_ref',
+  );
+
+  now = 2_000;
+  const expiring = store.create(storeInput({ targetId: 'target:expiring' }));
+  now = expiring.expiresAt;
+  assert.throws(
+    () => store.latest(expiring.workspaceId, expiring.leaseId, expiring.targetId),
+    error => error.code === 'stale_ref',
+  );
+});
+
 test('Observation invalidation matrix returns every canonical reason to its owner', () => {
   const transitionCases = [
     {

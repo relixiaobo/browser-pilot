@@ -2,6 +2,7 @@ import http from 'node:http';
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { STATE_DIR, SOCKET_PATH, PID_FILE } from './paths.js';
 import { CDPClient } from './cdp.js';
 import { asBrowserPilotError, invalidArgument } from './protocol/errors.js';
@@ -25,6 +26,9 @@ const browserProduct = process.argv[3] || 'Chromium';
 const browserProfile = process.argv[4] || '';
 if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
 else try { chmodSync(STATE_DIR, 0o700); } catch { /* ignore */ }
+for (const legacyFile of ['state.json', 'refs.json']) {
+  try { unlinkSync(join(STATE_DIR, legacyFile)); } catch { /* absent or already removed */ }
+}
 try { unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
 
 function cleanup() {

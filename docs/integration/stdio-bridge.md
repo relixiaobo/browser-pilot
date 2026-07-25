@@ -105,14 +105,18 @@ artifacts/release
 shutdown
 ```
 
-`workspaces/create` accepts an optional `browserId`. Without one, the Broker
-uses its ready browser binding. It returns a Workspace, its default logical
+`workspaces/create` accepts an optional `browserId`. Protocol 1.1 clients may
+also provide `clientKey` to make active Workspace creation idempotent within
+their Principal; reusing a key for another browser fails. Without a browser ID,
+the Broker uses its ready browser binding. It returns a Workspace, its default logical
 ManagedTabSet, and an `eventCursor`. `workspaces/get` returns the current cursor
 as a recovery baseline. Creating a Workspace does not itself create a browser
 window; the first managed navigation creates the dedicated browser window.
 
-`leases/create` accepts a `workspaceId` and optional `ttlMs`. The default Lease
-is 30 seconds, with a supported range of 1 second through 5 minutes. Heartbeat
+`leases/create` accepts a `workspaceId` and optional `ttlMs`. Protocol 1.1
+clients may also provide a `clientKey`; repeating that key on the same live
+Connection and Workspace returns the same Lease and renews its TTL. The default
+Lease is 30 seconds, with a supported range of 1 second through 5 minutes. Heartbeat
 well before `expiresAt`. A Lease belongs to its live Connection and cannot be
 continued by a replacement bridge process. A replacement Connection from the
 same ClientPrincipal may obtain a new Lease for a still-active Workspace.

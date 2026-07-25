@@ -281,10 +281,15 @@ or a browser command, and the CLI starts or reuses the compatible per-user
 Broker. The compatibility Workspace and Lease select controlled targets.
 Existing and future eligible user tabs are available immediately. The command
 returns the existing JSON shape during migration. Failures include a stable
-machine code in addition to compatible human guidance. Normal process exit
-releases the short-lived Lease and does not close user tabs.
-JavaScript dialogs remain pending and are handled explicitly with `bp dialogs`
-and `bp dialog`; this compatibility path cannot access Broker-owned dialogs.
+machine code in addition to compatible human guidance. One-shot processes use
+a fixed daemon-internal Connection, idempotently keyed Workspace, and renewable
+Lease with a maximum five-minute TTL. Normal process exit leaves that transient
+daemon-memory state available to the next command; expiry invalidates refs and
+releases target control. No target, frame, session, Observation, ref, auth, or
+network mapping is persisted to disk. `bp disconnect` explicitly releases the
+Workspace, closes only its managed targets, and stops the daemon. JavaScript
+dialogs remain pending and are handled explicitly with `bp dialogs` and
+`bp dialog`; Workspace isolation prevents access to other clients' dialogs.
 
 ### FLOW-2 Product-embedded use
 

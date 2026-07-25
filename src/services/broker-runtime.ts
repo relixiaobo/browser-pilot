@@ -175,6 +175,7 @@ export interface BrowserToolExecutor {
 interface RuntimeConnection {
   value: ClientConnection;
   bridgeSessionId: string;
+  client: ClientIdentity;
   grantedCapabilities: Capability[];
   limits: ProtocolLimits;
   notifications: JsonRpcNotification[];
@@ -565,10 +566,58 @@ export class MemoryBrokerRuntime {
   }
 
   private initialize(bridgeSessionId: string, value: unknown): JsonValue {
-    if (this.connectionsByBridge.has(bridgeSessionId)) {
-      throw invalidArgument('This bridge connection is already initialized', 'method');
-    }
     const params = validateInitializeParams(value);
+    const existing = this.connectionsByBridge.get(bridgeSessionId);
+    if (existing) {
+      if (
+        params.launchMode !== 'one-shot' ||
+        existing.value.launchMode !== 'one-shot' ||
+        existing.client.id !== params.client.id ||
+        existing.client.name !== params.client.name ||
+        existing.client.version !== params.client.version ||
+        existing.client.instanceId !== params.client.instanceId
+      ) {
+        throw invalidArgument('This bridge connection is already initialized', 'method');
+      }
+      const protocol = negotiateProtocol(params.protocol);
+      if (params.limits && (protocol.major < 1 || (protocol.major === 1 && protocol.minor < 1))) {
+        throw protocolIncompatible('Transport limit negotiation requires protocol 1.1 or newer', {
+          selectedProtocol: `${protocol.major}.${protocol.minor}`,
+        });
+      }
+      const capabilities = negotiateCapabilities(params.requestedCapabilities, this.allowedCapabilities);
+      const limits = negotiateProtocolLimits(params.limits, this.limits);
+      if (
+        protocol.major !== existing.value.protocol.major ||
+        protocol.minor !== existing.value.protocol.minor ||
+        capabilities.granted.length !== existing.grantedCapabilities.length ||
+        capabilities.granted.some((capability, index) => capability !== existing.grantedCapabilities[index]) ||
+        limits.maxMessageBytes !== existing.limits.maxMessageBytes ||
+        limits.maxResultBytes !== existing.limits.maxResultBytes ||
+        limits.maxArtifactBytes !== existing.limits.maxArtifactBytes ||
+        limits.eventJournalSize !== existing.limits.eventJournalSize
+      ) {
+        throw new BrowserPilotError('protocol_incompatible', 'One-shot connection cannot change its negotiated contract', {
+          remediation: {
+            code: 'restart_browser_pilot',
+            message: 'Restart Browser Pilot before using a different one-shot protocol contract.',
+            actionRequired: true,
+          },
+        });
+      }
+      existing.value.lastSeenAt = this.now();
+      return asJson({
+        serviceVersion: this.options.serviceVersion,
+        executableVersion: this.options.executableVersion ?? this.options.serviceVersion,
+        protocol: { ...existing.value.protocol },
+        supportedCapabilities: [...CAPABILITIES],
+        capabilities,
+        brokerProcessIdentity: this.options.brokerProcessIdentity,
+        connectionId: existing.value.id,
+        browsers: this.browserBindings.map(binding => ({ ...binding.candidate })),
+        limits: { ...existing.limits },
+      } satisfies InitializeResult);
+    }
     if (this.connectionsByBridge.size >= this.maxConnections) {
       throw new BrowserPilotError('result_too_large', 'Broker connection limit reached', {
         context: { maxConnections: this.maxConnections },
@@ -589,6 +638,7 @@ export class MemoryBrokerRuntime {
       id: connectionId,
       principalId: principal.id,
       clientInstanceId: params.client.instanceId,
+      launchMode: params.launchMode,
       protocol,
       connectedAt: now,
       lastSeenAt: now,
@@ -607,6 +657,7 @@ export class MemoryBrokerRuntime {
     const connection: RuntimeConnection = {
       value: connectionValue,
       bridgeSessionId,
+      client: { ...params.client },
       grantedCapabilities: [...capabilities.granted],
       limits,
       notifications: [],
@@ -619,7 +670,49 @@ export class MemoryBrokerRuntime {
   private createWorkspace(connection: RuntimeConnection, value: unknown): JsonValue {
     this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateWorkspaceCreateParams(value);
+    if (params.clientKey && connection.value.protocol.minor < 1) {
+      throw protocolIncompatible('Keyed Workspace creation requires protocol 1.1 or newer');
+    }
     const principalId = connection.value.principalId;
+    const existing = params.clientKey
+      ? [...this.workspaces.values()].find(record => (
+        record.value.principalId === principalId &&
+        record.value.state === 'active' &&
+        record.value.clientKey === params.clientKey
+      ))
+      : undefined;
+    if (existing) {
+      if (params.browserId) {
+        const requested = this.browserBindings.find(candidate => candidate.candidate.id === params.browserId);
+        if (!requested) {
+          throw new BrowserPilotError('browser_not_found', 'Selected browser is not registered', {
+            context: { browserId: params.browserId },
+          });
+        }
+        if (existing.value.browserInstanceId !== requested.instance.id) {
+          throw invalidArgument('clientKey already belongs to another browser instance', 'clientKey');
+        }
+      }
+      existing.value.updatedAt = this.now();
+      return asJson({
+        workspace: cloneWorkspace(existing.value),
+        managedTabSet: cloneManagedTabSet(existing.managedTabSet),
+        eventCursor: this.events.currentCursor(existing.value.id),
+      });
+    }
+    const binding = params.browserId
+      ? this.browserBindings.find(candidate => candidate.candidate.id === params.browserId)
+      : this.browserBindings.find(candidate => candidate.candidate.state === 'ready');
+    if (!binding || binding.candidate.state !== 'ready') {
+      throw new BrowserPilotError('browser_not_found', 'Selected browser is not ready', {
+        context: params.browserId ? { browserId: params.browserId } : undefined,
+        remediation: {
+          code: 'enable_remote_debugging',
+          message: 'Start a supported browser and enable remote debugging.',
+          actionRequired: true,
+        },
+      });
+    }
     const activeCount = [...this.workspaces.values()].filter(record => (
       record.value.principalId === principalId && record.value.state === 'active'
     )).length;
@@ -635,20 +728,6 @@ export class MemoryBrokerRuntime {
       });
     }
 
-    const binding = params.browserId
-      ? this.browserBindings.find(candidate => candidate.candidate.id === params.browserId)
-      : this.browserBindings.find(candidate => candidate.candidate.state === 'ready');
-    if (!binding || binding.candidate.state !== 'ready') {
-      throw new BrowserPilotError('browser_not_found', 'Selected browser is not ready', {
-        context: params.browserId ? { browserId: params.browserId } : undefined,
-        remediation: {
-          code: 'enable_remote_debugging',
-          message: 'Start a supported browser and enable remote debugging.',
-          actionRequired: true,
-        },
-      });
-    }
-
     const now = this.now();
     const workspaceId = this.nextId('workspace', this.workspaces) as BrowserWorkspaceId;
     const managedTabSetId = this.nextManagedTabSetId();
@@ -656,6 +735,7 @@ export class MemoryBrokerRuntime {
       id: workspaceId,
       principalId,
       browserInstanceId: binding.instance.id,
+      ...(params.clientKey ? { clientKey: params.clientKey } : {}),
       createdAt: now,
       updatedAt: now,
       state: 'active',
@@ -699,7 +779,26 @@ export class MemoryBrokerRuntime {
   private createLease(connection: RuntimeConnection, value: unknown): JsonValue {
     this.assertCapabilities(connection, ['workspace.manage']);
     const params = validateLeaseCreateParams(value);
+    if (params.clientKey && connection.value.protocol.minor < 1) {
+      throw protocolIncompatible('Keyed Lease creation requires protocol 1.1 or newer');
+    }
     this.requireWorkspace(connection, params.workspaceId, false);
+    const ttlMs = this.validateLeaseTtl(params.ttlMs);
+    if (params.clientKey) {
+      const existing = [...this.leases.values()].find(lease => (
+        lease.connectionId === connection.value.id &&
+        lease.workspaceId === params.workspaceId &&
+        lease.state === 'active' &&
+        lease.clientKey === params.clientKey
+      ));
+      if (existing) {
+        const now = this.now();
+        existing.lastHeartbeatAt = now;
+        existing.expiresAt = now + ttlMs;
+        this.workspaces.get(params.workspaceId)!.value.updatedAt = now;
+        return asJson({ lease: cloneLease(existing) });
+      }
+    }
     const activeCount = [...this.leases.values()].filter(lease => (
       lease.connectionId === connection.value.id && lease.state === 'active'
     )).length;
@@ -714,13 +813,13 @@ export class MemoryBrokerRuntime {
         context: { maxLeaseRecords: this.maxLeaseRecords },
       });
     }
-    const ttlMs = this.validateLeaseTtl(params.ttlMs);
     const now = this.now();
     const leaseId = this.nextId('lease', this.leases) as ControlLeaseId;
     const lease: ControlLease = {
       id: leaseId,
       workspaceId: params.workspaceId,
       connectionId: connection.value.id,
+      ...(params.clientKey ? { clientKey: params.clientKey } : {}),
       capabilities: [...connection.grantedCapabilities],
       createdAt: now,
       lastHeartbeatAt: now,

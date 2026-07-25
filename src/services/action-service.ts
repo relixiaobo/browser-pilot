@@ -10,7 +10,7 @@ import {
   SET_VALUE_CONTROL,
 } from '../page-scripts.js';
 import {
-  legacyRefStore,
+  MemoryRefStore,
   resolveTargetIdentity,
   type RefEntry,
   type RefStore,
@@ -553,7 +553,7 @@ export class ActionService {
     private readonly targetId: string,
     options: ActionServiceOptions = {},
   ) {
-    this.refStore = options.refStore ?? options.observationService?.refs ?? legacyRefStore;
+    this.refStore = options.refStore ?? options.observationService?.refs ?? new MemoryRefStore();
     this.observations = options.observationService ?? new ObservationService(
       transport,
       sessionId,

@@ -123,6 +123,7 @@ export interface ProtocolLimits {
 
 export interface WorkspaceCreateParams {
   browserId?: string;
+  clientKey?: string;
 }
 
 export interface WorkspaceGetParams {
@@ -147,6 +148,7 @@ export interface WorkspaceReleaseResult {
 export interface LeaseCreateParams {
   workspaceId: BrowserWorkspaceId;
   ttlMs?: number;
+  clientKey?: string;
 }
 
 export interface LeaseHeartbeatParams {
@@ -253,6 +255,7 @@ export interface ClientConnection {
   id: ClientConnectionId;
   principalId: ClientPrincipalId;
   clientInstanceId: string;
+  launchMode: LaunchMode;
   protocol: ProtocolVersion;
   connectedAt: number;
   lastSeenAt: number;
@@ -271,6 +274,7 @@ export interface BrowserWorkspace {
   id: BrowserWorkspaceId;
   principalId: ClientPrincipalId;
   browserInstanceId: BrowserInstanceId;
+  clientKey?: string;
   createdAt: number;
   updatedAt: number;
   state: 'active' | 'releasing' | 'released';
@@ -289,6 +293,7 @@ export interface ControlLease {
   id: ControlLeaseId;
   workspaceId: BrowserWorkspaceId;
   connectionId: ClientConnectionId;
+  clientKey?: string;
   capabilities: Capability[];
   createdAt: number;
   lastHeartbeatAt: number;

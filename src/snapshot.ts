@@ -1,5 +1,3 @@
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { REFS_FILE } from './paths.js';
 import { PAGE_INFO } from './page-scripts.js';
 import {
   DOM_SNAPSHOT_CAPTURE_PARAMS,
@@ -74,31 +72,9 @@ export function axElementSemantic(node: unknown): AxElementSemantic | undefined 
   };
 }
 
-interface StoredRefs {
-  targetId: string;
-  entries: RefEntry[];
-}
-
 export interface RefStore {
   save(targetId: string, entries: RefEntry[]): void;
   load(expectedTargetId?: string): RefEntry[];
-}
-
-export class FileRefStore implements RefStore {
-  constructor(private readonly file: string = REFS_FILE) {}
-
-  save(targetId: string, entries: RefEntry[]): void {
-    writeFileSync(this.file, JSON.stringify({ targetId, entries } satisfies StoredRefs), { mode: 0o600 });
-  }
-
-  load(expectedTargetId?: string): RefEntry[] {
-    if (!existsSync(this.file)) return [];
-    try {
-      const stored: StoredRefs = JSON.parse(readFileSync(this.file, 'utf-8'));
-      if (expectedTargetId && stored.targetId !== expectedTargetId) return [];
-      return stored.entries;
-    } catch { return []; }
-  }
 }
 
 export class MemoryRefStore implements RefStore {
@@ -119,13 +95,11 @@ export class MemoryRefStore implements RefStore {
   }
 }
 
-export const legacyRefStore: RefStore = new FileRefStore();
-
 export interface SnapshotData {
   title: string;
   url: string;
   // NOTE: elements are exposed to LLM agents — keep this lean.
-  // backendNodeId is intentionally omitted (saved separately in REFS_FILE for resolution).
+  // backendNodeId remains internal to the in-memory Observation record.
   elements: ObservationElement[];
 }
 
@@ -153,12 +127,6 @@ export interface SnapshotContext {
   frameId?: string;
 }
 
-// ── Ref persistence (scoped to targetId) ────────────
-
-export function loadRefs(expectedTargetId?: string): RefEntry[] {
-  return legacyRefStore.load(expectedTargetId);
-}
-
 // ── Snapshot ────────────────────────────────────────
 
 export async function takeSnapshot(
@@ -166,7 +134,7 @@ export async function takeSnapshot(
   sessionId: string,
   targetId: string,
   limit: number = OBSERVATION_V1_LIMITS.defaultElements,
-  refStore: RefStore = legacyRefStore,
+  refStore: RefStore = new MemoryRefStore(),
   context: SnapshotContext = {},
 ): Promise<SnapshotResult> {
   const infoParams: Record<string, unknown> = {
@@ -404,7 +372,7 @@ export function isRef(target: string): boolean {
   return /^\d+$/.test(target);
 }
 
-export function formatTarget(target: string, targetId?: string, refStore: RefStore = legacyRefStore): string {
+export function formatTarget(target: string, targetId?: string, refStore: RefStore = new MemoryRefStore()): string {
   if (isRef(target)) {
     const refs = refStore.load(targetId);
     const entry = refs[parseInt(target, 10) - 1];
@@ -424,7 +392,7 @@ export async function resolveTargetIdentity(
   sessionId: string,
   target: string,
   targetId?: string,
-  refStore: RefStore = legacyRefStore,
+  refStore: RefStore = new MemoryRefStore(),
 ): Promise<ResolvedTargetIdentity> {
   if (isRef(target)) {
     const refs = refStore.load(targetId);
@@ -468,7 +436,7 @@ export async function resolveTarget(
   sessionId: string,
   target: string,
   targetId?: string,
-  refStore: RefStore = legacyRefStore,
+  refStore: RefStore = new MemoryRefStore(),
 ): Promise<string> {
   return (await resolveTargetIdentity(transport, sessionId, target, targetId, refStore)).objectId;
 }

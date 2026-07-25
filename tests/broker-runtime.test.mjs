@@ -50,6 +50,29 @@ function initialize(runtime, bridgeSessionId, overrides = {}) {
   });
 }
 
+function initializeOneShot(runtime, bridgeSessionId, overrides = {}) {
+  return runtime.call(bridgeSessionId, 'initialize', {
+    client: {
+      id: 'org.browser-pilot.cli',
+      name: 'Browser Pilot CLI',
+      version: '0.1.6',
+      instanceId: 'local:one-shot',
+      ...overrides.client,
+    },
+    protocol: overrides.protocol ?? {
+      min: { major: 1, minor: 1 },
+      max: { major: 1, minor: 1 },
+    },
+    requestedCapabilities: overrides.requestedCapabilities ?? [
+      'browser.control',
+      'workspace.manage',
+      'observation.read',
+    ],
+    launchMode: 'one-shot',
+    ...(overrides.limits ? { limits: overrides.limits } : {}),
+  });
+}
+
 test('Broker initializes one connection and filters the canonical tool manifest', async () => {
   const runtime = createRuntime();
   const initialized = await initialize(runtime, 'bridge:one');
@@ -113,6 +136,150 @@ test('Broker negotiates protocol 1.1 transport limits per Connection', async () 
       limits: { maxMessageBytes: 128 * 1024 },
     }),
     error => error.code === 'protocol_incompatible',
+  );
+});
+
+test('One-shot initialize reuses only the same Connection identity and contract', async () => {
+  const runtime = createRuntime();
+  const first = await initializeOneShot(runtime, 'bridge:cli');
+  const second = await initializeOneShot(runtime, 'bridge:cli');
+  assert.equal(second.connectionId, first.connectionId);
+  assert.deepEqual(runtime.stats(), {
+    principals: 1,
+    connections: 1,
+    activeWorkspaces: 0,
+    activeLeases: 0,
+  });
+
+  await assert.rejects(
+    () => initializeOneShot(runtime, 'bridge:cli', {
+      client: { id: 'org.other.cli' },
+    }),
+    error => error.code === 'invalid_argument',
+  );
+  await assert.rejects(
+    () => initializeOneShot(runtime, 'bridge:cli', {
+      client: { version: '0.2.0' },
+    }),
+    error => error.code === 'invalid_argument',
+  );
+  await assert.rejects(
+    () => initializeOneShot(runtime, 'bridge:cli', {
+      requestedCapabilities: ['browser.control', 'workspace.manage'],
+    }),
+    error => error.code === 'protocol_incompatible',
+  );
+  await assert.rejects(
+    () => initializeOneShot(runtime, 'bridge:cli', {
+      limits: { maxResultBytes: 256 * 1024 },
+    }),
+    error => error.code === 'protocol_incompatible',
+  );
+});
+
+test('Keyed Workspace and Lease creation is idempotent and renews the Lease', async () => {
+  let now = 10_000;
+  const runtime = createRuntime({
+    now: () => now,
+    minLeaseTtlMs: 1_000,
+    maxLeaseTtlMs: 600_000,
+  });
+  await initializeOneShot(runtime, 'bridge:cli');
+  const firstWorkspace = await runtime.call('bridge:cli', 'workspaces/create', {
+    clientKey: 'browser-pilot-cli',
+  });
+
+  now = 11_000;
+  const secondWorkspace = await runtime.call('bridge:cli', 'workspaces/create', {
+    clientKey: 'browser-pilot-cli',
+  });
+  assert.equal(secondWorkspace.workspace.id, firstWorkspace.workspace.id);
+  assert.equal(secondWorkspace.workspace.createdAt, firstWorkspace.workspace.createdAt);
+  assert.equal(secondWorkspace.workspace.updatedAt, now);
+
+  const firstLease = await runtime.call('bridge:cli', 'leases/create', {
+    workspaceId: firstWorkspace.workspace.id,
+    clientKey: 'browser-pilot-cli',
+    ttlMs: 300_000,
+  });
+  now = 12_000;
+  const secondLease = await runtime.call('bridge:cli', 'leases/create', {
+    workspaceId: firstWorkspace.workspace.id,
+    clientKey: 'browser-pilot-cli',
+    ttlMs: 300_000,
+  });
+  assert.equal(secondLease.lease.id, firstLease.lease.id);
+  assert.equal(secondLease.lease.createdAt, firstLease.lease.createdAt);
+  assert.equal(secondLease.lease.lastHeartbeatAt, now);
+  assert.equal(secondLease.lease.expiresAt, now + 300_000);
+  assert.deepEqual(runtime.stats(), {
+    principals: 1,
+    connections: 1,
+    activeWorkspaces: 1,
+    activeLeases: 1,
+  });
+});
+
+test('Keyed Workspace and Lease creation requires protocol 1.1', async () => {
+  const runtime = createRuntime();
+  await initialize(runtime, 'bridge:protocol-1');
+  await assert.rejects(
+    () => runtime.call('bridge:protocol-1', 'workspaces/create', { clientKey: 'stable-key' }),
+    error => error.code === 'protocol_incompatible',
+  );
+  const created = await runtime.call('bridge:protocol-1', 'workspaces/create', {});
+  await assert.rejects(
+    () => runtime.call('bridge:protocol-1', 'leases/create', {
+      workspaceId: created.workspace.id,
+      clientKey: 'stable-key',
+    }),
+    error => error.code === 'protocol_incompatible',
+  );
+});
+
+test('Keyed Workspace reuse does not depend on default browser ordering', async () => {
+  const runtime = createRuntime({
+    browsers: [
+      {
+        candidate: { id: 'browser:first', product: 'Chrome', state: 'ready' },
+        instance: {
+          id: 'browser-instance:first',
+          product: 'Chrome',
+          profilePath: '/profiles/first',
+          processIdentity: 'process:first',
+          connectionGeneration: 1,
+          state: 'connected',
+        },
+      },
+      {
+        candidate: { id: 'browser:second', product: 'Brave', state: 'ready' },
+        instance: {
+          id: 'browser-instance:second',
+          product: 'Brave',
+          profilePath: '/profiles/second',
+          processIdentity: 'process:second',
+          connectionGeneration: 1,
+          state: 'connected',
+        },
+      },
+    ],
+  });
+  await initializeOneShot(runtime, 'bridge:browser-order');
+  const first = await runtime.call('bridge:browser-order', 'workspaces/create', {
+    browserId: 'browser:second',
+    clientKey: 'stable-browser',
+  });
+  const repeated = await runtime.call('bridge:browser-order', 'workspaces/create', {
+    clientKey: 'stable-browser',
+  });
+  assert.equal(repeated.workspace.id, first.workspace.id);
+  assert.equal(repeated.workspace.browserInstanceId, 'browser-instance:second');
+  await assert.rejects(
+    () => runtime.call('bridge:browser-order', 'workspaces/create', {
+      browserId: 'browser:first',
+      clientKey: 'stable-browser',
+    }),
+    error => error.code === 'invalid_argument' && error.context?.field === 'clientKey',
   );
 });
 

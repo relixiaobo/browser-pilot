@@ -1,7 +1,7 @@
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import { OBSERVATION_V1_LIMITS } from '../protocol/model.js';
 import {
-  legacyRefStore,
+  MemoryRefStore,
   takeSnapshot,
   type RefStore,
   type SnapshotResult,
@@ -41,7 +41,7 @@ export class ObservationService {
     private readonly targetId: string,
     options: ObservationServiceOptions = {},
   ) {
-    this.refStore = options.refStore ?? legacyRefStore;
+    this.refStore = options.refStore ?? new MemoryRefStore();
     this.settleDelayMs = options.settleDelayMs ?? 300;
     this.loadTimeoutMs = options.loadTimeoutMs ?? 10_000;
     this.loadWaiter = options.waitForLoad ?? waitForLoad;

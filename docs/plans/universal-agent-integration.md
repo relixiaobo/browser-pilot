@@ -45,28 +45,29 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 
 ### A1. Extract the internal service boundary
 
-- [ ] **A1.1** Move browser discovery, target operations, observations,
+- [x] **A1.1** Move browser discovery, target operations, observations,
   actions, capture, network, auth, and cookies out of Commander handlers into
   `BrowserPilotService` modules.
   - Covers: FR-1, FR-2.
   - Acceptance: CLI handlers contain parsing and formatting only; existing CLI
     fixture behavior remains unchanged.
-  - Progress: screenshot and PDF operations now use `CaptureService`, which
-    returns media bytes and metadata without formatting output or writing files.
-  - Progress: snapshot, locate, click, press, and low-level keyboard dispatch
-    now use `ObservationService`, `ActionService`, and `InputDispatcher`.
-  - Progress: type, keyboard, upload, read, and eval now use `ActionService`,
-    `UploadService`, and `PageContentService`; their handlers retain only CLI
-    parsing and presentation behavior.
-  - Progress: tabs, frames, cookies, auth, and network operations now use
-    `TargetService`, `FrameService`, `CookieService`, `AuthService`, and
-    `NetworkService`. Browser discovery and open/session lifecycle remain.
-- [ ] **A1.2** Replace process exits and console/file side effects below the CLI
+  - Complete: every Commander handler now performs only parsing, compatibility
+    formatting, and explicit client-owned file export. Browser discovery,
+    target/session/frame state, observations, actions, capture, upload, tabs,
+    dialogs, auth, cookies, and network operations execute through the same
+    canonical Broker tools used by embedded clients.
+- [x] **A1.2** Replace process exits and console/file side effects below the CLI
   adapter with typed results, stable errors, and Artifact operations.
   - Covers: FR-2, FR-6, NFR-1.
-- [ ] **A1.3** Make arbitrary CDP forwarding private and gate page evaluation
+  - Complete: protected screenshot/PDF/upload bytes cross the CLI boundary only
+    through Artifact import/export/release; services return typed data and
+    stable errors without console, process-exit, or destination-file effects.
+- [x] **A1.3** Make arbitrary CDP forwarding private and gate page evaluation
   behind `developer.eval` for machine clients.
   - Covers: DEC-5, CON-4, AC-4.
+  - Complete: public CLI and stdio clients expose only canonical high-level
+    operations. The daemon's CDP transport remains an internal implementation
+    endpoint, and public evaluation requires `developer.eval`.
 
 ### A2. Build Broker domain isolation
 
@@ -89,12 +90,14 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   - Complete: machine-created targets enter through `BrowserToolService` and
     `MemoryControlledTargetRegistry`; no public machine call accepts a raw CDP
     target ID.
-- [ ] **A2.3** Replace global target/frame/session state with Workspace and
+- [x] **A2.3** Replace global target/frame/session state with Workspace and
   Lease state; provide a compatibility Workspace for one-shot CLI calls.
   - Covers: FR-1, FR-3, AC-1, AC-3.
-  - Progress: Broker targets, CDP sessions, active frames, and opaque frame IDs
-    are Lease/session scoped. The one-shot compatibility path deliberately keeps
-    its existing file-backed state until the compatibility Workspace is added.
+  - Complete: the CLI uses a fixed daemon-internal one-shot Connection plus
+    idempotently keyed compatibility Workspace and renewable five-minute Lease.
+    Every CLI command calls canonical tools; active targets, frames, sessions,
+    Observations, refs, auth, rules, and request identity remain only in daemon
+    memory. No `state.json` or `refs.json` compatibility mapping remains.
 - [ ] **A2.4** Serialize commands through a per-target actor and implement
   explicit control transfer.
   - Covers: BR-5, BR-6, NFR-4.
@@ -170,8 +173,8 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   - Covers: DEC-5, event contract.
   - Complete: dialogs stay pending, emit opened/closed events, and can be listed
     and explicitly accepted or dismissed through out-of-band dialog tools.
-    One-shot CLI dialogs use the same explicit policy while remaining unable to
-    list or respond to Broker-owned sessions.
+    One-shot CLI dialogs use those same Workspace-scoped canonical tools and
+    cannot list or respond to another Workspace's dialogs.
 
 ### A4. Deliver the stdio bridge
 

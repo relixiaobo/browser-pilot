@@ -367,10 +367,15 @@ export function validateArtifactImportParams(value: unknown): ArtifactImportPara
 export function validateWorkspaceCreateParams(value: unknown): WorkspaceCreateParams {
   if (value === undefined) return {};
   if (!isRecord(value)) throw invalidArgument('workspaces/create params must be an object', 'params');
-  assertOnlyKeys(value, ['browserId']);
-  return value.browserId === undefined
-    ? {}
-    : { browserId: requireString(value, 'browserId', { maxLength: 128 }) };
+  assertOnlyKeys(value, ['browserId', 'clientKey']);
+  return {
+    ...(value.browserId !== undefined
+      ? { browserId: requireString(value, 'browserId', { maxLength: 128 }) }
+      : {}),
+    ...(value.clientKey !== undefined
+      ? { clientKey: requireString(value, 'clientKey', { pattern: INSTANCE_ID_PATTERN, maxLength: 128 }) }
+      : {}),
+  };
 }
 
 export function validateWorkspaceGetParams(value: unknown): WorkspaceGetParams {
@@ -385,11 +390,14 @@ export function validateWorkspaceReleaseParams(value: unknown): WorkspaceRelease
 
 export function validateLeaseCreateParams(value: unknown): LeaseCreateParams {
   if (!isRecord(value)) throw invalidArgument('leases/create params must be an object', 'params');
-  assertOnlyKeys(value, ['workspaceId', 'ttlMs']);
+  assertOnlyKeys(value, ['workspaceId', 'ttlMs', 'clientKey']);
   const ttlMs = validateTtlMs(value);
   return {
     workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as LeaseCreateParams['workspaceId'],
     ...(ttlMs !== undefined ? { ttlMs } : {}),
+    ...(value.clientKey !== undefined
+      ? { clientKey: requireString(value, 'clientKey', { pattern: INSTANCE_ID_PATTERN, maxLength: 128 }) }
+      : {}),
   };
 }
 

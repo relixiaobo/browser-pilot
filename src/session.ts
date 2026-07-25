@@ -2,18 +2,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DaemonClient, isDaemonRunning } from './client.js';
 import { discoverChrome, type ChromeInfo } from './chrome.js';
-import { loadState, saveState, clearState, type PilotState } from './state.js';
 import { INJECT_BORDER } from './page-scripts.js';
 import type { Transport } from './transport.js';
 import { BrowserPilotError } from './protocol/errors.js';
-
-export { saveState, clearState, type PilotState } from './state.js';
-
-export interface PilotContext {
-  transport: Transport;
-  state: PilotState;
-  sessionId: string;
-}
 
 // ── Daemon lifecycle ────────────────────────────────
 
@@ -60,47 +51,9 @@ async function getDaemon(chrome: ChromeInfo): Promise<DaemonClient> {
   return startDaemon(chrome);
 }
 
-// ── Pilot window helpers ────────────────────────────
-
-async function verifyPilotTargets(client: DaemonClient, state: PilotState): Promise<boolean> {
-  const { targetInfos } = await client.send('Target.getTargets');
-  const existing = new Set(targetInfos.map((t: any) => t.targetId));
-  state.pilotTargetIds = state.pilotTargetIds.filter((id: string) => existing.has(id));
-
-  if (!existing.has(state.activeTargetId) && state.pilotTargetIds.length > 0) {
-    state.activeTargetId = state.pilotTargetIds[0];
-    state.activeSessionId = undefined;
-  }
-  if (!existing.has(state.activeTargetId)) return false;
-  saveState(state);
-  return true;
-}
-
-/** Run once after attaching to any target: Page.enable + border overlay. */
-export async function initSession(transport: Transport, sessionId: string): Promise<void> {
-  await transport.send('Page.enable', {}, sessionId).catch(() => {});
-  await transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => {});
-}
-
-async function ensureSession(client: DaemonClient, state: PilotState): Promise<string> {
-  if (state.activeSessionId) {
-    try {
-      await client.send('Runtime.evaluate', { expression: '1' }, state.activeSessionId);
-      return state.activeSessionId;
-    } catch { /* stale — re-attach */ }
-  }
-  const { sessionId } = await client.send('Target.attachToTarget', {
-    targetId: state.activeTargetId, flatten: true,
-  });
-  await initSession(client, sessionId);
-  state.activeSessionId = sessionId;
-  saveState(state);
-  return sessionId;
-}
-
 // ── Public API ──────────────────────────────────────
 
-/** Connect fresh: discover Chrome, start daemon, create pilot window. */
+/** Start or reuse the shared daemon for the selected browser. */
 export async function connectDaemon(browserFilter?: string): Promise<DaemonClient> {
   if (isDaemonRunning()) {
     const existing = new DaemonClient();
@@ -139,82 +92,6 @@ export async function connectDaemon(browserFilter?: string): Promise<DaemonClien
     );
   }
   return getDaemon(chrome);
-}
-
-/** Connect fresh: discover Chrome, start daemon, create pilot window. */
-export async function connectFresh(browserFilter?: string): Promise<{ client: DaemonClient; state: PilotState }> {
-  const chrome = discoverChrome(browserFilter);
-  if (!chrome) {
-    throw new BrowserPilotError('browser_not_found',
-      'Cannot find Chrome DevTools port.\n' +
-      'Open chrome://inspect/#remote-debugging in Chrome and toggle ON.',
-      {
-        remediation: {
-          code: 'enable_remote_debugging',
-          message: 'Open chrome://inspect/#remote-debugging in Chrome and toggle remote debugging on.',
-          actionRequired: true,
-        },
-      },
-    );
-  }
-
-  const client = await getDaemon(chrome);
-
-  const { targetId } = await client.send('Target.createTarget', {
-    url: 'about:blank', newWindow: true,
-  });
-  const { sessionId } = await client.send('Target.attachToTarget', {
-    targetId, flatten: true,
-  });
-  await initSession(client, sessionId);
-
-  const state: PilotState = {
-    wsEndpoint: chrome.wsUrl,
-    browser: chrome.browser,
-    pilotTargetIds: [targetId],
-    activeTargetId: targetId,
-    activeSessionId: sessionId,
-  };
-  saveState(state);
-  return { client, state };
-}
-
-/** Resume existing session. Returns null if no valid session exists (never creates windows). */
-export async function resumeExisting(): Promise<{ client: DaemonClient; state: PilotState } | null> {
-  const state = loadState();
-  if (!state) return null;
-
-  if (!isDaemonRunning()) return null;
-  const client = new DaemonClient();
-  if (!(await client.health())) return null;
-
-  const valid = await verifyPilotTargets(client, state);
-  if (!valid) return null;
-
-  return { client, state };
-}
-
-/** Resume existing or connect fresh. For commands that need a pilot window. */
-export async function resume(browserFilter?: string): Promise<{ client: DaemonClient; state: PilotState }> {
-  const existing = await resumeExisting();
-  if (existing) return existing;
-  return connectFresh(browserFilter);
-}
-
-/** Resume + ensure attached session. Main entry for page-interaction commands. */
-export async function withPilot(fn: (ctx: PilotContext) => Promise<void>): Promise<void> {
-  const { client, state } = await resume();
-  const sessionId = await ensureSession(client, state);
-  await fn({ transport: client, state, sessionId });
-}
-
-/** Shut down daemon and clear state. */
-export async function disconnect(): Promise<void> {
-  if (isDaemonRunning()) {
-    const client = new DaemonClient();
-    try { await client.shutdown(); } catch { /* already gone */ }
-  }
-  clearState();
 }
 
 export class PageLoadTimeoutError extends Error {

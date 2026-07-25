@@ -129,26 +129,25 @@ Preserve Browser Pilot advantages:
 
 ### B2. Replace ref storage and resolution
 
-- [ ] **B2.1** Move refs out of `~/.browser-pilot/refs.json` into ephemeral,
+- [x] **B2.1** Move refs out of `~/.browser-pilot/refs.json` into ephemeral,
   Workspace-scoped Observation records.
   - Covers: FR-3, BR-13.
-  - Progress: machine tool calls now use bounded in-memory Observation records
-    scoped by Workspace, Lease, target, session, loader, and browser generation.
-    Direct compatibility CLI calls retain `FileRefStore` until A2.3 provides
-    their compatibility Workspace.
-- [ ] **B2.2** Resolve refs using browser generation, target, CDP session,
+  - Complete: Broker and direct CLI calls use the same bounded in-memory
+    Observation records scoped by Workspace, Lease, target, session, loader,
+    and browser generation. The file-backed ref store has been removed.
+- [x] **B2.2** Resolve refs using browser generation, target, CDP session,
   frame, loader, backend node, and document generation.
   - Covers: BR-13 through BR-15.
-  - Progress: Broker Observations now bind and validate browser process and
+  - Complete: Observations bind and validate browser process and
     connection generation, Workspace, Lease, target, CDP session, selected
     frame, loader, Document backend identity, and per-ref backend node before
-    live-node resolution. The compatibility FileRefStore remains target-scoped
-    until B2.1/A2.3 replace it.
-- [ ] **B2.3** Hard-invalidate on navigation, loader replacement, frame/session
+    live-node resolution. Direct CLI refs resolve through the compatibility
+    Workspace's latest live Observation rather than a separate mapping.
+- [x] **B2.3** Hard-invalidate on navigation, loader replacement, frame/session
   detach, target detach, and reconnect, emitting typed reasons.
   - Covers: BR-14, AC-5.
-  - Progress: machine Observations now invalidate on every listed lifecycle,
-    including browser generation restoration; compatibility CLI refs remain.
+  - Complete: every listed lifecycle, including browser generation restoration,
+    invalidates Broker and CLI refs with a typed `stale_ref` result.
 - [x] **B2.4** Revalidate live nodes after same-document mutation and return
   `stale_ref` instead of acting on a changed semantic target.
   - Covers: BR-15, AC-8.
@@ -160,8 +159,8 @@ Preserve Browser Pilot advantages:
     changed role/name, or lost DOM-only clickability returns the existing
     `stale_ref` without a new protocol reason, browser identity, or semantic
     text in the error. Only that ref fails: the Observation and its unchanged
-    refs remain usable. Broker tools and compatibility CLI actions inject the
-    same validator.
+    refs remain usable. Broker tools and compatibility CLI actions now execute
+    the same canonical validator path.
 
 ### B3. Make actions verifiable
 

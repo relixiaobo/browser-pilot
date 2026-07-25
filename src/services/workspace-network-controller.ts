@@ -220,6 +220,7 @@ function publicRequest(record: NetworkRequestRecord): Record<string, JsonValue> 
     : Math.max(0, record.endedAt - record.startedAt);
   return {
     requestId: record.id,
+    sequence: record.sequence,
     method: record.method,
     url: record.url,
     type: record.type,
@@ -243,6 +244,7 @@ function publicRequestSummary(record: NetworkRequestRecord): Record<string, Json
     : Math.max(0, record.endedAt - record.startedAt);
   return {
     requestId: record.id,
+    sequence: record.sequence,
     method: record.method,
     url: record.url,
     type: record.type,

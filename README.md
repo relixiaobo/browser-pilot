@@ -90,8 +90,8 @@ The daemon maintains a single CDP WebSocket connection. A pulsing blue glow arou
 
 ## Platform Evolution
 
-Browser Pilot is evolving from its current single-Agent global state into an
-Agent-neutral, multi-client Browser Broker while preserving direct `bp` use.
+Browser Pilot now routes direct `bp` commands and embedded clients through the
+same Agent-neutral, multi-client Browser Broker.
 The approved architecture and execution plans are:
 
 - [Platform specification](docs/architecture/browser-pilot-platform-spec.md)
@@ -157,7 +157,8 @@ discovery and browser-capability conformance work remain in progress.
 | `bp dialog <id> --accept\|--dismiss` | Explicitly respond to a dialog (`--prompt`) |
 
 Dialogs remain pending until explicitly accepted or dismissed. One-shot CLI
-dialogs are isolated from dialogs owned by embedded Broker clients.
+dialogs are scoped to the compatibility Workspace and isolated from embedded
+Broker clients.
 
 Run `bp tabs` to list Pilot-managed tabs, their popups, and eligible tabs the
 user opened elsewhere in the same browser. `bp tab <n>` switches control to any
@@ -205,6 +206,11 @@ Use the number in subsequent commands: `bp click 1`, `bp type 2 "hello"`.
 
 Refs are scoped to the current page — they refresh automatically after every action. Elements inside Shadow DOM are included automatically.
 
+Across one-shot CLI processes, active target, frame, and refs live only in the
+daemon's keyed compatibility Workspace and renewable Lease. They are never
+written to `state.json` or `refs.json`; after Lease expiry the Agent must
+observe again. `bp disconnect` explicitly clears the compatibility Workspace.
+
 ## Output
 
 **JSON by default** when piped (for LLM/script consumption). Human-readable when run in a terminal.
@@ -219,6 +225,12 @@ Errors include hints:
 ```
 
 Force human output: `bp --human open https://example.com`
+
+`bp screenshot [file]`, `bp pdf [file]`, and `bp net show <id> --save <file>`
+return an absolute local path. Screenshot and PDF bytes are first protected
+Artifacts, explicitly exported to that path, then released from Broker storage.
+`bp upload <file>` similarly imports a protected copy and releases it after the
+browser receives the file; the source file is never removed.
 
 ## Eval
 
@@ -293,7 +305,7 @@ bp net headers "*api*" "Authorization:Bearer test123"
 
 # Manage rules
 bp net rules                           # list active rules
-bp net remove 2                        # remove rule #2
+bp net remove <id-from-bp-net-rules>   # rule IDs are opaque
 bp net remove --all                    # clear all rules
 bp net clear                           # clear captured request log
 ```

@@ -26,5 +26,6 @@ export * from './target-inventory-service.js';
 export * from './browser-target-catalog.js';
 export * from './browser-watchdog-service.js';
 export * from './browser-tool-service.js';
+export { CompatibilityBrokerClient } from '../compatibility-broker-client.js';
 export { PageLoadTimeoutError } from '../session.js';
-export { FileRefStore, MemoryRefStore, type RefStore } from '../snapshot.js';
+export { MemoryRefStore, type RefStore } from '../snapshot.js';

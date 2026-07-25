@@ -147,6 +147,9 @@ class BrowserFixtureTransport {
         if (params.expression === 'document.readyState') return { result: { value: 'complete' } };
         if (params.expression === '6 * 7') return { result: { value: 42 } };
         if (params.expression === 'location.href') return { result: { value: target.url } };
+        if (String(params.expression).startsWith('JSON.stringify((function(){var el=document.querySelector(')) {
+          return { result: { value: JSON.stringify({ x: 60, y: 35, top: 20, left: 10, width: 100, height: 30 }) } };
+        }
         if (String(params.expression).startsWith("JSON.stringify(Array.from(document.querySelectorAll('input[type=file]'))")) {
           return { result: { value: JSON.stringify([{ index: 1, name: 'attachment', accept: '*/*' }]) } };
         }
@@ -503,6 +506,33 @@ test('Observations return deterministic browser guidance and authentication tran
   }]);
 });
 
+test('latest Observation and locate are available through canonical Browser tools', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:latest', 'com.example.agent', 'instance:latest');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.observation.latest', {}, targetId),
+    error => error.code === 'stale_ref',
+  );
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const latest = await tool(runtime, client, 'browser.observation.latest', {}, targetId);
+  assert.equal(latest.observationId, observed.observationId);
+  assert.equal(latest.elementCount, observed.elements.length);
+
+  const located = await tool(runtime, client, 'browser.locate', { selector: '.editor' }, targetId);
+  assert.deepEqual(
+    { x: located.x, y: located.y, top: located.top, left: located.left, width: located.width, height: located.height },
+    { x: 60, y: 35, top: 20, left: 10, width: 100, height: 30 },
+  );
+});
+
 test('Observation hints carry only numbered refs derived from explicit AX semantics', async () => {
   const transport = new BrowserFixtureTransport();
   transport.extraAxNodes = [
@@ -778,6 +808,8 @@ test('network journals, bodies, rules, auth, and events remain isolated across A
 
   const firstRequests = await tool(runtime, first, 'browser.network.requests', {});
   const secondRequests = await tool(runtime, second, 'browser.network.requests', {});
+  assert.equal(firstRequests.requests[0].sequence, 1);
+  assert.equal(secondRequests.requests[0].sequence, 1);
   assert.deepEqual(firstRequests.requests.map(request => request.url), ['https://first.test/api?token=first']);
   assert.deepEqual(secondRequests.requests.map(request => request.url), ['https://second.test/api']);
   assert.notEqual(firstRequests.requests[0].requestId, secondRequests.requests[0].requestId);
@@ -1299,6 +1331,7 @@ test('browser.type stops submit after an intervening loader replacement', async 
 
 test('Observation refs are Lease-scoped, stale after navigation, and actions return a new Observation', async () => {
   const transport = new BrowserFixtureTransport();
+  transport.extraAxButtons = ['Secondary action'];
   const runtime = new MemoryBrokerRuntime({
     serviceVersion: '1.0.0',
     brokerProcessIdentity: 'broker:test',
@@ -1314,9 +1347,12 @@ test('Observation refs are Lease-scoped, stale after navigation, and actions ret
     target: { observationId: observed.observationId, ref: 1 },
     button: 'left',
     clickCount: 1,
+    observationLimit: 1,
   }, targetId);
   assert.notEqual(clicked.observationId, observed.observationId);
   assert.equal(clicked.elements[0].name, 'Submit');
+  assert.equal(clicked.elements.length, 1);
+  assert.equal(clicked.truncated, true);
   assert.deepEqual(clicked.evidence, {
     action: 'click',
     status: 'verified',

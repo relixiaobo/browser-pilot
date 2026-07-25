@@ -4,23 +4,18 @@ import { resolve as resolvePath } from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = require('../package.json').version;
-import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoad, saveState, clearState, initSession } from './session.js';
-import { type SnapshotResult } from './snapshot.js';
-import { CaptureService } from './services/capture-service.js';
-import { ActionService, type ClickTarget } from './services/action-service.js';
-import { CdpActionContinuityGuard } from './services/action-continuity.js';
-import { RefRevalidationService } from './services/ref-revalidation-service.js';
-import { ObservationService } from './services/observation-service.js';
-import { UploadService } from './services/upload-service.js';
-import { PageContentService } from './services/page-content-service.js';
-import { TargetService } from './services/target-service.js';
-import { FrameService } from './services/frame-service.js';
-import { CookieService } from './services/cookie-service.js';
-import { AuthService } from './services/auth-service.js';
-import { NetworkService } from './services/network-service.js';
 import { BrowserPilotError } from './protocol/errors.js';
+import type { ArtifactDescriptor, ControlledTargetId, JsonValue } from './protocol/model.js';
 import { DaemonBridgeBackend } from './bridge/daemon-bridge-backend.js';
 import { runStdioBridge } from './bridge/stdio-bridge.js';
+import {
+  connectCompatibility,
+  resumeCompatibility,
+  shutdownCompatibility,
+  withCompatibilityTarget,
+  type CompatibilityBrokerClient,
+  type CompatibilityTarget,
+} from './compatibility-broker-client.js';
 
 const program = new Command();
 program
@@ -89,25 +84,64 @@ function emit(data: Record<string, any>, human?: string): void {
   else if (human) console.log(human);
 }
 
-function fail(error: string, hint?: string): never {
-  if (useJson()) console.log(JSON.stringify({ ok: false, error, ...(hint ? { hint } : {}) }));
+function fail(error: string, hint?: string, details?: BrowserPilotError): never {
+  if (useJson()) console.log(JSON.stringify({
+    ok: false,
+    error,
+    ...(hint ? { hint } : {}),
+    ...(details ? details.toData() : {}),
+  }));
   else console.error(`\u2717 ${error}${hint ? `\n  hint: ${hint}` : ''}`);
   process.exit(1);
 }
 
-function emitSnapshot(result: SnapshotResult): void {
+interface CliObservationElement {
+  ref: number;
+  role: string;
+  name: string;
+  value?: string;
+  checked?: boolean;
+}
+
+function observationElements(result: Record<string, JsonValue>): CliObservationElement[] {
+  return Array.isArray(result.elements)
+    ? result.elements as unknown as CliObservationElement[]
+    : [];
+}
+
+function emitObservation(result: Record<string, JsonValue>): void {
+  const title = String(result.title ?? '');
+  const url = String(result.url ?? '');
+  const elements = observationElements(result);
+  const truncated = result.truncated === true;
+  const truncationReasons = Array.isArray(result.truncationReasons)
+    ? result.truncationReasons
+    : [];
   if (useJson()) {
     console.log(JSON.stringify({
       ok: true,
-      ...result.data,
-      truncated: result.truncated ?? false,
-      truncationReasons: result.truncationReasons ?? [],
+      title,
+      url,
+      elements,
+      truncated,
+      truncationReasons,
     }));
   } else {
-    const suffix = result.truncated
-      ? `\n\n[truncated: ${(result.truncationReasons ?? []).join(', ')}]`
+    const lines = [`[page] ${title} | ${url}`, ''];
+    if (elements.length === 0) {
+      lines.push('(no interactive elements)');
+    } else {
+      for (const element of elements) {
+        let line = `[${element.ref}] ${element.role} "${element.name}"`;
+        if (element.value !== undefined && element.value !== '') line += ` value="${element.value}"`;
+        if (element.checked) line += ' checked';
+        lines.push(line);
+      }
+    }
+    const suffix = truncated
+      ? `\n\n[truncated: ${truncationReasons.join(', ')}]`
       : '';
-    console.log(`${result.text}${suffix}`);
+    console.log(`${lines.join('\n')}${suffix}`);
   }
 }
 
@@ -117,10 +151,13 @@ function action(fn: (...args: any[]) => Promise<void>) {
   return (...args: any[]) => fn(...args).catch((err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
     // Add hints for common errors
-    if (msg.includes('not found') && msg.includes('Ref')) fail(msg, "Run 'bp snapshot' to refresh element refs.");
-    if (msg.includes('Not connected')) fail(msg, "Run 'bp connect' first.");
-    if (msg.includes('Page load timeout')) fail(msg, "Page may still be loading. Retry the command after a moment.");
-    fail(msg);
+    if (err instanceof BrowserPilotError && err.code === 'stale_ref') {
+      fail(msg, "Run 'bp snapshot' to refresh element refs.", err);
+    }
+    if (msg.includes('not found') && msg.includes('Ref')) fail(msg, "Run 'bp snapshot' to refresh element refs.", err instanceof BrowserPilotError ? err : undefined);
+    if (msg.includes('Not connected')) fail(msg, "Run 'bp connect' first.", err instanceof BrowserPilotError ? err : undefined);
+    if (msg.includes('Page load timeout')) fail(msg, "Page may still be loading. Retry the command after a moment.", err instanceof BrowserPilotError ? err : undefined);
+    fail(msg, undefined, err instanceof BrowserPilotError ? err : undefined);
   });
 }
 
@@ -135,25 +172,36 @@ function parseLimit(raw: string): number {
   return n;
 }
 
-function createCompatibilityActionService(
-  transport: Parameters<typeof CdpActionContinuityGuard.create>[0],
-  sessionId: string,
-  targetId: string,
-): ActionService {
-  return new ActionService(transport, sessionId, targetId, {
-    refValidator: input => new RefRevalidationService(
-      transport,
-      sessionId,
-    ).validateResolved(input.objectId, input.entry, {
-      targetId,
-      ref: input.ref,
-    }),
-    continuityFactory: action => CdpActionContinuityGuard.create(
-      transport,
-      sessionId,
-      action,
-    ),
-  });
+function parseRef(raw: string): number {
+  const ref = Number(raw);
+  if (!Number.isSafeInteger(ref) || ref < 1) {
+    throw new Error('Ref must be a positive integer');
+  }
+  return ref;
+}
+
+function requireString(value: JsonValue | undefined, label: string): string {
+  if (typeof value !== 'string') throw new BrowserPilotError('internal_error', `${label} is missing`);
+  return value;
+}
+
+function artifactFrom(result: Record<string, JsonValue>): ArtifactDescriptor {
+  if (!result.artifact || typeof result.artifact !== 'object' || Array.isArray(result.artifact)) {
+    throw new BrowserPilotError('internal_error', 'Browser tool did not return an Artifact');
+  }
+  return result.artifact as unknown as ArtifactDescriptor;
+}
+
+async function requireCompatibility(): Promise<CompatibilityBrokerClient> {
+  const client = await resumeCompatibility(PKG_VERSION);
+  if (!client) throw new Error('Not connected');
+  return client;
+}
+
+function withCliTarget<T>(
+  operation: (client: CompatibilityBrokerClient, target: CompatibilityTarget) => Promise<T>,
+): Promise<T> {
+  return withCompatibilityTarget(PKG_VERSION, operation);
 }
 
 function readStdin(): Promise<string> {
@@ -180,10 +228,12 @@ program.command('connect')
       console.log('Connecting to Chrome...');
       console.log('If prompted, click "Allow" in Chrome\'s authorization dialog.\n');
     }
-    const { state } = await connectFresh(opts.browser);
+    const client = await connectCompatibility(PKG_VERSION, opts.browser);
+    await client.ensureManagedTarget();
+    const browser = client.initialized.browsers.find(candidate => candidate.state === 'ready')?.product ?? 'browser';
     emit(
-      { ok: true, browser: state.browser },
-      `\u2713 Connected to ${state.browser}\n\u2713 Pilot window created (daemon running in background)\n\nReady! Try: bp open https://example.com`,
+      { ok: true, browser },
+      `\u2713 Connected to ${browser}\n\u2713 Pilot window ready (daemon running in background)\n\nReady! Try: bp open https://example.com`,
     );
   }));
 
@@ -216,13 +266,7 @@ program.command('bridge')
 program.command('disconnect')
   .description('Close pilot window and stop daemon')
   .action(action(async () => {
-    const existing = await resumeExisting();
-    if (existing) {
-      for (const id of existing.state.pilotTargetIds) {
-        try { await existing.client.send('Target.closeTarget', { targetId: id }); } catch { /* ignore */ }
-      }
-    }
-    await disconnect();
+    await shutdownCompatibility(PKG_VERSION);
     emit({ ok: true }, '\u2713 Disconnected');
   }));
 
@@ -236,29 +280,13 @@ program.command('open <url>')
   .action(action(async (url, opts) => {
     url = normalizeUrl(url);
     const limit = parseLimit(opts.limit);
-    await withPilot(async ({ transport, state, sessionId }) => {
-      let sid = sessionId;
-      let tid = state.activeTargetId;
-
-      if (opts.new) {
-        const { targetId } = await transport.send('Target.createTarget', { url });
-        const r = await transport.send('Target.attachToTarget', { targetId, flatten: true });
-        await initSession(transport, r.sessionId);
-        state.pilotTargetIds.push(targetId);
-        state.activeTargetId = targetId;
-        state.activeSessionId = r.sessionId;
-        state.frameContextId = undefined;
-        saveState(state);
-        sid = r.sessionId;
-        tid = targetId;
-      } else {
-        await transport.send('Page.navigate', { url }, sid);
-        state.frameContextId = undefined;
-        saveState(state);
-      }
-
-      await waitForLoad(transport, sid);
-      emitSnapshot(await new ObservationService(transport, sid, tid).observe(limit));
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.open', {
+        url,
+        ...(opts.new ? { newTarget: true } : { targetId: target.targetId }),
+        observationLimit: limit,
+      });
+      emitObservation(result);
     });
   }));
 
@@ -270,12 +298,8 @@ program.command('snapshot')
   .addHelpText('after', '\nExamples:\n  bp snapshot\n  bp snapshot --limit 100')
   .action(action(async (opts) => {
     const limit = parseLimit(opts.limit);
-    await withPilot(async ({ transport, sessionId, state }) => {
-      emitSnapshot(await new ObservationService(
-        transport,
-        sessionId,
-        state.activeTargetId,
-      ).observe(limit));
+    await withCliTarget(async (client, target) => {
+      emitObservation(await client.callTool('browser.observe', { limit }, target.targetId));
     });
   }));
 
@@ -298,23 +322,26 @@ Examples:
     if (opts.double && opts.right) throw new Error('--double and --right are mutually exclusive');
     if (!ref && !opts.xy) throw new Error('Provide a ref number or --xy coordinates');
     const limit = parseLimit(opts.limit);
-    await withPilot(async ({ transport, sessionId, state }) => {
-      let target: ClickTarget;
+    await withCliTarget(async (client, controlledTarget) => {
+      let target: Record<string, JsonValue>;
       if (opts.xy) {
         const [xStr, yStr] = opts.xy.split(',');
         const x = parseFloat(xStr), y = parseFloat(yStr);
         if (isNaN(x) || isNaN(y)) throw new Error('--xy must be x,y (e.g. --xy 400,300)');
-        target = { kind: 'coordinates', x, y };
+        target = { x, y };
       } else {
-        target = { kind: 'ref', ref };
+        target = {
+          observationId: await client.latestObservation(controlledTarget.targetId),
+          ref: parseRef(ref),
+        };
       }
-      const service = createCompatibilityActionService(transport, sessionId, state.activeTargetId);
-      const result = await service.click(target, {
+      const result = await client.callTool('browser.click', {
+        target,
         button: opts.right ? 'right' : 'left',
         clickCount: opts.double ? 2 : 1,
         observationLimit: limit,
-      });
-      emitSnapshot(result.observation);
+      }, controlledTarget.targetId);
+      emitObservation(result);
     });
   }));
 
@@ -331,14 +358,18 @@ Examples:
   bp locate "canvas"                 # canvas element
   bp locate "#map"                   # map container`)
   .action(action(async (selector) => {
-    await withPilot(async ({ transport, sessionId, state }) => {
-      const coords = await new ObservationService(
-        transport,
-        sessionId,
-        state.activeTargetId,
-      ).locate(selector);
+    await withCliTarget(async (client, target) => {
+      const coords = await client.callTool('browser.locate', { selector }, target.targetId);
       if (useJson()) {
-        console.log(JSON.stringify({ ok: true, ...coords }));
+        console.log(JSON.stringify({
+          ok: true,
+          x: coords.x,
+          y: coords.y,
+          top: coords.top,
+          left: coords.left,
+          width: coords.width,
+          height: coords.height,
+        }));
       } else {
         console.log(`center: ${coords.x},${coords.y}  size: ${coords.width}x${coords.height}  (top:${coords.top} left:${coords.left})`);
       }
@@ -355,17 +386,16 @@ program.command('type <ref> <text>')
   .addHelpText('after', '\nExamples:\n  bp type 2 "hello world"\n  bp type 5 "query" --submit\n  bp type 3 "new value" --clear')
   .action(action(async (ref, text, opts) => {
     const limit = parseLimit(opts.limit);
-    await withPilot(async ({ transport, sessionId, state }) => {
-      const result = await createCompatibilityActionService(
-        transport,
-        sessionId,
-        state.activeTargetId,
-      ).type(ref, text, {
-        clear: opts.clear,
-        submit: opts.submit,
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.type', {
+        observationId: await client.latestObservation(target.targetId),
+        ref: parseRef(ref),
+        text,
+        ...(opts.clear ? { clear: true } : {}),
+        ...(opts.submit ? { submit: true } : {}),
         observationLimit: limit,
-      });
-      emitSnapshot(result.observation);
+      }, target.targetId);
+      emitObservation(result);
     });
   }));
 
@@ -398,28 +428,27 @@ Examples:
       delay = parseInt(opts.delay, 10);
       if (isNaN(delay) || delay < 0) throw new Error('--delay must be a non-negative number');
     }
-    await withPilot(async ({ transport, sessionId, state }) => {
-      const result = await createCompatibilityActionService(
-        transport,
-        sessionId,
-        state.activeTargetId,
-      ).keyboard(text, {
-        clear: opts.clear,
-        submit: opts.submit,
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.keyboard', {
+        text,
+        ...(opts.clear ? { clear: true } : {}),
+        ...(opts.submit ? { submit: true } : {}),
         delayMs: delay,
-        focusSelector: opts.click,
+        ...(opts.click ? { focusSelector: opts.click } : {}),
         observationLimit: limit,
-      });
+      }, target.targetId);
       if (useJson()) {
         console.log(JSON.stringify({
           ok: true,
           typed: text,
-          ...result.observation.data,
-          truncated: result.observation.truncated ?? false,
-          truncationReasons: result.observation.truncationReasons ?? [],
+          title: String(result.title ?? ''),
+          url: String(result.url ?? ''),
+          elements: observationElements(result),
+          truncated: result.truncated === true,
+          truncationReasons: Array.isArray(result.truncationReasons) ? result.truncationReasons : [],
         }));
       } else {
-        emitSnapshot(result.observation);
+        emitObservation(result);
       }
     });
   }));
@@ -432,13 +461,12 @@ program.command('press <key>')
   .addHelpText('after', '\nKeys: Enter, Escape, Tab, Space, Backspace, Delete,\n      ArrowUp, ArrowDown, ArrowLeft, ArrowRight,\n      Home, End, PageUp, PageDown\nModifiers: Control (Ctrl), Shift, Alt, Meta (Cmd)\n\nExamples:\n  bp press Enter\n  bp press Escape\n  bp press Control+a\n  bp press Meta+c')
   .action(action(async (key, opts) => {
     const limit = parseLimit(opts.limit);
-    await withPilot(async ({ transport, sessionId, state }) => {
-      const result = await createCompatibilityActionService(
-        transport,
-        sessionId,
-        state.activeTargetId,
-      ).press(key, limit);
-      emitSnapshot(result.observation);
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.press', {
+        key,
+        observationLimit: limit,
+      }, target.targetId);
+      emitObservation(result);
     });
   }));
 
@@ -452,12 +480,14 @@ program.command('eval [expression]')
       expression = await readStdin();
       if (!expression) throw new Error('No expression. Pass as argument or pipe via stdin.');
     }
-    await withPilot(async ({ transport, sessionId, state }) => {
-      const value = await new PageContentService(transport, sessionId).evaluate(expression, {
-        executionContextId: state.frameContextId,
-      });
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.eval', {
+        expression,
+        awaitPromise: true,
+      }, target.targetId);
+      const value = result.value;
       if (useJson()) {
-        console.log(JSON.stringify({ ok: true, value }));
+        console.log(JSON.stringify({ ok: true, value, truncated: result.truncated === true }));
       } else if (value !== undefined) {
         console.log(typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value));
       }
@@ -489,22 +519,23 @@ When to use which command:
   .action(action(async (selector, opts) => {
     const limit = parseInt(opts.limit, 10);
     if (isNaN(limit) || limit < 1) throw new Error('--limit must be a positive integer');
-    await withPilot(async ({ transport, sessionId, state }) => {
-      let data;
+    await withCliTarget(async (client, target) => {
+      let data: Record<string, JsonValue>;
       try {
-        data = await new PageContentService(transport, sessionId).read(selector, limit, {
-          executionContextId: state.frameContextId,
-        });
+        data = await client.callTool('browser.read', {
+          ...(selector ? { selector } : {}),
+          limit,
+        }, target.targetId);
       } catch (error) {
         if (selector && error instanceof BrowserPilotError && error.context?.field === 'selector') {
-          fail(error.message, `Selector "${selector}" did not match.`);
+          fail(error.message, `Selector "${selector}" did not match.`, error);
         }
         throw error;
       }
       if (useJson()) {
         console.log(JSON.stringify({ ok: true, title: data.title, url: data.url, text: data.text, length: data.length, truncated: data.truncated }));
       } else {
-        console.log(`${data.title}\n${data.url}\n${'─'.repeat(60)}\n${data.text}${data.truncated ? '\n... [truncated]' : ''}`);
+        console.log(`${data.title}\n${data.url}\n${'─'.repeat(60)}\n${data.text}${data.truncated === true ? '\n... [truncated]' : ''}`);
       }
     });
   }));
@@ -520,12 +551,18 @@ program.command('upload <filepath>')
     if (!existsSync(absPath)) throw new Error(`File not found: ${absPath}`);
     const inputIndex = parseInt(opts.nth, 10);
     if (isNaN(inputIndex) || inputIndex < 1) throw new Error('--nth must be a positive integer');
-    await withPilot(async ({ transport, sessionId, state }) => {
-      const observations = new ObservationService(transport, sessionId, state.activeTargetId);
-      const result = await new UploadService(transport, sessionId, observations).upload(absPath, {
-        inputIndex,
-      });
-      emitSnapshot(result.observation);
+    await withCliTarget(async (client, target) => {
+      const artifact = await client.importArtifact(absPath);
+      try {
+        const result = await client.callTool('browser.upload', {
+          artifactId: artifact.id,
+          inputIndex,
+          observationLimit: 50,
+        }, target.targetId);
+        emitObservation(result);
+      } finally {
+        await client.releaseArtifact(artifact.id).catch(() => {});
+      }
     });
   }));
 
@@ -537,14 +574,25 @@ program.command('screenshot [filename]')
   .option('--selector <sel>', 'capture specific element')
   .addHelpText('after', '\nExamples:\n  bp screenshot\n  bp screenshot page.png\n  bp screenshot --full\n  bp screenshot --selector ".chart"')
   .action(action(async (filename, opts) => {
-    await withPilot(async ({ transport, sessionId }) => {
-      const media = await new CaptureService(transport, sessionId).screenshot({
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.capture', {
         fullPage: opts.full,
-        selector: opts.selector,
-      });
+        ...(opts.selector ? { selector: opts.selector } : {}),
+        includeOriginal: true,
+      }, target.targetId);
+      const artifact = artifactFrom(result);
       const file = filename ?? `screenshot-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.png`;
-      writeFileSync(file, media.bytes);
-      emit({ ok: true, file }, `\u2713 Screenshot saved to ${file}`);
+      const outputPath = resolvePath(file);
+      try {
+        await client.exportArtifact(artifact.id, outputPath);
+      } finally {
+        await client.releaseArtifact(artifact.id).catch(() => {});
+        if (result.preview && typeof result.preview === 'object' && !Array.isArray(result.preview)) {
+          const preview = result.preview as unknown as ArtifactDescriptor;
+          await client.releaseArtifact(preview.id).catch(() => {});
+        }
+      }
+      emit({ ok: true, file: outputPath }, `\u2713 Screenshot saved to ${outputPath}`);
     });
   }));
 
@@ -555,11 +603,19 @@ program.command('pdf [filename]')
   .option('--landscape', 'landscape orientation')
   .addHelpText('after', '\nExamples:\n  bp pdf\n  bp pdf report.pdf\n  bp pdf report.pdf --landscape')
   .action(action(async (filename, opts) => {
-    await withPilot(async ({ transport, sessionId }) => {
-      const media = await new CaptureService(transport, sessionId).pdf({ landscape: opts.landscape });
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.pdf', {
+        ...(opts.landscape ? { landscape: true } : {}),
+      }, target.targetId);
+      const artifact = artifactFrom(result);
       const file = filename ?? `page-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.pdf`;
-      writeFileSync(file, media.bytes);
-      emit({ ok: true, file }, `\u2713 PDF saved to ${file}`);
+      const outputPath = resolvePath(file);
+      try {
+        await client.exportArtifact(artifact.id, outputPath);
+      } finally {
+        await client.releaseArtifact(artifact.id).catch(() => {});
+      }
+      emit({ ok: true, file: outputPath }, `\u2713 PDF saved to ${outputPath}`);
     });
   }));
 
@@ -569,16 +625,20 @@ program.command('cookies [domain]')
   .description('View cookies (CDP-only, includes HttpOnly)')
   .addHelpText('after', '\nExamples:\n  bp cookies\n  bp cookies github.com')
   .action(action(async (domain) => {
-    await withPilot(async ({ transport, sessionId }) => {
-      const cookies = await new CookieService(transport, sessionId).list(domain);
+    await withCliTarget(async (client, target) => {
+      const result = await client.callTool('browser.cookies.list', {
+        ...(domain ? { domain } : {}),
+      }, target.targetId);
+      const cookies = Array.isArray(result.cookies) ? result.cookies as Array<Record<string, JsonValue>> : [];
       if (useJson()) {
         console.log(JSON.stringify({ ok: true, cookies }));
       } else if (cookies.length === 0) {
         console.log('No cookies found.');
       } else {
         for (const c of cookies) {
-          const exp = c.expires === -1 ? 'Session' : new Date(c.expires * 1000).toISOString().slice(0, 10);
-          console.log(`${c.name.padEnd(30)} ${c.domain.padEnd(25)} ${exp}`);
+          const expires = Number(c.expires);
+          const exp = expires === -1 ? 'Session' : new Date(expires * 1000).toISOString().slice(0, 10);
+          console.log(`${String(c.name ?? '').padEnd(30)} ${String(c.domain ?? '').padEnd(25)} ${exp}`);
         }
       }
     });
@@ -590,11 +650,12 @@ program.command('frame [target]')
   .description('List frames, or switch to a frame by index (0=top)')
   .addHelpText('after', '\nExamples:\n  bp frame          # list all frames\n  bp frame 1        # switch eval context to frame 1\n  bp frame 0        # switch back to top frame')
   .action(action(async (target) => {
-    await withPilot(async ({ transport, sessionId, state }) => {
-      const service = new FrameService(transport, sessionId);
-
+    await withCliTarget(async (client, controlledTarget) => {
+      const result = await client.callTool('browser.frames.list', {}, controlledTarget.targetId);
+      const frames = Array.isArray(result.frames)
+        ? result.frames as Array<Record<string, JsonValue>>
+        : [];
       if (target === undefined) {
-        const frames = await service.list();
         const list = frames.map((f, i) => ({ index: i, ...f }));
         if (useJson()) {
           console.log(JSON.stringify({ ok: true, frames: list }));
@@ -605,12 +666,16 @@ program.command('frame [target]')
         }
       } else {
         const idx = parseInt(target, 10);
-        const selection = await service.select(idx);
-        state.frameContextId = selection.executionContextId;
-        saveState(state);
+        if (!Number.isSafeInteger(idx) || idx < 0 || idx >= frames.length) {
+          throw new Error(`Frame index out of range (0-${Math.max(0, frames.length - 1)})`);
+        }
+        const frame = frames[idx];
+        await client.callTool('browser.frames.switch', idx === 0
+          ? { top: true }
+          : { frameId: requireString(frame.frameId, 'frameId') }, controlledTarget.targetId);
         emit(
-          { ok: true, frame: idx, url: selection.frame.url },
-          `\u2713 Switched to frame ${idx}: ${selection.frame.url}`,
+          { ok: true, frame: idx, url: frame.url },
+          `\u2713 Switched to frame ${idx}: ${frame.url}`,
         );
       }
     });
@@ -623,16 +688,14 @@ program.command('auth [username] [password]')
   .option('--clear', 'clear stored credentials')
   .addHelpText('after', '\nSets credentials for HTTP 401 challenges.\nCall before navigating to the auth-protected URL.\n\nExamples:\n  bp auth admin secret123\n  bp open https://staging.example.com\n  bp auth --clear')
   .action(action(async (username, password, opts) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const service = new AuthService(existing.client);
+    const client = await requireCompatibility();
     if (opts.clear || !username) {
-      await service.clear();
+      await client.callTool('browser.auth.clear');
       emit({ ok: true }, '\u2713 Auth credentials cleared');
       return;
     }
     if (!password) throw new Error('Usage: bp auth <username> <password>');
-    await service.set(username, password);
+    await client.callTool('browser.auth.set', { username, password });
     emit({ ok: true }, '\u2713 Auth credentials set (scoped to HTTP 401 challenges)');
   }));
 
@@ -641,9 +704,10 @@ program.command('auth [username] [password]')
 program.command('dialogs')
   .description('List pending JavaScript dialogs')
   .action(action(async () => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const dialogs = await existing.client.dialogs();
+    const result = await (await requireCompatibility()).callTool('browser.dialogs.list');
+    const dialogs = Array.isArray(result.dialogs)
+      ? result.dialogs as Array<Record<string, JsonValue>>
+      : [];
     if (useJson()) {
       console.log(JSON.stringify({ ok: true, dialogs }));
     } else if (dialogs.length === 0) {
@@ -664,13 +728,20 @@ program.command('dialog <dialogId>')
     if (Boolean(opts.accept) === Boolean(opts.dismiss)) {
       throw new Error('Choose exactly one of --accept or --dismiss');
     }
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const result = await existing.client.respondToDialog(
+    const client = await requireCompatibility();
+    const listed = await client.callTool('browser.dialogs.list');
+    const dialog = (Array.isArray(listed.dialogs) ? listed.dialogs : [])
+      .find(candidate => candidate && typeof candidate === 'object' && !Array.isArray(candidate) && candidate.dialogId === dialogId);
+    if (!dialog || Array.isArray(dialog) || typeof dialog !== 'object') {
+      throw new BrowserPilotError('invalid_argument', 'Dialog is not pending', {
+        context: { field: 'dialogId', dialogId },
+      });
+    }
+    const result = await client.callTool('browser.dialogs.respond', {
       dialogId,
-      opts.accept ? 'accept' : 'dismiss',
-      opts.prompt,
-    );
+      action: opts.accept ? 'accept' : 'dismiss',
+      ...(opts.prompt !== undefined ? { promptText: opts.prompt } : {}),
+    }, requireString(dialog.targetId, 'dialog targetId') as ControlledTargetId);
     emit(
       { ok: true, dialogId: result.dialogId, action: result.action },
       `\u2713 ${result.action === 'accept' ? 'Accepted' : 'Dismissed'} dialog ${result.dialogId}`,
@@ -682,21 +753,12 @@ program.command('dialog <dialogId>')
 program.command('tabs')
   .description('List all controllable browser tabs')
   .action(action(async () => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const { client, state } = existing;
-    const result = await new TargetService(client, client).list(
-      state.pilotTargetIds,
-      state.activeTargetId,
-    );
-    if (
-      result.managedTargetIds.length !== state.pilotTargetIds.length ||
-      result.managedTargetIds.some((targetId, index) => targetId !== state.pilotTargetIds[index])
-    ) {
-      state.pilotTargetIds = result.managedTargetIds;
-      saveState(state);
-    }
-    const tabs = result.tabs.map(({ targetId: _targetId, ...tab }) => tab);
+    const targets = await (await requireCompatibility()).listTabs('all');
+    const tabs = targets.map(({ targetId: _targetId, managedTabSetId: _managedTabSetId, controlState, ...tab }, index) => ({
+      index,
+      ...tab,
+      controlState,
+    }));
 
     if (useJson()) {
       console.log(JSON.stringify({ ok: true, tabs }));
@@ -712,20 +774,13 @@ program.command('tabs')
 program.command('tab <index>')
   .description('Switch to tab by index')
   .action(action(async (indexStr) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const { client, state } = existing;
+    const client = await requireCompatibility();
     const index = parseInt(indexStr, 10);
-    const service = new TargetService(client, client);
-    const inventory = await service.list(state.pilotTargetIds, state.activeTargetId);
-    state.pilotTargetIds = inventory.managedTargetIds;
-    state.activeTargetId = await service.activateByIndex(
-      inventory.tabs.map(tab => tab.targetId),
-      index,
-    );
-    state.activeSessionId = undefined;
-    state.frameContextId = undefined;
-    saveState(state);
+    const targets = await client.listTabs('all');
+    if (!Number.isSafeInteger(index) || index < 0 || index >= targets.length) {
+      throw new Error(`Tab index out of range (0-${Math.max(0, targets.length - 1)})`);
+    }
+    await client.callTool('browser.tabs.switch', { targetId: targets[index].targetId });
     emit({ ok: true, index }, `\u2713 Switched to tab ${index}`);
   }));
 
@@ -735,55 +790,44 @@ program.command('close')
   .description('Close current browser tab')
   .option('-a, --all', 'close all tabs in the current Pilot window')
   .action(action(async (opts) => {
-    const existing = await resumeExisting();
-    if (!existing) throw new Error('Not connected');
-    const { client, state } = existing;
-    const service = new TargetService(client, client);
+    const client = await requireCompatibility();
     if (opts.all) {
-      const inventory = await service.list(state.pilotTargetIds, state.activeTargetId);
-      const result = await service.closeManaged(inventory.managedTargetIds);
-      const remainingTabs = inventory.tabs.filter(tab => !result.closed.includes(tab.targetId));
-      if (result.failed.length > 0) {
-        state.pilotTargetIds = result.failed;
-        if (!remainingTabs.some(tab => tab.targetId === state.activeTargetId)) {
-          state.activeTargetId = remainingTabs[0].targetId;
+      const managed = await client.listTabs('managed_only');
+      const failed: ControlledTargetId[] = [];
+      let closed = 0;
+      for (const target of managed) {
+        try {
+          await client.callTool('browser.tabs.close', {}, target.targetId);
+          closed += 1;
+        } catch {
+          failed.push(target.targetId);
         }
-        state.activeSessionId = undefined;
-        state.frameContextId = undefined;
-        saveState(state);
-        throw new BrowserPilotError('internal_error', `Failed to close ${result.failed.length} Pilot tab(s)`, {
+      }
+      const remainingTabs = await client.listTabs('all');
+      if (failed.length > 0) {
+        throw new BrowserPilotError('internal_error', `Failed to close ${failed.length} Pilot tab(s)`, {
           retryable: true,
-          context: { failedTargetIds: result.failed },
+          context: { failedTargetIds: failed },
         });
       }
-      state.pilotTargetIds = [];
-      if (remainingTabs.length > 0) {
-        if (!remainingTabs.some(tab => tab.targetId === state.activeTargetId)) {
-          state.activeTargetId = remainingTabs[0].targetId;
-        }
-        state.activeSessionId = undefined;
-        state.frameContextId = undefined;
-        saveState(state);
-      } else {
-        clearState();
+      if (remainingTabs.length > 0 && !remainingTabs.some(tab => tab.active)) {
+        await client.callTool('browser.tabs.switch', { targetId: remainingTabs[0].targetId });
       }
       emit(
-        { ok: true, closed: result.closed.length, remaining: remainingTabs.length },
-        `\u2713 Closed ${result.closed.length} Pilot tab(s)`,
+        { ok: true, closed, remaining: remainingTabs.length },
+        `\u2713 Closed ${closed} Pilot tab(s)`,
       );
     } else {
-      const inventory = await service.list(state.pilotTargetIds, state.activeTargetId);
-      await service.close(inventory.tabs.map(tab => tab.targetId), state.activeTargetId);
-      const remainingTabs = inventory.tabs.filter(tab => tab.targetId !== state.activeTargetId);
-      state.pilotTargetIds = inventory.managedTargetIds.filter(id => id !== state.activeTargetId);
+      const target = await client.ensureTarget();
+      await client.callTool('browser.tabs.close', {}, target.targetId);
+      const remainingTabs = await client.listTabs('all');
       if (remainingTabs.length > 0) {
-        state.activeTargetId = state.pilotTargetIds[0] ?? remainingTabs[0].targetId;
-        state.activeSessionId = undefined;
-        state.frameContextId = undefined;
-        saveState(state);
+        if (!remainingTabs.some(tab => tab.active)) {
+          const fallback = remainingTabs.find(tab => tab.origin !== 'user_tab') ?? remainingTabs[0];
+          await client.callTool('browser.tabs.switch', { targetId: fallback.targetId });
+        }
         emit({ ok: true, remaining: remainingTabs.length }, '\u2713 Tab closed');
       } else {
-        clearState();
         emit({ ok: true, remaining: 0 }, '\u2713 Last tab closed');
       }
     }
@@ -791,14 +835,43 @@ program.command('close')
 
 // ─── net (network monitoring & interception) ────────
 
-// Fix 5: shared helper — all net commands ensure network is enabled
-async function ensureNet() {
-  const existing = await resumeExisting();
-  if (!existing) throw new Error('Not connected');
-  const { client, state } = existing;
-  const service = new NetworkService(client, state.activeSessionId);
-  await service.enable();
-  return service;
+function networkRequests(result: Record<string, JsonValue>): Array<Record<string, JsonValue>> {
+  return Array.isArray(result.requests)
+    ? result.requests as Array<Record<string, JsonValue>>
+    : [];
+}
+
+function cliNetworkRequest(request: Record<string, JsonValue>): Record<string, JsonValue> {
+  return {
+    id: request.sequence,
+    method: request.method,
+    url: request.url,
+    ...(request.status !== undefined ? { status: request.status } : {}),
+    type: request.type,
+    ...(request.size !== undefined ? { size: request.size } : {}),
+    ...(request.durationMs !== undefined ? { time: request.durationMs } : {}),
+    ...(request.error !== undefined ? { error: request.error } : {}),
+  };
+}
+
+async function findNetworkRequest(
+  client: CompatibilityBrokerClient,
+  sequence: number,
+): Promise<Record<string, JsonValue>> {
+  if (!Number.isSafeInteger(sequence) || sequence < 1) {
+    throw new Error('Request ID must be a positive integer');
+  }
+  const listed = await client.callTool('browser.network.requests', {
+    after: sequence - 1,
+    limit: 1,
+  });
+  const request = networkRequests(listed)[0];
+  if (!request || request.sequence !== sequence) {
+    throw new BrowserPilotError('invalid_argument', `Request #${sequence} not found`, {
+      context: { field: 'id', sequence },
+    });
+  }
+  return request;
 }
 
 const netCmd = program.command('net')
@@ -811,16 +884,26 @@ const netCmd = program.command('net')
   .option('--after <id>', 'show requests after this ID')
   .addHelpText('after', '\nExamples:\n  bp net                              # list recent requests\n  bp net --url "*api*" --method POST  # filter\n  bp net show 3                       # full details + body\n  bp net block "*tracking*"           # block URLs\n  bp net mock "*api/data*" --body \'{"ok":true}\'\n  bp net rules                        # list active rules\n  bp net remove --all                 # clear rules')
   .action(action(async (opts) => {
-    const service = await ensureNet();
-
-    const { requests, total } = await service.requests({
-      limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
-      url: opts.url, method: opts.method, status: opts.status, type: opts.type,
-      after: opts.after ? parseInt(opts.after, 10) : undefined,
+    const client = await requireCompatibility();
+    const limit = opts.limit ? parseInt(opts.limit, 10) : 20;
+    const result = await client.callTool('browser.network.requests', {
+      limit,
+      ...(opts.url ? { url: opts.url } : {}),
+      ...(opts.method ? { method: opts.method } : {}),
+      ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.type ? { type: String(opts.type).split(',').map(value => value.trim()).filter(Boolean) } : {}),
+      ...(opts.after ? { after: parseInt(opts.after, 10) } : {}),
     });
+    const requests = networkRequests(result).map(cliNetworkRequest);
 
     if (useJson()) {
-      console.log(JSON.stringify({ ok: true, requests, total }));
+      console.log(JSON.stringify({
+        ok: true,
+        requests,
+        total: requests.length,
+        truncated: result.truncated === true,
+        nextCursor: result.nextCursor,
+      }));
     } else if (requests.length === 0) {
       console.log('No requests captured.');
     } else {
@@ -828,7 +911,7 @@ const netCmd = program.command('net')
       for (const r of requests) {
         const time = r.time ? `${r.time}ms` : r.error ? 'FAIL' : '...';
         const status = r.status ? String(r.status) : r.error ? 'ERR' : '...';
-        console.log(` ${String(r.id).padStart(4)}  ${r.method.padEnd(7)} ${status.padEnd(7)} ${(r.type || '').padEnd(8)} ${time.padEnd(8)} ${r.url}`);
+        console.log(` ${String(r.id).padStart(4)}  ${String(r.method ?? '').padEnd(7)} ${status.padEnd(7)} ${String(r.type ?? '').padEnd(8)} ${time.padEnd(8)} ${r.url}`);
       }
     }
   }));
@@ -837,18 +920,30 @@ netCmd.command('show <id>')
   .description('Show full request/response details')
   .option('--save <file>', 'save response body to file')
   .action(action(async (idStr, opts) => {
-    const service = await ensureNet();
+    const client = await requireCompatibility();
     const id = parseInt(idStr, 10);
+    const summary = await findNetworkRequest(client, id);
+    const result = await client.callTool('browser.network.request', {
+      requestId: requireString(summary.requestId, 'requestId'),
+      includeBody: true,
+    });
+    const request = result.request && typeof result.request === 'object' && !Array.isArray(result.request)
+      ? result.request as Record<string, JsonValue>
+      : {};
+    const responseBody = typeof result.body === 'string' ? result.body : undefined;
 
     if (opts.save) {
-      const { body } = await service.body(id);
-      writeFileSync(opts.save, body);
-      emit({ ok: true, file: opts.save }, `Saved to ${opts.save}`);
+      if (responseBody === undefined) throw new Error(`Response body for request #${id} is unavailable`);
+      const outputPath = resolvePath(opts.save);
+      const bytes = result.bodyEncoding === 'base64'
+        ? Buffer.from(responseBody, 'base64')
+        : Buffer.from(responseBody, 'utf8');
+      writeFileSync(outputPath, bytes);
+      emit({ ok: true, file: outputPath }, `Saved to ${outputPath}`);
       return;
     }
 
-    const detail = await service.request(id);
-    const responseBody = detail.responseBody;
+    const detail: Record<string, any> = { id: request.sequence, ...request, responseBody };
 
     if (useJson()) {
       console.log(JSON.stringify({ ok: true, ...detail, responseBody }));
@@ -866,8 +961,9 @@ netCmd.command('show <id>')
 netCmd.command('block <pattern>')
   .description('Block requests matching URL pattern')
   .action(action(async (pattern) => {
-    const service = await ensureNet();
-    const { rule } = await service.addBlock(pattern);
+    const client = await requireCompatibility();
+    const result = await client.callTool('browser.network.rules.add', { type: 'block', pattern });
+    const rule = { id: result.ruleId, type: 'block', pattern };
     emit({ ok: true, rule }, `Rule #${rule.id}: blocking "${pattern}"`);
   }));
 
@@ -877,52 +973,75 @@ netCmd.command('mock <pattern>')
   .option('--file <path>', 'read body from file')
   .option('--status <code>', 'HTTP status', '200')
   .action(action(async (pattern, opts) => {
-    const service = await ensureNet();
+    const client = await requireCompatibility();
     let body = opts.body || '';
     if (opts.file) {
       const filePath = resolvePath(opts.file);
       if (!existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
       body = readFileSync(filePath, 'utf-8');
     }
-    const { rule } = await service.addMock(pattern, parseInt(opts.status, 10), body);
+    const status = parseInt(opts.status, 10);
+    const result = await client.callTool('browser.network.rules.add', {
+      type: 'mock',
+      pattern,
+      status,
+      body,
+    });
+    const rule = { id: result.ruleId, type: 'mock', pattern, status };
     emit({ ok: true, rule }, `Rule #${rule.id}: mocking "${pattern}" -> ${opts.status}`);
   }));
 
 netCmd.command('headers <pattern> <header...>')
   .description('Add/override request headers for matching URLs')
   .action(action(async (pattern, headerStrs) => {
-    const service = await ensureNet();
+    const client = await requireCompatibility();
     const headers = headerStrs.map((h: string) => {
       const [name, ...rest] = h.split(':');
       return { name: name.trim(), value: rest.join(':').trim() };
     });
-    const { rule } = await service.addHeaders(pattern, headers);
+    const result = await client.callTool('browser.network.rules.add', {
+      type: 'headers',
+      pattern,
+      headers,
+    });
+    const rule = { id: result.ruleId, type: 'headers', pattern, headers };
     emit({ ok: true, rule }, `Rule #${rule.id}: headers for "${pattern}"`);
   }));
 
 netCmd.command('rules')
   .description('List active interception rules')
   .action(action(async () => {
-    const rules = await (await ensureNet()).rules();
+    const result = await (await requireCompatibility()).callTool('browser.network.rules.list');
+    const rules: Array<Record<string, JsonValue>> = (Array.isArray(result.rules) ? result.rules : []).map(value => {
+      const rule = value as Record<string, JsonValue>;
+      const { ruleId, ...rest } = rule;
+      return { id: ruleId, ...rest };
+    });
     if (useJson()) { console.log(JSON.stringify({ ok: true, rules })); }
     else if (rules.length === 0) { console.log('No active rules.'); }
-    else { for (const r of rules) console.log(`  #${r.id}  ${r.type.toUpperCase()} "${r.pattern}"`); }
+    else { for (const r of rules) console.log(`  #${r.id}  ${String(r.type).toUpperCase()} "${r.pattern}"`); }
   }));
 
 netCmd.command('remove [ruleId]')
   .description('Remove interception rule(s)')
   .option('-a, --all', 'remove all rules')
   .action(action(async (ruleId, opts) => {
-    const service = await ensureNet();
-    if (opts.all) { await service.remove(); emit({ ok: true }, 'All rules removed'); }
-    else if (ruleId) { await service.remove(parseInt(ruleId, 10)); emit({ ok: true }, `Rule #${ruleId} removed`); }
+    const client = await requireCompatibility();
+    if (opts.all) {
+      await client.callTool('browser.network.rules.remove', { all: true });
+      emit({ ok: true }, 'All rules removed');
+    }
+    else if (ruleId) {
+      await client.callTool('browser.network.rules.remove', { ruleId });
+      emit({ ok: true }, `Rule #${ruleId} removed`);
+    }
     else throw new Error('Specify a rule ID or use --all');
   }));
 
 netCmd.command('clear')
   .description('Clear captured request log')
   .action(action(async () => {
-    await (await ensureNet()).clear();
+    await (await requireCompatibility()).callTool('browser.network.clear');
     emit({ ok: true }, 'Request log cleared');
   }));
 

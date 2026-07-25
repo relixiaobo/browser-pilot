@@ -83,6 +83,8 @@ const BASE_SUPPORTED_TOOLS = [
   'browser.connect',
   'browser.open',
   'browser.observe',
+  'browser.observation.latest',
+  'browser.locate',
   'browser.read',
   'browser.click',
   'browser.type',
@@ -444,6 +446,8 @@ export class BrowserToolService implements BrowserToolExecutor {
       case 'browser.frames.switch': return this.switchFrame(context, args);
       case 'browser.open': return this.open(context, args);
       case 'browser.observe': return this.observe(context, args);
+      case 'browser.observation.latest': return this.latestObservation(context);
+      case 'browser.locate': return this.locate(context, args);
       case 'browser.read': return this.read(context, args);
       case 'browser.click': return this.click(context, args);
       case 'browser.type': return this.type(context, args);
@@ -780,6 +784,44 @@ export class BrowserToolService implements BrowserToolExecutor {
     return this.observationResult(context, targetId, created);
   }
 
+  private latestObservation(context: BrokerToolCallContext): JsonValue {
+    const targetId = this.requireTargetId(context);
+    const observation = this.observations.latest(
+      context.workspace!.id,
+      context.lease!.id,
+      targetId,
+    );
+    return asJson({
+      ...this.targetResult(context, targetId, observation.url),
+      observationId: observation.id,
+      createdAt: observation.createdAt,
+      expiresAt: observation.expiresAt,
+      elementCount: observation.elementCount,
+    });
+  }
+
+  private async locate(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const targetId = this.requireTargetId(context);
+    const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const location = await new ObservationService(
+      this.transport,
+      this.activeCdpSessionId(session),
+      targetId,
+      {
+        refStore: new MemoryRefStore(),
+        ...(session.activeFrame?.executionContextId !== undefined
+          ? { executionContextId: session.activeFrame.executionContextId }
+          : {}),
+        ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
+      },
+    ).locate(args.selector as string);
+    const record = this.registry.get(this.inventoryContext(context), targetId);
+    return asJson({ ...this.targetResult(context, targetId, record.url), ...location });
+  }
+
   private async read(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
@@ -816,6 +858,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         {
           button: args.button as 'left' | 'right' | undefined,
           clickCount: args.clickCount as 1 | 2 | undefined,
+          observationLimit: args.observationLimit as number | undefined,
         },
       ));
     }
@@ -826,6 +869,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     }, {
       button: args.button as 'left' | 'right' | undefined,
       clickCount: args.clickCount as 1 | 2 | undefined,
+      observationLimit: args.observationLimit as number | undefined,
     }));
   }
 
@@ -846,6 +890,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         clear: args.clear as boolean | undefined,
         submit: args.submit as boolean | undefined,
         verification: args.verification as 'report' | 'require_exact' | undefined,
+        observationLimit: args.observationLimit as number | undefined,
       },
     ));
   }
@@ -861,6 +906,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         delayMs: args.delayMs as number | undefined,
         focusSelector: args.focusSelector as string | undefined,
         verification: args.verification as 'report' | 'require_exact' | undefined,
+        observationLimit: args.observationLimit as number | undefined,
       },
     ));
   }
@@ -868,7 +914,15 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async press(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.interact');
-    return this.runPressAction(context, targetId, session, service => service.press(args.key as string));
+    return this.runPressAction(
+      context,
+      targetId,
+      session,
+      service => service.press(
+        args.key as string,
+        Number(args.observationLimit ?? OBSERVATION_V1_LIMITS.defaultElements),
+      ),
+    );
   }
 
   private async upload(
@@ -921,6 +975,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       observations,
     ).upload(artifact.path, {
       inputIndex: args.inputIndex as number | undefined,
+      observationLimit: args.observationLimit as number | undefined,
       ...(backendNodeId !== undefined ? { backendNodeId } : {}),
       ...(session.activeFrame?.executionContextId !== undefined
         ? { executionContextId: session.activeFrame.executionContextId }

@@ -196,6 +196,28 @@ export class MemoryObservationStore {
     return clone(record);
   }
 
+  latest(
+    workspaceId: BrowserWorkspaceId,
+    leaseId: ControlLeaseId,
+    targetId: ControlledTargetId,
+  ): StoredObservation {
+    this.sweep();
+    let latest: StoredObservation | undefined;
+    for (const record of this.records.values()) {
+      if (
+        record.workspaceId === workspaceId &&
+        record.leaseId === leaseId &&
+        record.targetId === targetId &&
+        !record.invalidatedBy &&
+        (!latest || record.createdAt >= latest.createdAt)
+      ) latest = record;
+    }
+    if (latest) return clone(latest);
+    throw new BrowserPilotError('stale_ref', 'No current Observation exists for this target', {
+      context: { workspaceId, leaseId, targetId },
+    });
+  }
+
   invalidateTarget(targetId: ControlledTargetId, reason: ObservationInvalidationReason): void {
     for (const record of this.records.values()) {
       if (record.targetId === targetId && !record.invalidatedBy) this.invalidateRecord(record, reason);
