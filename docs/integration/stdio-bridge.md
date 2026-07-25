@@ -191,6 +191,24 @@ browser value sanitization, canceled `beforeinput`, and editor interception are
 reported from the effective value after the action. Password evidence never
 contains the value itself.
 
+`browser.type` and `browser.keyboard` are guarded composite actions. Browser
+Pilot pins the target/session/frame/loader/Document identity and, once input
+focus is established, the deep active element. It checks them between
+select-all, deletion, individual keyboard characters, and submit. If a change
+is detected before the first browser mutation, the call fails with retryable
+`action_not_verified`. If one or more steps already ran, it fails with
+`unknown_outcome`, for example:
+
+```json
+{"code":"unknown_outcome","retryable":true,"context":{"action":"keyboard","step":"type_character:4","reason":"focus_changed","dispatchedSteps":4,"remainingStepsStopped":true}}
+```
+
+Reasons are `target_changed`, `session_changed`, `frame_changed`,
+`loader_changed`, `document_changed`, or `focus_changed`. On either failure,
+list or switch to the intended target if necessary, create a fresh Observation,
+and decide from current page state whether to continue. Never replay the whole
+mutation automatically after `unknown_outcome`.
+
 `browser.press` returns `action: "press"` with bounded effects such as
 `value_changed`, `checked_changed`, `selected_changed`, `focus_changed`,
 `navigation`, `document_changed`, `dialog_opened`, or `popup_opened`. It returns

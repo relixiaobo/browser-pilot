@@ -65,6 +65,11 @@ export interface PointerClickOptions {
   clickCount?: 1 | 2;
 }
 
+export interface TypeTextHooks {
+  beforeCharacter?(input: { character: string; index: number }): Promise<void>;
+  afterCharacter?(input: { character: string; index: number }): void;
+}
+
 export class InputDispatcher {
   constructor(
     private readonly transport: Transport,
@@ -135,11 +140,13 @@ export class InputDispatcher {
     }
   }
 
-  async typeText(text: string, delayMs = 0): Promise<void> {
+  async typeText(text: string, delayMs = 0, hooks: TypeTextHooks = {}): Promise<void> {
     if (!Number.isFinite(delayMs) || delayMs < 0) {
       throw invalidArgument('Typing delay must be a non-negative number', 'delayMs');
     }
+    let index = 0;
     for (const char of text) {
+      await hooks.beforeCharacter?.({ character: char, index });
       if (char === '\n') {
         await this.press('Enter');
       } else if (char === '\t') {
@@ -155,6 +162,8 @@ export class InputDispatcher {
       } else {
         await this.insertText(char);
       }
+      hooks.afterCharacter?.({ character: char, index });
+      index += 1;
       if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }

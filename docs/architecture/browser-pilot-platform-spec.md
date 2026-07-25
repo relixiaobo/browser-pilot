@@ -400,6 +400,17 @@ focused backend node plus bounded control-state signatures and Broker-owned
 signals. Upload evidence reads the selected file count and compares its browser
 filename without returning the local source path.
 
+Composite input actions pin the ControlledTarget, CDP session, selected frame,
+loader, Document identity, and browser connection generation for the lifetime
+of the action. After focus is established, `type` and `keyboard` also pin the
+deep composed active element. Browser Pilot checks this identity before every
+remaining semantic step, including select-all, deletion, each keyboard
+character, and optional submit. A change before the first browser mutation is
+a retryable `action_not_verified`; a change after any step was dispatched is
+`unknown_outcome` with bounded `action`, `step`, `reason`, `dispatchedSteps`,
+and `remainingStepsStopped` context. No remaining step is sent to the changed
+page and the command is never replayed automatically.
+
 The initial controlled tool families are browser discovery/status, Workspace
 and Lease lifecycle, open/observe/read, click/type/keyboard/press,
 capture/upload, tabs/frames, dialogs, auth/cookies, network, events, and
@@ -469,6 +480,12 @@ accepted -> expired
 - **BR-12:** Browser disconnect and reconnect change the BrowserInstance
   connection generation and invalidate sessions and observations. The generation
   advances on successful restoration, not merely on a retry attempt.
+
+The dispatch transition occurs immediately before the first browser mutation,
+after argument, ref, target, and continuity preflight. Composite-action guards
+preserve their structured interruption context when the terminal state is
+`unknown_outcome`; callers must obtain fresh target/frame/Observation state
+before deciding what remains to be done.
 
 Normal bridge calls preserve dispatch order. `commands/get`, `commands/cancel`,
 and dialog list/respond calls may bypass a pending `tools/call`; JSON-RPC clients

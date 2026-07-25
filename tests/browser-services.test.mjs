@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   ActionService,
   AuthService,
+  CdpActionContinuityGuard,
   CookieService,
   FrameService,
   InputDispatcher,
@@ -348,6 +349,108 @@ test('InputDispatcher rejects an unknown modifier with a stable error', async ()
     error => error.code === 'invalid_argument' && error.context?.field === 'key',
   );
   assert.equal(transport.calls.length, 0);
+});
+
+test('CDP action continuity distinguishes pre-dispatch changes from partial outcomes', async () => {
+  let loaderId = 'loader:one';
+  const transport = new FakeTransport((method, params) => {
+    if (method === 'Page.getFrameTree') {
+      return { frameTree: { frame: { id: 'frame:top', loaderId } } };
+    }
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 71 };
+    if (method === 'Runtime.evaluate') {
+      if (String(params.expression).includes('state.focus =')) return { result: { value: 'ready' } };
+      if (String(params.expression).includes('state.focus !==')) return { result: { value: 'ready' } };
+      return { result: { value: true } };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  });
+
+  const beforeDispatch = await CdpActionContinuityGuard.create(
+    transport,
+    'session:continuity',
+    'keyboard',
+  );
+  loaderId = 'loader:two';
+  await assert.rejects(
+    () => beforeDispatch.check({
+      action: 'keyboard',
+      step: 'type_character:0',
+      dispatchedSteps: 0,
+      requireSameFocus: true,
+    }),
+    error => (
+      error.code === 'action_not_verified' &&
+      error.context?.reason === 'loader_changed' &&
+      error.context?.remainingStepsStopped === true
+    ),
+  );
+  await beforeDispatch.release();
+
+  const afterDispatch = await CdpActionContinuityGuard.create(
+    transport,
+    'session:continuity',
+    'keyboard',
+  );
+  loaderId = 'loader:three';
+  await assert.rejects(
+    () => afterDispatch.check({
+      action: 'keyboard',
+      step: 'type_character:1',
+      dispatchedSteps: 1,
+      requireSameFocus: true,
+    }),
+    error => (
+      error.code === 'unknown_outcome' &&
+      error.context?.reason === 'loader_changed' &&
+      error.context?.dispatchedSteps === 1
+    ),
+  );
+  await afterDispatch.release();
+});
+
+test('CDP action continuity reports target, session, frame, and document changes', async () => {
+  for (const reason of ['target_changed', 'session_changed', 'frame_changed', 'document_changed']) {
+    const state = {
+      externalFailure: undefined,
+      frameId: 'frame:top',
+      pageState: 'ready',
+    };
+    const transport = new FakeTransport((method, params) => {
+      if (method === 'Page.getFrameTree') {
+        return { frameTree: { frame: { id: state.frameId, loaderId: 'loader:stable' } } };
+      }
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 72 };
+      if (method === 'Runtime.evaluate') {
+        if (String(params.expression).includes('state.focus =')) return { result: { value: 'ready' } };
+        if (String(params.expression).includes('state.focus !==')) {
+          return { result: { value: state.pageState } };
+        }
+        return { result: { value: true } };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const guard = await CdpActionContinuityGuard.create(
+      transport,
+      `session:${reason}`,
+      'keyboard',
+      { externalCheck: () => state.externalFailure },
+    );
+    if (reason === 'target_changed' || reason === 'session_changed') state.externalFailure = reason;
+    if (reason === 'frame_changed') state.frameId = 'frame:replacement';
+    if (reason === 'document_changed') state.pageState = 'document_changed';
+
+    await assert.rejects(
+      () => guard.check({
+        action: 'keyboard',
+        step: 'type_character:1',
+        dispatchedSteps: 1,
+        requireSameFocus: true,
+      }),
+      error => error.code === 'unknown_outcome' && error.context?.reason === reason,
+    );
+    await guard.release();
+  }
 });
 
 test('ActionService reports observable focus and control effects for key presses', async () => {

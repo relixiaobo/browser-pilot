@@ -326,6 +326,10 @@ export class MemoryCommandRuntime {
         record.mutating && record.dispatchedAt !== undefined &&
         (stable.code === 'browser_disconnected' || stable.code === 'internal_error' || stable.code === 'unknown_outcome')
       ) {
+        if (stable.code === 'unknown_outcome') {
+          this.finishWithError(record, 'unknown_outcome', stable);
+          return;
+        }
         this.finishWithError(
           record,
           'unknown_outcome',

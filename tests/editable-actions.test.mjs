@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 import { chromium } from 'playwright';
-import { ActionService, MemoryRefStore, UploadService } from '../dist/services.js';
+import {
+  ActionService,
+  CdpActionContinuityGuard,
+  MemoryRefStore,
+  UploadService,
+} from '../dist/services.js';
 
 let browser;
 
@@ -407,6 +412,53 @@ test('keyboard clear performs a real select-all before typing', async () => {
     const result = await service.keyboard('replacement', { clear: true });
     assert.equal(result.evidence.status, 'verified');
     assert.equal(await page.locator('#field').inputValue(), 'replacement');
+  } finally {
+    await page.close();
+  }
+});
+
+test('keyboard stops remaining characters when page code moves focus', async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <input id="field"><input id="next">
+      <script>
+        field.addEventListener('input', () => next.focus(), { once: true });
+        field.focus();
+      </script>
+    `);
+    const client = await page.context().newCDPSession(page);
+    const transport = new CdpTransport(client);
+    const service = new ActionService(
+      transport,
+      'session:focus-guard',
+      'target:focus-guard',
+      {
+        readbackDelayMs: 0,
+        continuityFactory: action => CdpActionContinuityGuard.create(
+          transport,
+          'session:focus-guard',
+          action,
+        ),
+        observationService: {
+          async observeAfterAction() { return observation; },
+          async locate() { return { x: 0, y: 0 }; },
+        },
+      },
+    );
+
+    await assert.rejects(
+      () => service.keyboard('ab'),
+      error => (
+        error.code === 'unknown_outcome' &&
+        error.context?.reason === 'focus_changed' &&
+        error.context?.step === 'type_character:1' &&
+        error.context?.dispatchedSteps === 1
+      ),
+    );
+    assert.equal(await page.locator('#field').inputValue(), 'a');
+    assert.equal(await page.locator('#next').inputValue(), '');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'next');
   } finally {
     await page.close();
   }

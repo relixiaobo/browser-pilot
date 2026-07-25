@@ -45,8 +45,10 @@ class BrowserFixtureTransport {
   selectedFileName;
   pressStates = [];
   pressReadIndex = 0;
+  continuityFocusChanged = false;
   onMouseReleased;
   onKeyUp;
+  onInsertText;
 
   async send(method, params = {}, sessionId) {
     this.calls.push({ method, params, sessionId });
@@ -109,6 +111,18 @@ class BrowserFixtureTransport {
           },
         };
       case 'Runtime.evaluate': {
+        if (String(params.expression).includes('browser-pilot.action-continuity.v1')) {
+          if (String(params.expression).includes('state.focus !==') && this.continuityFocusChanged) {
+            return { result: { value: 'focus_changed' } };
+          }
+          if (
+            String(params.expression).includes('state.focus =') ||
+            String(params.expression).includes("return 'ready'")
+          ) {
+            return { result: { value: 'ready' } };
+          }
+          return { result: { value: true } };
+        }
         if (String(params.expression).includes('shadowRoot.activeElement')) {
           return { result: { objectId: `press-active-${this.pressReadIndex}` } };
         }
@@ -226,6 +240,7 @@ class BrowserFixtureTransport {
           this.editableState.value = `${this.nextInputClear ? '' : this.editableState.value}${params.text}`;
           this.nextInputClear = false;
         }
+        this.onInsertText?.(params, sessionId);
         return {};
       case 'Page.getLayoutMetrics': return {
         cssVisualViewport: {
@@ -805,6 +820,58 @@ test('browser.type exposes verified readback through the public tool surface', a
   assert.deepEqual(
     transport.calls.find(call => call.method === 'Input.insertText')?.params,
     { text: '-new' },
+  );
+});
+
+test('browser.type stops submit after an intervening loader replacement', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.editableState = {
+    kind: 'input',
+    value: '',
+    sensitive: false,
+    editable: true,
+    inputType: 'text',
+    editMode: 'text',
+    selectionMode: 'range',
+  };
+  transport.onInsertText = (_params, sessionId) => {
+    const cdpTargetId = transport.sessions.get(sessionId);
+    transport.loaders.set(cdpTargetId, 'loader:user-form:replaced');
+  };
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:type-guard', 'com.example.agent', 'instance:type-guard');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  const field = observed.elements.find(element => element.name === 'Query');
+  assert.ok(field);
+
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.type', {
+      observationId: observed.observationId,
+      ref: field.ref,
+      text: 'partial',
+      submit: true,
+    }, targetId),
+    error => (
+      error.code === 'unknown_outcome' &&
+      error.retryable === true &&
+      error.context?.reason === 'loader_changed' &&
+      error.context?.step === 'submit' &&
+      error.context?.dispatchedSteps === 2 &&
+      error.context?.remainingStepsStopped === true
+    ),
+  );
+  assert.equal(transport.editableState.value, 'partial');
+  assert.equal(
+    transport.calls.some(call => (
+      call.method === 'Input.dispatchKeyEvent' && call.params.key === 'Enter'
+    )),
+    false,
   );
 });
 

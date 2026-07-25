@@ -7,6 +7,7 @@ export * from './compatibility-dialog-service.js';
 export * from './observation-service.js';
 export * from './observation-store.js';
 export * from './input-dispatcher.js';
+export * from './action-continuity.js';
 export * from './action-service.js';
 export * from './upload-service.js';
 export * from './page-content-service.js';

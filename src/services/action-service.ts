@@ -11,6 +11,11 @@ import {
 } from '../page-scripts.js';
 import { legacyRefStore, resolveTarget, type RefStore, type SnapshotResult } from '../snapshot.js';
 import type { Transport } from '../transport.js';
+import type {
+  ActionContinuityFactory,
+  ActionContinuityRun,
+  CompositeActionName,
+} from './action-continuity.js';
 import { InputDispatcher } from './input-dispatcher.js';
 import { ObservationService } from './observation-service.js';
 
@@ -31,6 +36,8 @@ export interface ActionServiceOptions {
   readbackDelayMs?: number;
   focusDelayMs?: number;
   executionContextId?: number;
+  continuityFactory?: ActionContinuityFactory;
+  onWillDispatch?: () => void;
 }
 
 export interface ActionObservationService {
@@ -162,6 +169,12 @@ interface PressTargetState {
   checked?: boolean | 'mixed';
   pressed?: boolean | 'mixed';
   expanded?: boolean;
+}
+
+interface CompositeActionRun {
+  action: CompositeActionName;
+  continuity?: ActionContinuityRun;
+  dispatchedSteps: number;
 }
 
 type EditableBlockReason =
@@ -521,6 +534,8 @@ export class ActionService {
   private readonly readbackDelayMs: number;
   private readonly focusDelayMs: number;
   private readonly executionContextId?: number;
+  private readonly continuityFactory?: ActionContinuityFactory;
+  private readonly onWillDispatch?: () => void;
 
   constructor(
     private readonly transport: Transport,
@@ -539,6 +554,8 @@ export class ActionService {
     this.readbackDelayMs = options.readbackDelayMs ?? 50;
     this.focusDelayMs = options.focusDelayMs ?? 300;
     this.executionContextId = options.executionContextId;
+    this.continuityFactory = options.continuityFactory;
+    this.onWillDispatch = options.onWillDispatch;
   }
 
   async click(target: ClickTarget, options: ClickOptions = {}): Promise<ClickActionResult> {
@@ -547,167 +564,278 @@ export class ActionService {
     if (button === 'right' && clickCount === 2) {
       throw invalidArgument('Double-click and right-click are mutually exclusive');
     }
-
-    let evidence: ClickVerificationEvidence;
-    if (target.kind === 'coordinates') {
-      await this.input.click(target.x, target.y, { button, clickCount });
-      evidence = {
-        action: 'click',
-        status: 'unavailable',
-        kind: 'coordinates',
-        effects: [],
-        reason: 'coordinate_target',
-      };
-    } else {
-      const objectId = await resolveTarget(
-        this.transport,
-        this.sessionId,
-        target.ref,
-        this.targetId,
-        this.refStore,
-      );
-      try {
-        const { result } = await this.transport.send('Runtime.callFunctionOn', {
-          objectId,
-          functionDeclaration: GET_POINTER_TARGET_STATE,
-          returnByValue: true,
-        }, this.sessionId);
-        const state = parsePointerTargetState(result.value);
-        if (state.status === 'blocked') {
-          const context = {
-            action: 'click',
-            targetId: this.targetId,
-            ref: target.ref,
-            reason: state.reason,
-            ...(state.obstruction ? { obstruction: state.obstruction } : {}),
-          };
-          if (state.reason === 'detached') {
-            throw new BrowserPilotError('stale_ref', 'Ref no longer resolves to a connected element', {
+    const run = await this.startRun('click');
+    try {
+      let evidence: ClickVerificationEvidence;
+      if (target.kind === 'coordinates') {
+        await this.checkpoint(run, 'pointer_dispatch');
+        this.willDispatch();
+        await this.input.click(target.x, target.y, { button, clickCount });
+        this.markDispatched(run);
+        evidence = {
+          action: 'click',
+          status: 'unavailable',
+          kind: 'coordinates',
+          effects: [],
+          reason: 'coordinate_target',
+        };
+      } else {
+        const objectId = await resolveTarget(
+          this.transport,
+          this.sessionId,
+          target.ref,
+          this.targetId,
+          this.refStore,
+        );
+        try {
+          const { result } = await this.transport.send('Runtime.callFunctionOn', {
+            objectId,
+            functionDeclaration: GET_POINTER_TARGET_STATE,
+            returnByValue: true,
+          }, this.sessionId);
+          const state = parsePointerTargetState(result.value);
+          if (state.status === 'blocked') {
+            const context = {
+              action: 'click',
+              targetId: this.targetId,
+              ref: target.ref,
+              reason: state.reason,
+              ...(state.obstruction ? { obstruction: state.obstruction } : {}),
+            };
+            if (state.reason === 'detached') {
+              throw new BrowserPilotError('stale_ref', 'Ref no longer resolves to a connected element', {
+                context,
+              });
+            }
+            throw new BrowserPilotError('action_not_verified', 'Ref is not currently pointer-interactable', {
+              retryable: state.reason === 'outside_viewport' || state.reason === 'obscured',
               context,
             });
           }
-          throw new BrowserPilotError('action_not_verified', 'Ref is not currently pointer-interactable', {
-            retryable: state.reason === 'outside_viewport' || state.reason === 'obscured',
-            context,
-          });
+          await this.checkpoint(run, 'pointer_dispatch');
+          this.willDispatch();
+          await this.input.click(state.x, state.y, { button, clickCount });
+          this.markDispatched(run);
+          if (this.readbackDelayMs > 0) {
+            await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
+          }
+          let after: ClickTargetState | undefined;
+          try {
+            const response = await this.transport.send('Runtime.callFunctionOn', {
+              objectId,
+              functionDeclaration: READ_CLICK_TARGET_STATE,
+              returnByValue: true,
+            }, this.sessionId);
+            after = parseClickTargetState(response.result.value);
+          } catch (error) {
+            if (error instanceof BrowserPilotError && error.code === 'browser_disconnected') throw error;
+          }
+          evidence = clickEvidence(state.targetState, after, button, clickCount);
+        } finally {
+          await this.transport.send('Runtime.releaseObject', { objectId }, this.sessionId).catch(() => {});
         }
-        await this.input.click(state.x, state.y, { button, clickCount });
-        if (this.readbackDelayMs > 0) {
-          await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
-        }
-        let after: ClickTargetState | undefined;
-        try {
-          const response = await this.transport.send('Runtime.callFunctionOn', {
-            objectId,
-            functionDeclaration: READ_CLICK_TARGET_STATE,
-            returnByValue: true,
-          }, this.sessionId);
-          after = parseClickTargetState(response.result.value);
-        } catch (error) {
-          if (error instanceof BrowserPilotError && error.code === 'browser_disconnected') throw error;
-        }
-        evidence = clickEvidence(state.targetState, after, button, clickCount);
-      } finally {
-        await this.transport.send('Runtime.releaseObject', { objectId }, this.sessionId).catch(() => {});
       }
-    }
 
-    return {
-      observation: await this.observations.observeAfterAction(options.observationLimit),
-      evidence,
-    };
+      return {
+        observation: await this.observations.observeAfterAction(options.observationLimit),
+        evidence,
+      };
+    } finally {
+      await this.releaseRun(run);
+    }
   }
 
   async press(key: string, observationLimit = 50): Promise<PressActionResult> {
-    const before = await this.readActiveControlState();
-    await this.input.press(key);
-    if (this.readbackDelayMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
-    }
-    let after: PressTargetState | undefined;
+    const run = await this.startRun('press');
     try {
-      after = await this.readActiveControlState();
-    } catch (error) {
-      if (error instanceof BrowserPilotError && error.code === 'browser_disconnected') throw error;
-    }
-    return {
-      observation: await this.observations.observeAfterAction(observationLimit),
-      evidence: pressEvidence(before, after),
-    };
-  }
-
-  async type(ref: string, text: string, options: TypeOptions = {}): Promise<InputActionResult> {
-    const objectId = await resolveTarget(
-      this.transport,
-      this.sessionId,
-      ref,
-      this.targetId,
-      this.refStore,
-    );
-    let evidence: InputVerificationEvidence;
-    try {
-      const before = await this.prepareElement(objectId, !!options.clear);
-      this.requireEditableTarget(before, ref);
-
-      if (before.editMode === 'text') {
-        if (!options.clear && before.selectionMode === 'select') {
-          await this.input.press('End');
-        }
-        if (text.length > 0) {
-          await this.input.insertText(text);
-        } else if (options.clear) {
-          await this.input.press('Backspace');
-        }
-      } else {
-        const desired = options.clear ? text : before.value + text;
-        await this.transport.send('Runtime.callFunctionOn', {
-          objectId,
-          functionDeclaration: SET_VALUE_CONTROL,
-          arguments: [{ value: desired }],
-        }, this.sessionId);
-      }
-
+      const before = await this.readActiveControlState();
+      await this.checkpoint(run, 'key_dispatch');
+      this.willDispatch();
+      await this.input.press(key);
+      this.markDispatched(run);
       if (this.readbackDelayMs > 0) {
         await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
       }
-      const after = await this.readElementState(objectId);
-      evidence = inputEvidence('type', before, after, text, !!options.clear);
-      this.requireVerification(evidence, options.verification);
-      if (options.submit) await this.input.press('Enter');
+      let after: PressTargetState | undefined;
+      try {
+        after = await this.readActiveControlState();
+      } catch (error) {
+        if (error instanceof BrowserPilotError && error.code === 'browser_disconnected') throw error;
+      }
+      return {
+        observation: await this.observations.observeAfterAction(observationLimit),
+        evidence: pressEvidence(before, after),
+      };
     } finally {
-      await this.transport.send('Runtime.releaseObject', { objectId }, this.sessionId).catch(() => {});
+      await this.releaseRun(run);
     }
+  }
 
-    return {
-      observation: await this.observations.observeAfterAction(options.observationLimit),
-      evidence,
-    };
+  async type(ref: string, text: string, options: TypeOptions = {}): Promise<InputActionResult> {
+    const run = await this.startRun('type');
+    try {
+      const objectId = await resolveTarget(
+        this.transport,
+        this.sessionId,
+        ref,
+        this.targetId,
+        this.refStore,
+      );
+      let evidence: InputVerificationEvidence;
+      try {
+        await this.checkpoint(run, 'prepare_target');
+        this.willDispatch();
+        const before = await this.prepareElement(objectId, !!options.clear);
+        this.markDispatched(run);
+        this.requireEditableTarget(before, ref);
+        await this.captureFocus(run, 'capture_target_focus');
+
+        if (before.editMode === 'text') {
+          if (!options.clear && before.selectionMode === 'select') {
+            await this.checkpoint(run, 'move_caret', true);
+            this.willDispatch();
+            await this.input.press('End');
+            this.markDispatched(run);
+          }
+          if (text.length > 0) {
+            await this.checkpoint(run, 'insert_text', true);
+            this.willDispatch();
+            await this.input.insertText(text);
+            this.markDispatched(run);
+          } else if (options.clear) {
+            await this.checkpoint(run, 'delete_selection', true);
+            this.willDispatch();
+            await this.input.press('Backspace');
+            this.markDispatched(run);
+          }
+        } else {
+          const desired = options.clear ? text : before.value + text;
+          await this.checkpoint(run, 'set_control_value', true);
+          this.willDispatch();
+          await this.transport.send('Runtime.callFunctionOn', {
+            objectId,
+            functionDeclaration: SET_VALUE_CONTROL,
+            arguments: [{ value: desired }],
+          }, this.sessionId);
+          this.markDispatched(run);
+        }
+
+        if (this.readbackDelayMs > 0) {
+          await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
+        }
+        const after = await this.readElementState(objectId);
+        evidence = inputEvidence('type', before, after, text, !!options.clear);
+        this.requireVerification(evidence, options.verification);
+        if (options.submit) {
+          await this.checkpoint(run, 'submit', true);
+          this.willDispatch();
+          await this.input.press('Enter');
+          this.markDispatched(run);
+        }
+      } finally {
+        await this.transport.send('Runtime.releaseObject', { objectId }, this.sessionId).catch(() => {});
+      }
+
+      return {
+        observation: await this.observations.observeAfterAction(options.observationLimit),
+        evidence,
+      };
+    } finally {
+      await this.releaseRun(run);
+    }
   }
 
   async keyboard(text: string, options: KeyboardOptions = {}): Promise<InputActionResult> {
-    if (options.focusSelector) {
-      const location = await this.observations.locate(options.focusSelector);
-      await this.input.click(location.x, location.y);
-      if (this.focusDelayMs > 0) await new Promise(resolve => setTimeout(resolve, this.focusDelayMs));
-    }
+    const run = await this.startRun('keyboard');
+    try {
+      if (options.focusSelector) {
+        const location = await this.observations.locate(options.focusSelector);
+        await this.checkpoint(run, 'focus_pointer_dispatch');
+        this.willDispatch();
+        await this.input.click(location.x, location.y);
+        this.markDispatched(run);
+        if (this.focusDelayMs > 0) await new Promise(resolve => setTimeout(resolve, this.focusDelayMs));
+      }
+      await this.captureFocus(run, 'capture_input_focus');
 
-    const before = await this.readActiveState();
-    if (options.clear) {
-      const modifier = options.selectAllModifier ?? (process.platform === 'darwin' ? 'Meta' : 'Control');
-      await this.input.press(`${modifier}+a`);
-      await this.input.press('Delete');
-    }
-    await this.input.typeText(text, options.delayMs);
-    if (this.readbackDelayMs > 0) await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
-    const after = await this.readActiveState();
-    const evidence = inputEvidence('keyboard', before, after, text, !!options.clear);
-    this.requireVerification(evidence, options.verification);
-    if (options.submit) await this.input.press('Enter');
+      const before = await this.readActiveState();
+      if (options.clear) {
+        const modifier = options.selectAllModifier ?? (process.platform === 'darwin' ? 'Meta' : 'Control');
+        await this.checkpoint(run, 'select_all', true);
+        this.willDispatch();
+        await this.input.press(`${modifier}+a`);
+        this.markDispatched(run);
+        await this.checkpoint(run, 'delete_selection', true);
+        this.willDispatch();
+        await this.input.press('Delete');
+        this.markDispatched(run);
+      }
+      await this.input.typeText(text, options.delayMs, {
+        beforeCharacter: async ({ index }) => {
+          await this.checkpoint(run, `type_character:${index}`, true);
+          this.willDispatch();
+        },
+        afterCharacter: () => this.markDispatched(run),
+      });
+      if (this.readbackDelayMs > 0) await new Promise(resolve => setTimeout(resolve, this.readbackDelayMs));
+      const after = await this.readActiveState();
+      const evidence = inputEvidence('keyboard', before, after, text, !!options.clear);
+      this.requireVerification(evidence, options.verification);
+      if (options.submit) {
+        await this.checkpoint(run, 'submit', true);
+        this.willDispatch();
+        await this.input.press('Enter');
+        this.markDispatched(run);
+      }
 
+      return {
+        observation: await this.observations.observeAfterAction(options.observationLimit),
+        evidence,
+      };
+    } finally {
+      await this.releaseRun(run);
+    }
+  }
+
+  private async startRun(action: CompositeActionName): Promise<CompositeActionRun> {
     return {
-      observation: await this.observations.observeAfterAction(options.observationLimit),
-      evidence,
+      action,
+      continuity: await this.continuityFactory?.(action),
+      dispatchedSteps: 0,
     };
+  }
+
+  private async checkpoint(
+    run: CompositeActionRun,
+    step: string,
+    requireSameFocus = false,
+  ): Promise<void> {
+    await run.continuity?.check({
+      action: run.action,
+      step,
+      dispatchedSteps: run.dispatchedSteps,
+      ...(requireSameFocus ? { requireSameFocus: true } : {}),
+    });
+  }
+
+  private async captureFocus(run: CompositeActionRun, step: string): Promise<void> {
+    await run.continuity?.captureFocus({
+      action: run.action,
+      step,
+      dispatchedSteps: run.dispatchedSteps,
+    });
+  }
+
+  private markDispatched(run: CompositeActionRun): void {
+    run.dispatchedSteps += 1;
+  }
+
+  private willDispatch(): void {
+    this.onWillDispatch?.();
+  }
+
+  private async releaseRun(run: CompositeActionRun): Promise<void> {
+    await run.continuity?.release().catch(() => {});
   }
 
   private async readElementState(objectId: string): Promise<EditableState> {

@@ -31,6 +31,10 @@ import {
   type PressEffect,
   type PressVerificationEvidence,
 } from './action-service.js';
+import {
+  CdpActionContinuityGuard,
+  type ActionContinuityFailureReason,
+} from './action-continuity.js';
 import { ArtifactStore } from './artifact-store.js';
 import { DownloadController } from './download-controller.js';
 import { CdpBrowserTargetCatalog } from './browser-target-catalog.js';
@@ -687,7 +691,6 @@ export class BrowserToolService implements BrowserToolExecutor {
         target.observationId as ObservationId,
         Number(target.ref),
       );
-      this.markDispatched(context);
       return this.runClickAction(context, targetId, session, observation, service => service.click(
         { kind: 'ref', ref: String(target.ref) },
         {
@@ -696,7 +699,6 @@ export class BrowserToolService implements BrowserToolExecutor {
         },
       ));
     }
-    this.markDispatched(context);
     return this.runClickAction(context, targetId, session, undefined, service => service.click({
       kind: 'coordinates',
       x: Number(target.x),
@@ -717,7 +719,6 @@ export class BrowserToolService implements BrowserToolExecutor {
       args.observationId as ObservationId,
       Number(args.ref),
     );
-    this.markDispatched(context);
     return this.runInputAction(context, targetId, session, observation, service => service.type(
       String(args.ref),
       args.text as string,
@@ -732,7 +733,6 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async keyboard(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.interact');
-    this.markDispatched(context);
     return this.runInputAction(context, targetId, session, undefined, service => service.keyboard(
       args.text as string,
       {
@@ -748,7 +748,6 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async press(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.interact');
-    this.markDispatched(context);
     return this.runPressAction(context, targetId, session, service => service.press(args.key as string));
   }
 
@@ -1338,6 +1337,9 @@ export class BrowserToolService implements BrowserToolExecutor {
         : {}),
       ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
     };
+    const expectedConnectionGeneration = this.binding.instance.connectionGeneration;
+    const expectedFrameId = session.activeFrame?.cdpFrameId;
+    const expectedExecutionContextId = session.activeFrame?.executionContextId;
     const observationService = {
       refs: refStore,
       locate: (selector: string) => new ObservationService(
@@ -1355,12 +1357,53 @@ export class BrowserToolService implements BrowserToolExecutor {
       service: new ActionService(this.transport, session.sessionId, targetId, {
         refStore,
         observationService,
+        onWillDispatch: () => this.markDispatched(context),
+        continuityFactory: action => CdpActionContinuityGuard.create(
+          this.transport,
+          session.sessionId,
+          action,
+          {
+            ...(expectedFrameId ? { frameId: expectedFrameId } : {}),
+            externalCheck: () => this.actionContinuityFailure(
+              session,
+              expectedConnectionGeneration,
+              expectedFrameId,
+              expectedExecutionContextId,
+            ),
+          },
+        ),
         ...(session.activeFrame?.executionContextId !== undefined
           ? { executionContextId: session.activeFrame.executionContextId }
           : {}),
       }),
       observation: () => next,
     };
+  }
+
+  private actionContinuityFailure(
+    session: TargetSession,
+    expectedConnectionGeneration: number,
+    expectedFrameId: string | undefined,
+    expectedExecutionContextId: number | undefined,
+  ): ActionContinuityFailureReason | undefined {
+    if (
+      this.binding.instance.state !== 'connected' ||
+      this.binding.instance.connectionGeneration !== expectedConnectionGeneration
+    ) {
+      return 'session_changed';
+    }
+    const current = this.sessions.get(sessionKey(session.leaseId, session.targetId));
+    if (!current || current !== session || current.sessionId !== session.sessionId) {
+      return 'session_changed';
+    }
+    if (current.cdpTargetId !== session.cdpTargetId || current.targetId !== session.targetId) {
+      return 'target_changed';
+    }
+    if (current.activeFrame?.cdpFrameId !== expectedFrameId) return 'frame_changed';
+    if (current.activeFrame?.executionContextId !== expectedExecutionContextId) {
+      return 'document_changed';
+    }
+    return undefined;
   }
 
   private observationResult(

@@ -8,6 +8,7 @@ import { connectFresh, resume, resumeExisting, withPilot, disconnect, waitForLoa
 import { type SnapshotResult } from './snapshot.js';
 import { CaptureService } from './services/capture-service.js';
 import { ActionService, type ClickTarget } from './services/action-service.js';
+import { CdpActionContinuityGuard } from './services/action-continuity.js';
 import { ObservationService } from './services/observation-service.js';
 import { UploadService } from './services/upload-service.js';
 import { PageContentService } from './services/page-content-service.js';
@@ -120,6 +121,20 @@ function parseLimit(raw: string): number {
   const n = parseInt(raw, 10);
   if (isNaN(n) || n < 1) throw new Error('--limit must be a positive number');
   return n;
+}
+
+function createCompatibilityActionService(
+  transport: Parameters<typeof CdpActionContinuityGuard.create>[0],
+  sessionId: string,
+  targetId: string,
+): ActionService {
+  return new ActionService(transport, sessionId, targetId, {
+    continuityFactory: action => CdpActionContinuityGuard.create(
+      transport,
+      sessionId,
+      action,
+    ),
+  });
 }
 
 function readStdin(): Promise<string> {
@@ -274,7 +289,7 @@ Examples:
       } else {
         target = { kind: 'ref', ref };
       }
-      const service = new ActionService(transport, sessionId, state.activeTargetId);
+      const service = createCompatibilityActionService(transport, sessionId, state.activeTargetId);
       const result = await service.click(target, {
         button: opts.right ? 'right' : 'left',
         clickCount: opts.double ? 2 : 1,
@@ -322,7 +337,7 @@ program.command('type <ref> <text>')
   .action(action(async (ref, text, opts) => {
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
-      const result = await new ActionService(
+      const result = await createCompatibilityActionService(
         transport,
         sessionId,
         state.activeTargetId,
@@ -365,7 +380,7 @@ Examples:
       if (isNaN(delay) || delay < 0) throw new Error('--delay must be a non-negative number');
     }
     await withPilot(async ({ transport, sessionId, state }) => {
-      const result = await new ActionService(
+      const result = await createCompatibilityActionService(
         transport,
         sessionId,
         state.activeTargetId,
@@ -393,7 +408,7 @@ program.command('press <key>')
   .action(action(async (key, opts) => {
     const limit = parseLimit(opts.limit);
     await withPilot(async ({ transport, sessionId, state }) => {
-      const result = await new ActionService(
+      const result = await createCompatibilityActionService(
         transport,
         sessionId,
         state.activeTargetId,

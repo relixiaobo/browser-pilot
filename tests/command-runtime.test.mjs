@@ -216,6 +216,27 @@ test('known tool errors complete deterministically and transport uncertainty doe
   assert.equal(replay.command.status, 'unknown_outcome');
   assert.equal(replay.error.data.code, 'unknown_outcome');
   assert.equal(executions, 1);
+
+  const guarded = runtime.run(input({
+    commandId: 'command:guarded-partial',
+    actorKey: 'browser:test\u0000target:guarded',
+  }), async ({ markDispatched }) => {
+    markDispatched();
+    throw new BrowserPilotError('unknown_outcome', 'remaining steps stopped', {
+      retryable: true,
+      context: { reason: 'focus_changed', dispatchedSteps: 1 },
+    });
+  });
+  await assert.rejects(
+    guarded,
+    error => (
+      error.code === 'unknown_outcome' &&
+      error.retryable === true &&
+      error.context?.commandId === 'command:guarded-partial' &&
+      error.context?.reason === 'focus_changed' &&
+      error.context?.dispatchedSteps === 1
+    ),
+  );
 });
 
 test('Command Runtime bounds terminal records and enforces ownership', async () => {

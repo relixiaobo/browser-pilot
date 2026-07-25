@@ -137,9 +137,16 @@ Preserve Browser Pilot advantages:
     Unsupported effects report `unavailable`; observable wrong states report
     `mismatch`; exact machine input can raise `action_not_verified`. Legacy CLI
     output remains compatible.
-- [ ] **B3.5** Stop any remaining composite action steps when target, frame,
+- [x] **B3.5** Stop any remaining composite action steps when target, frame,
   focus, loader, or document generation changes unexpectedly.
   - Covers: BR-10 through BR-12, AC-5.
+  - Complete: Broker and compatibility CLI actions create the same isolated
+    CDP continuity guard. It pins target/session ownership, browser generation,
+    selected frame, loader, and Document identity; type/keyboard additionally
+    pin deep composed focus. Checks run between clear, delete, per-character
+    keyboard input, and submit. Pre-mutation changes return retryable
+    `action_not_verified`; partial mutations preserve a structured
+    `unknown_outcome`, stop all remaining steps, and are never replayed.
 
 ### B4. Produce typed browser events and recovery state
 
@@ -198,8 +205,8 @@ Preserve Browser Pilot advantages:
   - Progress: isolated system-Chrome tests cover trusted controlled-input
     events and rollback, canceled `beforeinput`, native email/number selection,
     nested contenteditable replacement/append, blocked fields, special value
-    controls, Shadow DOM readback, keyboard clear, press effects, and upload
-    readback. Composite focus loss remains.
+    controls, Shadow DOM readback, keyboard clear, press effects, upload
+    readback, public loader replacement, and real-Chrome composite focus loss.
 - [ ] **B6.3** Add real-site canaries that report drift without making release
   tests depend on third-party availability.
   - Covers: FR-8.
