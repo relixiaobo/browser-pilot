@@ -412,6 +412,14 @@ npm run test:integration         # compatibility alias for strict canaries
 npm run test:all                 # release gates plus non-blocking canaries
 ```
 
+Automated browser gates, including Playwright and stdio conformance, start their
+own headless Chrome with a temporary profile, random debugging port, and
+isolated Broker home. Teardown stops the Broker and Chrome and removes those
+files. Tests fail closed if that isolation is absent; they never attach to the
+user's Chrome by default. A maintainer can explicitly opt into a destructive
+manual compatibility run against the user's browser by setting
+`BROWSER_PILOT_TEST_USER_CHROME=1`.
+
 Maintainers can build and verify a native artifact with an official,
 SEA-capable Node 22.17.0 runtime:
 

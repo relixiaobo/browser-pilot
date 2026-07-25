@@ -993,7 +993,7 @@ test('Workspace auth and network rules are active before first navigation and us
   );
   assert.deepEqual(
     transport.calls.find(call => call.method === 'Fetch.failRequest' && call.sessionId === sessionId)?.params,
-    { requestId: 'paused-1', reason: 'BlockedByClient' },
+    { requestId: 'paused-1', errorReason: 'BlockedByClient' },
   );
 
   await tool(runtime, client, 'browser.auth.clear', {});

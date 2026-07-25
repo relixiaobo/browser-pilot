@@ -12,8 +12,8 @@ const BASE = 'http://127.0.0.1:18274';
 // ── Lifecycle ───────────────────────────────────────
 
 test.describe('lifecycle', () => {
-  // Disconnect + reconnect requires manual Chrome "Allow" dialog — skip in automated tests
-  test.skip('disconnect + reconnect (manual)', async () => {
+  // This mutates the shared Broker lifecycle; dedicated process tests cover restart behavior.
+  test.skip('disconnect + reconnect (process-isolated)', async () => {
     bp('disconnect');
     const result = bp('connect');
     expect(result.ok).toBe(true);
@@ -270,6 +270,10 @@ test.describe('auth', () => {
 
 test.describe('dialogs', () => {
   test('dialog remains pending until explicitly dismissed', async () => {
+    test.skip(
+      process.env.BROWSER_PILOT_TEST_USER_CHROME !== '1',
+      'requires Browser Pilot to be the browser\'s sole CDP client',
+    );
     const daemon = new DaemonClient();
     const { targetId } = await daemon.send('Target.createTarget', { url: `${BASE}/input/types` });
     const { sessionId } = await daemon.send('Target.attachToTarget', { targetId, flatten: true });

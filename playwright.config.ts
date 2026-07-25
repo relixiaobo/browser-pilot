@@ -6,14 +6,13 @@ export default defineConfig({
   retries: 0,
   workers: 1, // bp uses a single browser session — must be serial
   globalSetup: './tests/global-setup.ts',
-  globalTeardown: './tests/global-teardown.ts',
   use: {
     baseURL: 'http://127.0.0.1:18274',
   },
   webServer: {
     command: 'node tests/server.mjs 18274',
     port: 18274,
-    reuseExistingServer: true,
+    reuseExistingServer: false,
   },
   projects: [
     {

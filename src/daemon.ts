@@ -547,7 +547,7 @@ async function main() {
       for (const rule of interceptRules) {
         if (!wildcardMatch(url, rule.pattern)) continue;
         if (rule.type === 'block') {
-          cdp.send('Fetch.failRequest', { requestId: params.requestId, reason: 'BlockedByClient' }, sessionId).catch(() => {});
+          cdp.send('Fetch.failRequest', { requestId: params.requestId, errorReason: 'BlockedByClient' }, sessionId).catch(() => {});
           return;
         }
         if (rule.type === 'mock') {

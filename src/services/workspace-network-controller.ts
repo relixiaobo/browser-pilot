@@ -616,7 +616,7 @@ export class WorkspaceNetworkController {
         if (rule.type === 'block') {
           await this.transport.send('Fetch.failRequest', {
             requestId: params.requestId,
-            reason: 'BlockedByClient',
+            errorReason: 'BlockedByClient',
           }, sessionId);
           return;
         }

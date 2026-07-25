@@ -1,8 +1,25 @@
 // Helper: run bp CLI commands and parse JSON output.
 import { execSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 
 const BP = resolve(import.meta.dirname, '../dist/cli.js');
+const USER_CHROME_OPT_IN = 'BROWSER_PILOT_TEST_USER_CHROME';
+
+function assertSafeBrowserEnvironment(): void {
+  if (process.env[USER_CHROME_OPT_IN] === '1') return;
+  const root = process.env.BROWSER_PILOT_TEST_ROOT;
+  const brokerHome = process.env.BROWSER_PILOT_HOME;
+  if (!root || !brokerHome || !isAbsolute(root) || !isAbsolute(brokerHome)) {
+    throw new Error(
+      'Browser CLI tests require the isolated global setup. ' +
+      `Set ${USER_CHROME_OPT_IN}=1 only for an intentional manual run against user Chrome.`,
+    );
+  }
+  const brokerRelative = relative(root, brokerHome);
+  if (!brokerRelative || brokerRelative.startsWith('..') || isAbsolute(brokerRelative)) {
+    throw new Error('Browser CLI test Broker must be contained by BROWSER_PILOT_TEST_ROOT');
+  }
+}
 
 export interface BpResult {
   ok: boolean;
@@ -23,6 +40,7 @@ export interface BpResult {
 }
 
 function run(args: string): BpResult {
+  assertSafeBrowserEnvironment();
   try {
     const out = execSync(`node ${BP} ${args}`, {
       encoding: 'utf-8',
