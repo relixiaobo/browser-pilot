@@ -5,6 +5,7 @@ import { access, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } fr
 import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
+import { supportedBrowserProfiles } from '../dist/services.js';
 
 const CLI = join(process.cwd(), 'dist', 'cli.js');
 
@@ -262,9 +263,16 @@ test('passive Broker startup and concurrent explicit connects create exactly one
   const root = await mkdtemp('/tmp/bp-explicit-authorization-');
   const stateDir = join(root, '.browser-pilot');
   const socketPath = join(stateDir, 'daemon.sock');
-  const profile = join(root, 'Library', 'Application Support', 'Google', 'Chrome');
+  const browserEnv = {
+    ...process.env,
+    HOME: root,
+    PATH: '',
+    LOCALAPPDATA: join(root, 'AppData', 'Local'),
+  };
+  const profile = supportedBrowserProfiles({ homeDir: root, env: browserEnv })[0]?.dataDir;
+  assert.ok(profile, `No supported browser profile is defined for ${process.platform}`);
   await mkdir(profile, { recursive: true });
-  await symlink('host-explicit', join(profile, 'SingletonLock'));
+  await writeFile(join(profile, 'SingletonLock'), 'fixture');
   const cdp = await startGatedCdpFixture();
   const port = new URL(cdp.wsUrl).port;
   await writeFile(join(profile, 'DevToolsActivePort'), `${port}\n/devtools/browser/gated\n`);
@@ -274,7 +282,7 @@ test('passive Broker startup and concurrent explicit connects create exactly one
     await rm(root, { recursive: true, force: true });
   });
 
-  const started = await runBridge(root, 'authorization:passive');
+  const started = await runBridge(root, 'authorization:passive', { env: browserEnv });
   assert.equal(started.code, 0, started.stderr);
   assert.equal(cdp.upgradeCount, 0, 'bridge initialization must not request browser authorization');
   assert.equal(cdp.pendingUpgradeCount, 0);
