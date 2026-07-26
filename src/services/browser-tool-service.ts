@@ -166,6 +166,7 @@ interface TargetSession {
   browserConnectionGeneration: number;
   cdpTargetId: string;
   sessionId: string;
+  cdpBrowserContextId?: string;
   activeFrame?: ActiveFrame;
 }
 
@@ -2133,6 +2134,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     if (typeof attached?.sessionId !== 'string') {
       throw new BrowserPilotError('internal_error', 'Chrome returned an invalid CDP session');
     }
+    const profile = this.profileContexts.forTarget(cdpTargetId, context.browserConnectionGeneration);
     const session: TargetSession = {
       workspaceId: context.workspaceId,
       leaseId: context.leaseId,
@@ -2140,6 +2142,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       browserConnectionGeneration: context.browserConnectionGeneration,
       cdpTargetId,
       sessionId: attached.sessionId,
+      ...(profile?.cdpBrowserContextId ? { cdpBrowserContextId: profile.cdpBrowserContextId } : {}),
     };
     this.sessions.set(key, session);
     this.ownedSessionIds.add(attached.sessionId);

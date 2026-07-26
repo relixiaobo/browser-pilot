@@ -8,7 +8,7 @@
       "name": "browser-pilot",
       "source": "./plugin",
       "description": "Control your real Chrome browser via CLI — navigate, click, type, screenshot, network monitoring",
-      "version": "0.3.0-rc.2"
+      "version": "0.3.0-rc.3"
     }
   ]
 }

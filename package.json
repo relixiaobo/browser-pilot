@@ -1,6 +1,6 @@
 {
   "name": "browser-pilot-cli",
-  "version": "0.3.0-rc.2",
+  "version": "0.3.0-rc.3",
   "description": "CLI tool to control your browser via Chrome DevTools Protocol",
   "repository": "https://github.com/relixiaobo/browser-pilot",
   "type": "module",
@@ -22,6 +22,7 @@
     "test:capabilities": "tsup && node --test tests/browser-capability-fixtures.test.mjs",
     "test:protocol": "tsup && node --test tests/protocol.test.mjs",
     "test:stdio-conformance": "tsup && node scripts/run-isolated-stdio-conformance.mjs",
+    "test:host-acceptance": "tsup && node scripts/run-isolated-host-integration-acceptance.mjs",
     "test:distribution": "tsup && node scripts/verify-npm-distribution.mjs",
     "test:canary": "tsup && node scripts/run-real-site-canaries.mjs",
     "test:canary:strict": "tsup && node scripts/run-real-site-canaries.mjs --strict",
@@ -41,9 +42,11 @@
     "docs/integration/stdio-conformance.md",
     "docs/plans/browser-capability-evolution.md",
     "docs/plans/profile-context-routing.md",
+    "docs/plans/v0.3.0-stabilization.md",
     "docs/plans/universal-agent-integration.md",
     "docs/releases/v0.3.0-rc.1.md",
     "docs/releases/v0.3.0-rc.2.md",
+    "docs/releases/v0.3.0-rc.3.md",
     "README.md",
     "LICENSE"
   ],

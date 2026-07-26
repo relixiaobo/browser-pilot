@@ -182,7 +182,7 @@ A project can pin Browser Pilot locally and run the same CLI without a global
 installation:
 
 ```bash
-npm install --save-exact browser-pilot-cli@0.3.0-rc.2
+npm install --save-exact browser-pilot-cli@0.3.0-rc.3
 npx --no-install browser-pilot tabs
 ```
 
@@ -421,6 +421,7 @@ non-blocking canaries so a third-party outage cannot fail the release gate:
 ```bash
 npm test                         # unit + local core, compat, and network gates
 npm run test:capabilities        # isolated-Chrome quantitative capability gate
+npm run test:host-acceptance     # two embedded hosts + CLI + Artifacts + reconnect
 npm run test:distribution        # packed global/local/product-bundled launch modes
 npm run test:canary              # real-site drift report; non-blocking
 npm run test:canary:strict       # fail on drift or unavailability

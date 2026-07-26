@@ -544,10 +544,11 @@ downloads are rejected as upload inputs. Workspace cleanup deletes the imported
 copy but never deletes the client-owned source file.
 
 Downloads have no path-returning tool. Once a controlled target session is
-attached, the Broker configures target-session download capture and emits
-`download` events with one of these states:
+attached, the Broker enables browser-level completion events while preserving
+Chrome's default download behavior, and emits `download` events with one of
+these states:
 
-- `capture_unavailable`: that Chrome version rejected target-session isolation;
+- `capture_unavailable`: Chrome rejected browser-level completion events;
 - `started`: includes an opaque `downloadId`, bounded URL, and suggested filename;
 - `completed`: includes the Workspace-owned `download` Artifact descriptor;
 - `failed` or `cancelled`: includes a stable, bounded reason and byte metadata.
@@ -558,14 +559,24 @@ public `artifactId`, and terminal failures recommend inspecting the bounded
 failure reason. `capture_unavailable` is setup state and does not claim that a
 download started.
 
-The private CDP GUID and staging path never appear in protocol output. On
-`completed`, use the descriptor's `id` with `artifacts/get` or `artifacts/export`
-exactly as for screenshots and PDFs. Staging directories are separate per CDP
-session, use mode `0700`, enforce concurrency and byte quotas, and are removed on
-session, Lease, or Workspace release. The session setting is restored to
-`default` before an attached session is retired. Browser Pilot never calls browser-wide
-`Browser.setDownloadBehavior`; unsupported target-session capture remains
-unavailable instead of redirecting unrelated user downloads.
+The private CDP GUID and Chrome source path never appear in protocol output. On
+`completed`, use the descriptor's `id` with `artifacts/get` or
+`artifacts/export` exactly as for screenshots and PDFs. A session-scoped
+`Page.downloadWillBegin` event establishes Workspace/Lease/target ownership;
+the browser-level completion event is ignored unless that ownership already
+exists. Browser Pilot enables those completion events once per browser
+connection generation and Chrome Profile context with
+`Browser.setDownloadBehavior({ behavior: "default", eventsEnabled: true })`.
+It never supplies `downloadPath`, so Chrome continues to use the user's selected
+download directory.
+
+The Broker validates the completed absolute regular-file path and copies it to
+protected Artifact storage. Releasing or expiring the Artifact, Lease, or
+Workspace deletes only that copy. The original Chrome download is never moved
+or deleted. Size, concurrency, or Artifact quota failures reject only the
+Artifact copy and do not call `Browser.cancelDownload`. Downloads from tabs
+without an attached controlled session remain ordinary Chrome downloads and
+produce no Browser Pilot event.
 
 ## Cleanup
 

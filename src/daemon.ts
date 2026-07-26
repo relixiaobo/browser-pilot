@@ -173,8 +173,6 @@ async function syncFetchAll(cdp: Transport, currentSessionId?: string) {
 async function main() {
   const startedAt = Date.now();
   const brokerProcessIdentity = `${process.pid}:${startedAt}`;
-  writeBrokerStartingSync({ pid: process.pid, startedAt, brokerProcessIdentity });
-  process.once('exit', () => cleanup(brokerProcessIdentity));
   const cdp = new ManagedTargetJanitorClient({
     onLog: message => process.stderr.write(`Managed browser connection: ${message}\n`),
   });
@@ -187,8 +185,10 @@ async function main() {
     process.exit(0);
   };
   const requestTermination = (): void => { void terminate(); };
+  process.once('exit', () => cleanup(brokerProcessIdentity));
   process.on('SIGTERM', requestTermination);
   process.on('SIGINT', requestTermination);
+  writeBrokerStartingSync({ pid: process.pid, startedAt, brokerProcessIdentity });
   if (initialWsUrl) await cdp.connect(initialWsUrl);
   let activeSessionId: string | undefined;
   let currentWsUrl = initialWsUrl;

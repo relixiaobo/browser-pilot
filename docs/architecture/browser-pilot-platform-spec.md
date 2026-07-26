@@ -818,21 +818,30 @@ a screenshot, PDF, download, or arbitrary Broker-internal path as upload
 authorization.
 
 Downloads are event-produced Artifacts rather than a separate path-returning
-tool. The implementation must configure download behavior on the controlled
-target session only, stage bytes in a mode-`0700` per-session directory, keep
-the CDP download GUID and staging path private, and ingest a completed file as a
-Workspace-owned `download` Artifact before publishing the completed `download`
-event. Lease/session/Workspace release removes partial staging files; failed,
-cancelled, oversized, or detached downloads publish bounded metadata without a
-local path. Browser-wide `Browser.setDownloadBehavior` on the user's default
-context is forbidden because it would redirect downloads from unrelated user
-tabs. If target-session isolation is unavailable in a Chrome version, Browser
-Pilot reports download capture as unavailable and does not fall back globally.
-The implementation applies per-download, per-Workspace staging, and global
-staging bounds. An oversized or over-capacity download is cancelled by its
-private GUID without changing download behavior for the browser's default
-context. Stale staging directories from a prior Broker process are removed before
-the first new download session is configured.
+tool. CDP download behavior is browser-context scoped even when invoked through
+an attached target session, so per-session download directories cannot provide
+isolation. For each browser connection generation and Chrome Profile context,
+the Broker enables `Browser.downloadProgress` once with
+`Browser.setDownloadBehavior({ behavior: "default", eventsEnabled: true })`.
+The `default` behavior preserves Chrome's configured download directory and
+does not redirect user downloads.
+
+`Page.downloadWillBegin` on an attached controlled target binds the private CDP
+GUID to that target's Workspace and Lease. The browser-level completed event
+supplies the absolute source `filePath`; the Broker accepts it only for a GUID
+already bound by the Page event, validates a regular file, and copies it into a
+Workspace-owned `download` Artifact before publishing completion. Browser-level
+events without a controlled Page owner are ignored. GUIDs and source paths never
+appear in protocol output.
+
+The Browser Pilot copy is subject to tracking, item, Workspace, and global
+Artifact bounds. Exceeding a bound rejects only Artifact creation: it must not
+cancel, move, truncate, or delete Chrome's original download. Lease, session,
+Workspace, Artifact, and Broker cleanup stop tracking and delete only protected
+Artifact copies. The original file in the user's Chrome download directory is
+always left intact. If browser-level download events are unavailable, Browser
+Pilot reports capture as unavailable without changing Chrome's download
+behavior.
 
 ## Browser Discovery and Setup
 

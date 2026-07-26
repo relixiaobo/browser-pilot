@@ -60,19 +60,50 @@ test('Artifact Store imports an authorized local file as a protected upload inpu
   await assert.rejects(() => stat(record.path), error => error.code === 'ENOENT');
 });
 
-test('Artifact Store ingests a completed download and removes only the staging source', async t => {
+test('Artifact Store copies a completed user download and never removes the source', async t => {
   const { root, directory, store } = await fixture(t);
   const staging = join(root, 'private-download-guid');
   await writeFile(staging, 'download contents');
 
-  const record = await store.ingestDownload(workspaceA, staging, 'quarterly-report.csv');
+  const record = await store.ingestDownloadCopy(workspaceA, staging, 'quarterly-report.csv');
   assert.equal(record.descriptor.kind, 'download');
   assert.equal(record.descriptor.sensitivity, 'user_file');
   assert.equal(record.descriptor.fileName, 'quarterly-report.csv');
   assert.equal(record.descriptor.mimeType, 'text/csv');
   assert.equal(record.path.startsWith(`${directory}/`), true);
   assert.deepEqual(await readFile(record.path), Buffer.from('download contents'));
-  await assert.rejects(() => stat(staging), error => error.code === 'ENOENT');
+  assert.deepEqual(await readFile(staging), Buffer.from('download contents'));
+
+  await store.release(workspaceA, record.descriptor.id);
+  assert.deepEqual(await readFile(staging), Buffer.from('download contents'));
+  await store.releaseWorkspace(workspaceA);
+  assert.deepEqual(await readFile(staging), Buffer.from('download contents'));
+});
+
+test('download copying rejects unsafe sources and quota failures preserve user files', async t => {
+  const { root, store } = await fixture(t, {
+    maxArtifactBytes: 4,
+    maxWorkspaceBytes: 8,
+    maxTotalBytes: 16,
+  });
+  const source = join(root, 'large-download.bin');
+  const sourceLink = join(root, 'download-link.bin');
+  await writeFile(source, '12345');
+  await symlink(source, sourceLink);
+
+  await assert.rejects(
+    () => store.ingestDownloadCopy(workspaceA, 'relative.bin', 'relative.bin'),
+    error => error.code === 'invalid_argument',
+  );
+  await assert.rejects(
+    () => store.ingestDownloadCopy(workspaceA, sourceLink, 'linked.bin'),
+    error => error.code === 'invalid_argument',
+  );
+  await assert.rejects(
+    () => store.ingestDownloadCopy(workspaceA, source, 'large.bin'),
+    error => error.code === 'result_too_large',
+  );
+  assert.deepEqual(await readFile(source), Buffer.from('12345'));
 });
 
 test('Artifact import and export reject symbolic-link paths into Broker storage', async t => {

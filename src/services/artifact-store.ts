@@ -46,7 +46,7 @@ interface IngestArtifactFileInput {
   sensitivity: Sensitivity;
   fileName?: string;
   mimeType?: string;
-  removeSource: boolean;
+  rejectSymbolicLink: boolean;
 }
 
 export interface ArtifactStoreOptions {
@@ -151,11 +151,11 @@ export class ArtifactStore {
       kind: 'upload_input',
       sensitivity: 'user_file',
       mimeType,
-      removeSource: false,
+      rejectSymbolicLink: false,
     });
   }
 
-  async ingestDownload(
+  async ingestDownloadCopy(
     workspaceId: BrowserWorkspaceId,
     sourcePath: string,
     fileName: string,
@@ -168,7 +168,7 @@ export class ArtifactStore {
       sensitivity: 'user_file',
       fileName,
       mimeType,
-      removeSource: true,
+      rejectSymbolicLink: true,
     });
   }
 
@@ -301,6 +301,21 @@ export class ArtifactStore {
       await this.sweepUnlocked();
       await this.ensureDirectory();
       const canonicalStore = await realpath(this.directory);
+      if (input.rejectSymbolicLink) {
+        let sourceLinkInfo;
+        try {
+          sourceLinkInfo = await lstat(source);
+        } catch (cause) {
+          throw new BrowserPilotError('invalid_argument', 'Artifact import file is not accessible', {
+            context: { field: 'path' },
+            rpcCode: -32602,
+            cause,
+          });
+        }
+        if (sourceLinkInfo.isSymbolicLink() || !sourceLinkInfo.isFile()) {
+          throw invalidArgument('Artifact import path must identify a regular file', 'path');
+        }
+      }
       let canonicalSource: string;
       try {
         canonicalSource = await realpath(source);
@@ -371,7 +386,6 @@ export class ArtifactStore {
         };
         const record = { descriptor, path: destination };
         this.records.set(id, record);
-        if (input.removeSource) await unlink(canonicalSource).catch(() => {});
         return clone(record);
       } catch (error) {
         await rm(storageDirectory, { recursive: true, force: true }).catch(() => {});

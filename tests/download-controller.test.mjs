@@ -13,12 +13,11 @@ class DownloadTransport {
 
   async send(method, params = {}, sessionId) {
     this.calls.push({ method, params, sessionId });
-    if (method === 'Page.setDownloadBehavior') {
+    if (method === 'Browser.setDownloadBehavior') {
       if (this.unavailable) throw new Error('Method not found');
       if (this.downloadGate) await this.downloadGate;
       return {};
     }
-    if (method === 'Browser.cancelDownload') return {};
     throw new Error(`Unexpected CDP call: ${method}`);
   }
 
@@ -39,12 +38,14 @@ const contextA = {
   workspaceId: 'workspace:alpha',
   leaseId: 'lease:alpha',
   targetId: 'target:alpha',
+  browserConnectionGeneration: 1,
   sessionId: 'session:alpha',
 };
 const contextB = {
   workspaceId: 'workspace:beta',
   leaseId: 'lease:beta',
   targetId: 'target:beta',
+  browserConnectionGeneration: 1,
   sessionId: 'session:beta',
 };
 
@@ -59,7 +60,6 @@ async function fixture(t, options = {}) {
   await artifacts.initialize();
   const events = [];
   const controller = new DownloadController(transport, artifacts, {
-    directory: join(root, 'staging'),
     ...(options.maxDownloadBytes ? { maxDownloadBytes: options.maxDownloadBytes } : {}),
     ...(options.controllerOptions ?? {}),
     publishEvent: event => events.push(event),
@@ -77,31 +77,41 @@ async function waitFor(predicate) {
   throw new Error('Timed out waiting for download state');
 }
 
-function configuredDirectory(transport, sessionId) {
-  return transport.calls.find(call => (
-    call.method === 'Page.setDownloadBehavior' && call.sessionId === sessionId
-  ))?.params.downloadPath;
+function behaviorCalls(transport) {
+  return transport.calls.filter(call => call.method === 'Browser.setDownloadBehavior');
 }
 
-test('completed target-session downloads become protected Artifacts without exposing staging identity', async t => {
-  const { transport, artifacts, controller, events } = await fixture(t);
-  assert.equal(await controller.attachSession(contextA), true);
-  const directory = configuredDirectory(transport, contextA.sessionId);
-  assert.equal((await stat(directory)).mode & 0o777, 0o700);
-  assert.equal(transport.calls.some(call => call.method === 'Browser.setDownloadBehavior'), false);
-
+function begin(transport, context, guid, fileName = `${guid}.txt`) {
   transport.emit('Page.downloadWillBegin', {
-    guid: 'private-guid',
-    url: 'https://example.test/report',
-    suggestedFilename: 'report.pdf',
-  }, contextA.sessionId);
-  await writeFile(join(directory, 'private-guid'), 'download bytes');
-  transport.emit('Page.downloadProgress', {
-    guid: 'private-guid',
+    guid,
+    url: 'https://example.test/download',
+    suggestedFilename: fileName,
+  }, context.sessionId);
+}
+
+function complete(transport, guid, filePath, byteSize) {
+  transport.emit('Browser.downloadProgress', {
+    guid,
     state: 'completed',
-    receivedBytes: 14,
-    totalBytes: 14,
-  }, contextA.sessionId);
+    receivedBytes: byteSize,
+    totalBytes: byteSize,
+    ...(filePath !== undefined ? { filePath } : {}),
+  });
+}
+
+test('completed controlled downloads are copied into Artifacts without moving the user file', async t => {
+  const { root, transport, artifacts, controller, events } = await fixture(t);
+  assert.equal(await controller.attachSession(contextA), true);
+  assert.deepEqual(behaviorCalls(transport), [{
+    method: 'Browser.setDownloadBehavior',
+    params: { behavior: 'default', eventsEnabled: true },
+    sessionId: undefined,
+  }]);
+
+  const source = join(root, 'report.pdf');
+  await writeFile(source, 'download bytes');
+  begin(transport, contextA, 'private-guid', 'report.pdf');
+  complete(transport, 'private-guid', source, 14);
 
   const completed = await waitFor(() => events.find(event => event.payload.state === 'completed'));
   const started = events.find(event => event.payload.state === 'started');
@@ -110,175 +120,193 @@ test('completed target-session downloads become protected Artifacts without expo
   assert.equal(completed.payload.artifact.kind, 'download');
   assert.equal(completed.payload.artifact.fileName, 'report.pdf');
   assert.equal(completed.payload.artifact.sensitivity, 'user_file');
-  assert.equal(completed.payload.hints[0].state, 'completed');
   assert.equal(completed.payload.hints[0].artifactId, completed.payload.artifact.id);
   assert.equal(JSON.stringify(events).includes('private-guid'), false);
-  assert.equal(JSON.stringify(events).includes(directory), false);
+  assert.equal(JSON.stringify(events).includes(source), false);
+
   const stored = await artifacts.get(contextA.workspaceId, completed.payload.artifact.id);
   assert.deepEqual(await readFile(stored.path), Buffer.from('download bytes'));
-  await assert.rejects(() => stat(join(directory, 'private-guid')), error => error.code === 'ENOENT');
+  assert.deepEqual(await readFile(source), Buffer.from('download bytes'));
+  await artifacts.release(contextA.workspaceId, completed.payload.artifact.id);
+  assert.deepEqual(await readFile(source), Buffer.from('download bytes'));
+  await artifacts.releaseWorkspace(contextA.workspaceId);
+  assert.deepEqual(await readFile(source), Buffer.from('download bytes'));
 });
 
-test('same GUID downloads remain isolated by target session and Workspace', async t => {
-  const { transport, artifacts, controller, events } = await fixture(t);
+test('two sessions in one Profile share one browser-level default configuration and keep ownership isolated', async t => {
+  const { root, transport, artifacts, controller, events } = await fixture(t);
   await Promise.all([controller.attachSession(contextA), controller.attachSession(contextB)]);
-  const directoryA = configuredDirectory(transport, contextA.sessionId);
-  const directoryB = configuredDirectory(transport, contextB.sessionId);
-  assert.notEqual(directoryA, directoryB);
+  assert.equal(behaviorCalls(transport).length, 1);
 
-  for (const [context, directory, contents] of [
-    [contextA, directoryA, 'alpha'],
-    [contextB, directoryB, 'beta'],
-  ]) {
-    transport.emit('Page.downloadWillBegin', {
-      guid: 'same-guid',
-      suggestedFilename: 'result.txt',
-      url: 'https://example.test/result',
-    }, context.sessionId);
-    await writeFile(join(directory, 'same-guid'), contents);
-    transport.emit('Page.downloadProgress', {
-      guid: 'same-guid',
-      state: 'completed',
-      receivedBytes: contents.length,
-      totalBytes: contents.length,
-    }, context.sessionId);
-  }
+  const sourceA = join(root, 'alpha.txt');
+  const sourceB = join(root, 'beta.txt');
+  await Promise.all([writeFile(sourceA, 'alpha'), writeFile(sourceB, 'beta')]);
+  begin(transport, contextA, 'guid-alpha', 'result.txt');
+  begin(transport, contextB, 'guid-beta', 'result.txt');
+  complete(transport, 'guid-alpha', sourceA, 5);
+  complete(transport, 'guid-beta', sourceB, 4);
 
   await waitFor(() => events.filter(event => event.payload.state === 'completed').length === 2);
-  const completed = events.filter(event => event.payload.state === 'completed');
   for (const [workspaceId, contents] of [
     [contextA.workspaceId, 'alpha'],
     [contextB.workspaceId, 'beta'],
   ]) {
-    const event = completed.find(candidate => candidate.workspaceId === workspaceId);
+    const event = events.find(candidate => (
+      candidate.workspaceId === workspaceId && candidate.payload.state === 'completed'
+    ));
     const stored = await artifacts.get(workspaceId, event.payload.artifact.id);
     assert.deepEqual(await readFile(stored.path), Buffer.from(contents));
   }
 });
 
-test('oversized downloads are cancelled by GUID and publish only bounded metadata', async t => {
-  const { transport, artifacts, controller, events } = await fixture(t, { maxDownloadBytes: 4 });
+test('different Chrome Profile contexts each enable default download events once', async t => {
+  const { transport, controller } = await fixture(t);
+  const profileA = { ...contextA, cdpBrowserContextId: 'browser-context-a' };
+  const profileB = { ...contextB, cdpBrowserContextId: 'browser-context-b' };
+  await Promise.all([
+    controller.attachSession(profileA),
+    controller.attachSession(profileB),
+  ]);
+  assert.deepEqual(behaviorCalls(transport).map(call => call.params).sort((a, b) => (
+    a.browserContextId.localeCompare(b.browserContextId)
+  )), [
+    { behavior: 'default', eventsEnabled: true, browserContextId: 'browser-context-a' },
+    { behavior: 'default', eventsEnabled: true, browserContextId: 'browser-context-b' },
+  ]);
+});
+
+test('browser-wide events without a controlled Page owner are ignored', async t => {
+  const { root, transport, artifacts, controller, events } = await fixture(t);
   await controller.attachSession(contextA);
-  transport.emit('Page.downloadWillBegin', {
-    guid: 'oversized-guid',
-    suggestedFilename: 'large.bin',
-    url: 'https://example.test/large',
-  }, contextA.sessionId);
-  transport.emit('Page.downloadProgress', {
+  const userFile = join(root, 'uncontrolled.txt');
+  await writeFile(userFile, 'user download');
+  complete(transport, 'uncontrolled-guid', userFile, 13);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(events.length, 0);
+  assert.equal(artifacts.size(), 0);
+  assert.deepEqual(await readFile(userFile), Buffer.from('user download'));
+});
+
+test('missing and invalid Browser completion paths return stable bounded failures', async t => {
+  const { transport, controller, events } = await fixture(t);
+  await controller.attachSession(contextA);
+
+  begin(transport, contextA, 'missing-path');
+  complete(transport, 'missing-path', undefined, 10);
+  begin(transport, contextA, 'relative-path');
+  complete(transport, 'relative-path', 'relative/download.txt', 10);
+
+  await waitFor(() => events.filter(event => event.payload.state === 'failed').length === 2);
+  assert.deepEqual(
+    events.filter(event => event.payload.state === 'failed').map(event => event.payload.reason),
+    ['download_file_path_unavailable', 'download_file_path_invalid'],
+  );
+});
+
+test('oversized downloads reject only Artifact copying and never cancel or delete the user download', async t => {
+  const { root, transport, artifacts, controller, events } = await fixture(t, { maxDownloadBytes: 4 });
+  await controller.attachSession(contextA);
+  const source = join(root, 'large.bin');
+  await writeFile(source, 'late bytes');
+  begin(transport, contextA, 'oversized-guid', 'large.bin');
+  transport.emit('Browser.downloadProgress', {
     guid: 'oversized-guid',
     state: 'inProgress',
     receivedBytes: 5,
     totalBytes: 100,
-  }, contextA.sessionId);
+  });
 
   const failed = events.find(event => event.payload.state === 'failed');
   assert.equal(failed.payload.reason, 'size_limit_exceeded');
   assert.equal(failed.payload.maxDownloadBytes, 4);
-  assert.deepEqual(failed.payload.hints[0], {
-    code: 'download',
-    source: 'download',
-    confidence: 'strong',
-    recommendedAction: 'inspect_download_failure',
-    state: 'failed',
-    reason: 'size_limit_exceeded',
-  });
-  assert.equal(transport.calls.some(call => (
-    call.method === 'Browser.cancelDownload' && call.params.guid === 'oversized-guid'
-  )), true);
+  assert.equal(transport.calls.some(call => call.method === 'Browser.cancelDownload'), false);
   assert.equal(JSON.stringify(failed).includes('oversized-guid'), false);
   assert.equal(artifacts.size(), 0);
 
-  const directory = configuredDirectory(transport, contextA.sessionId);
-  await writeFile(join(directory, 'oversized-guid'), 'late bytes');
-  transport.emit('Page.downloadProgress', {
-    guid: 'oversized-guid',
-    state: 'completed',
-    receivedBytes: 10,
-    totalBytes: 100,
-  }, contextA.sessionId);
-  await waitFor(async () => {
-    try { await stat(join(directory, 'oversized-guid')); return false; }
-    catch (error) { return error.code === 'ENOENT'; }
-  });
+  complete(transport, 'oversized-guid', source, 10);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(await readFile(source), Buffer.from('late bytes'));
+  assert.equal(events.filter(event => event.payload.state === 'failed').length, 1);
 });
 
-test('concurrent staging respects Workspace capacity before Artifact ingestion', async t => {
+test('tracking concurrency limits do not cancel the underlying Chrome download', async t => {
   const { transport, controller, events } = await fixture(t, {
-    artifactOptions: {
-      maxArtifactBytes: 10,
-      maxWorkspaceBytes: 12,
-      maxTotalBytes: 20,
-    },
+    controllerOptions: { maxActivePerSession: 1 },
   });
-  const secondContext = {
-    ...contextA,
-    targetId: 'target:alpha:second',
-    sessionId: 'session:alpha:second',
-  };
-  await Promise.all([
-    controller.attachSession(contextA),
-    controller.attachSession(secondContext),
-  ]);
-  for (const [context, guid] of [
-    [contextA, 'first-guid'],
-    [secondContext, 'second-guid'],
-  ]) {
-    transport.emit('Page.downloadWillBegin', { guid, suggestedFilename: `${guid}.bin` }, context.sessionId);
-    transport.emit('Page.downloadProgress', {
-      guid,
-      state: 'inProgress',
-      receivedBytes: 1,
-      totalBytes: 8,
-    }, context.sessionId);
-  }
+  await controller.attachSession(contextA);
+  begin(transport, contextA, 'first-guid');
+  begin(transport, contextA, 'second-guid');
 
-  const failed = events.find(event => event.payload.reason === 'staging_quota_exceeded');
-  assert.equal(failed.targetId, secondContext.targetId);
-  assert.equal(failed.payload.maxWorkspaceBytes, 12);
-  assert.equal(transport.calls.some(call => (
-    call.method === 'Browser.cancelDownload' && call.params.guid === 'second-guid'
-  )), true);
+  const failed = events.find(event => event.payload.reason === 'concurrency_limit_exceeded');
+  assert.equal(failed.targetId, contextA.targetId);
+  assert.equal(transport.calls.some(call => call.method === 'Browser.cancelDownload'), false);
 });
 
-test('unsupported session download API reports unavailable and never falls back browser-wide', async t => {
+test('a duplicate browser GUID across controlled sessions fails closed instead of crossing Workspaces', async t => {
+  const { transport, controller, events } = await fixture(t);
+  await Promise.all([controller.attachSession(contextA), controller.attachSession(contextB)]);
+  begin(transport, contextA, 'duplicate-guid');
+  begin(transport, contextB, 'duplicate-guid');
+
+  const failures = events.filter(event => event.payload.reason === 'download_identity_collision');
+  assert.equal(failures.length, 2);
+  assert.deepEqual(new Set(failures.map(event => event.workspaceId)), new Set([
+    contextA.workspaceId,
+    contextB.workspaceId,
+  ]));
+});
+
+test('unsupported browser download events are reported once per attached target without fallback redirects', async t => {
   const { transport, controller, events } = await fixture(t);
   transport.unavailable = true;
-  assert.equal(await controller.attachSession(contextA), false);
-  assert.equal(events[0].payload.state, 'capture_unavailable');
-  assert.equal(events[0].payload.reason, 'target_session_api_unavailable');
-  assert.equal(transport.calls.some(call => call.method === 'Browser.setDownloadBehavior'), false);
+  const results = await Promise.all([
+    controller.attachSession(contextA),
+    controller.attachSession(contextB),
+  ]);
+  assert.deepEqual(results, [false, false]);
+  assert.equal(behaviorCalls(transport).length, 1);
+  assert.equal(events.length, 2);
+  assert.equal(events.every(event => (
+    event.payload.state === 'capture_unavailable' &&
+    event.payload.reason === 'browser_download_events_unavailable'
+  )), true);
+  assert.equal(transport.calls.some(call => call.method === 'Page.setDownloadBehavior'), false);
 });
 
-test('session cleanup cancels partial downloads and removes staging bytes', async t => {
+test('session cleanup stops Artifact tracking but does not cancel an in-flight user download', async t => {
   const { transport, artifacts, controller, events } = await fixture(t);
   await controller.attachSession(contextA);
-  const directory = configuredDirectory(transport, contextA.sessionId);
-  transport.emit('Page.downloadWillBegin', {
-    guid: 'partial-guid',
-    suggestedFilename: 'partial.txt',
-  }, contextA.sessionId);
-  await writeFile(join(directory, 'partial-guid'), 'partial');
+  begin(transport, contextA, 'partial-guid', 'partial.txt');
   controller.detachSession(contextA.sessionId, 'lease_released');
 
-  await waitFor(async () => {
-    try { await stat(directory); return false; } catch (error) { return error.code === 'ENOENT'; }
-  });
   assert.equal(events.at(-1).payload.state, 'cancelled');
   assert.equal(events.at(-1).payload.reason, 'lease_released');
   assert.equal(events.at(-1).payload.hints[0].state, 'cancelled');
   assert.equal(artifacts.size(), 0);
+  assert.equal(transport.calls.some(call => call.method === 'Browser.cancelDownload'), false);
 });
 
-test('Lease release cancels a target-session attachment still being configured', async t => {
+test('Lease release invalidates a session attachment while shared event configuration is pending', async t => {
   const { transport, controller, events } = await fixture(t);
   let releaseConfiguration;
   transport.downloadGate = new Promise(resolve => { releaseConfiguration = resolve; });
   const attaching = controller.attachSession(contextA);
-  const directory = await waitFor(() => configuredDirectory(transport, contextA.sessionId));
+  await waitFor(() => behaviorCalls(transport).length === 1);
   controller.releaseLease(contextA.leaseId);
   releaseConfiguration();
 
   assert.equal(await attaching, false);
-  await assert.rejects(() => stat(directory), error => error.code === 'ENOENT');
   assert.equal(events.some(event => event.payload.state === 'capture_unavailable'), false);
+});
+
+test('a new browser connection generation configures download events again', async t => {
+  const { transport, controller } = await fixture(t);
+  await controller.attachSession(contextA);
+  controller.detachSession(contextA.sessionId, 'connection_lost');
+  await controller.attachSession({
+    ...contextA,
+    browserConnectionGeneration: 2,
+    sessionId: 'session:alpha:reconnected',
+  });
+  assert.equal(behaviorCalls(transport).length, 2);
 });

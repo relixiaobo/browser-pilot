@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
@@ -139,18 +139,37 @@ export async function startIsolatedChromeFixture(prefix = 'browser-pilot-test-')
   const testHome = join(root, 'home');
   const brokerHome = join(root, 'broker');
   const profile = chromeProfile(testHome);
+  const downloadDirectory = join(root, 'downloads');
+  await mkdir(join(profile, 'Default'), { recursive: true });
+  await mkdir(downloadDirectory, { recursive: true });
+  await writeFile(join(profile, 'Default', 'Preferences'), JSON.stringify({
+    download: {
+      default_directory: downloadDirectory,
+      directory_upgrade: true,
+      prompt_for_download: false,
+    },
+  }), { mode: 0o600 });
   const environment = {
     HOME: testHome,
     BROWSER_PILOT_HOME: brokerHome,
     BROWSER_PILOT_TEST_ROOT: root,
+    BROWSER_PILOT_TEST_DOWNLOAD_DIR: downloadDirectory,
     ...(process.platform === 'win32' ? {
       USERPROFILE: testHome,
       LOCALAPPDATA: join(testHome, 'AppData', 'Local'),
     } : {}),
   };
+  const executable = await chromeExecutable();
   let chrome;
-  try {
-    chrome = spawn(await chromeExecutable(), [
+  let stopped = false;
+
+  const startBrowser = async () => {
+    if (stopped) throw new Error('Cannot restart a stopped isolated Chrome fixture');
+    if (chrome && chrome.exitCode === null && chrome.signalCode === null) return;
+    await unlink(join(profile, 'DevToolsActivePort')).catch(error => {
+      if (error?.code !== 'ENOENT') throw error;
+    });
+    chrome = spawn(executable, [
       '--headless=new',
       '--remote-debugging-port=0',
       `--user-data-dir=${profile}`,
@@ -168,23 +187,34 @@ export async function startIsolatedChromeFixture(prefix = 'browser-pilot-test-')
       windowsHide: true,
     });
     await waitForDevToolsPort(profile, chrome);
+  };
+
+  const stopBrowser = async () => {
+    await terminateChild(chrome);
+    chrome = undefined;
+  };
+
+  try {
+    await startBrowser();
   } catch (error) {
     await terminateChild(chrome);
     await rm(root, { recursive: true, force: true });
     throw error;
   }
 
-  let stopped = false;
   return {
     root,
     brokerHome,
     profile,
+    downloadDirectory,
     environment,
+    startBrowser,
+    stopBrowser,
     async stop() {
       if (stopped) return;
       stopped = true;
       await terminateTestBroker(brokerHome);
-      await terminateChild(chrome);
+      await stopBrowser();
       await rm(root, { recursive: true, force: true });
     },
   };

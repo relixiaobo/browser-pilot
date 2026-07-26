@@ -114,9 +114,10 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     Workspace scoped; request identity includes CDP session identity, sensitive
     events are metadata-only, and legacy daemon handlers ignore Broker sessions.
     Lease replacement preserves Workspace configuration while Workspace release
-    clears it. Downloads use target-session CDP configuration, separate protected
-    staging directories, bounded concurrency/bytes, Workspace-owned Artifacts,
-    and Lease/session/Workspace cleanup without browser-wide fallback.
+    clears it. Downloads preserve each Profile's Chrome default directory;
+    Page events bind GUID ownership to controlled sessions, browser-level
+    completion paths are copied into bounded Workspace-owned Artifacts, and
+    cleanup deletes only the copy without cancelling or moving user downloads.
 - [x] **A2.6** Implement the default-unrestricted BrowserControlPolicy and
   optional launch-time Host operation removal.
   - Covers: FLOW-5, BR-21, BR-22, AC-4.
@@ -226,9 +227,10 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   keeping explicit CLI export behavior compatible.
   - Covers: AC-1, AC-6.
   - Complete: screenshot and PDF tools return scoped Artifacts; large captures
-    produce model-sized previews with optional originals. Session-scoped download
-    events ingest completed files as protected `download` Artifacts without
-    publishing staging paths or CDP GUIDs.
+    produce model-sized previews with optional originals. Session-scoped Page
+    events establish download ownership, and browser-level completion events
+    copy only those files into protected `download` Artifacts without publishing
+    Chrome source paths or CDP GUIDs.
 - [x] **A5.3** Add adapter-facing file authorization and revoke access on
   release or expiry.
   - Covers: CON-5, NFR-5.
