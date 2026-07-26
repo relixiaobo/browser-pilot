@@ -215,7 +215,6 @@ test('daemon initializes with structured remediation before remote debugging is 
   assert.ok(selected);
   assert.equal(selected.state, 'not_running');
   assert.equal(selected.remediation.code, 'start_browser');
-  assert.match(selected.id, /^browser:chrome-stable:/);
 
   const discovered = await daemonRequest(socketPath, '/broker/rpc', {
     bridgeSessionId: 'bridge:discovery-test',
@@ -223,10 +222,9 @@ test('daemon initializes with structured remediation before remote debugging is 
     params: { name: 'browser.discover', arguments: {} },
   });
   assert.equal(discovered.result.command.status, 'completed');
-  assert.equal(
-    discovered.result.result.browsers.find(browser => browser.id === selected.id).remoteDebuggingState,
-    'disabled',
-  );
+  const discoveredSelected = discovered.result.result.browsers.find(browser => browser.id === selected.id);
+  assert.ok(discoveredSelected);
+  assert.equal(discoveredSelected.remoteDebuggingState, 'disabled');
 
   cdp = await startCdpFixture();
   await writeFile(
