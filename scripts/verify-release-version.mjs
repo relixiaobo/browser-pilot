@@ -11,9 +11,11 @@ const pluginManifest = await readJson('../plugin/.claude-plugin/plugin.json');
 const marketplace = await readJson('../.claude-plugin/marketplace.json');
 const marketplacePlugin = marketplace.plugins.find(plugin => plugin.name === 'browser-pilot');
 const version = packageManifest.version;
+const repository = 'https://github.com/relixiaobo/browser-pilot';
 
 assert.equal(packageLock.version, version, 'package-lock.json version must match package.json');
 assert.equal(packageLock.packages?.['']?.version, version, 'root package-lock version must match package.json');
+assert.equal(packageManifest.repository, repository, 'package repository must match release provenance');
 assert.equal(pluginManifest.version, version, 'plugin manifest version must match package.json');
 assert.ok(marketplacePlugin, 'browser-pilot marketplace entry is required');
 assert.equal(marketplacePlugin.version, version, 'marketplace version must match package.json');
