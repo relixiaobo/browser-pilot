@@ -177,7 +177,7 @@ A project can pin Browser Pilot locally and run the same CLI without a global
 installation:
 
 ```bash
-npm install --save-exact browser-pilot-cli@0.2.1
+npm install --save-exact browser-pilot-cli@0.2.2
 npx --no-install browser-pilot tabs
 ```
 

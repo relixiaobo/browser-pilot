@@ -528,11 +528,20 @@ test('compatible Browser Pilot executable versions reuse one Broker while one-sh
   );
   assert.notEqual(alternate.messages[0].result.executableVersion, '9.9.9');
 
+  const refusedUse = await runCli(root, ['tabs'], {}, alternateCli);
+  assert.equal(refusedUse.code, 1, refusedUse.stderr);
+  assert.equal(JSON.parse(refusedUse.stdout).code, 'protocol_incompatible');
+  const healthAfterRefusedUse = await daemonRequest(socketPath, '/health');
+  assert.equal(healthAfterRefusedUse.clients.oneShotConnections, 0);
+
   const refused = await runCli(root, ['disconnect'], {}, alternateCli);
   assert.equal(refused.code, 1, refused.stderr);
   assert.equal(JSON.parse(refused.stdout).code, 'protocol_incompatible');
   const health = await daemonRequest(socketPath, '/health');
   assert.equal(health.brokerProcessIdentity, original.messages[0].result.brokerProcessIdentity);
+
+  const stopped = await runCli(root, ['disconnect']);
+  assert.equal(stopped.code, 0, stopped.stderr);
 });
 
 test('bp disconnect refuses to stop a Broker with a live embedded client', async t => {

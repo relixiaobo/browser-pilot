@@ -237,12 +237,42 @@ async function validateDaemon(client: DaemonClient): Promise<void> {
   }
 }
 
+async function validateCompatibilityDaemon(
+  client: DaemonClient,
+  executableVersion: string,
+): Promise<void> {
+  await validateDaemon(client);
+  const health = await client.healthInfo();
+  const requester = createExecutableMetadataSync(
+    executableVersion,
+    publicExecutablePath(import.meta.url),
+  );
+  if (
+    (health.executableVersion !== undefined &&
+      health.executableVersion !== requester.version) ||
+    (health.executableIdentity !== undefined &&
+      health.executableIdentity !== requester.identity)
+  ) {
+    throw new BrowserPilotError('protocol_incompatible', 'Running Browser Pilot daemon is from another executable installation', {
+      context: {
+        brokerExecutableVersion: health.executableVersion,
+        requesterExecutableVersion: requester.version,
+      },
+      remediation: {
+        code: 'use_matching_executable_or_isolate',
+        message: 'Use the matching Browser Pilot installation, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
+        actionRequired: true,
+      },
+    });
+  }
+}
+
 export async function connectCompatibility(
   executableVersion: string,
   browserFilter?: string,
 ): Promise<CompatibilityBrokerClient> {
   const daemon = await connectDaemon(browserFilter);
-  await validateDaemon(daemon);
+  await validateCompatibilityDaemon(daemon, executableVersion);
   return CompatibilityBrokerClient.create(daemon, executableVersion);
 }
 
@@ -252,7 +282,7 @@ export async function resumeCompatibility(
   if (!isDaemonRunning()) return null;
   const daemon = new DaemonClient();
   try {
-    await validateDaemon(daemon);
+    await validateCompatibilityDaemon(daemon, executableVersion);
     return await CompatibilityBrokerClient.create(daemon, executableVersion);
   } catch (error) {
     if (error instanceof BrowserPilotError && error.code === 'protocol_incompatible') throw error;
