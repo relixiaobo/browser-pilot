@@ -615,7 +615,9 @@ Artifacts. Raw CDP is never listed. `eval` requires `developer.eval`.
 - **BR-32:** Every ManagedTabSet is bound to at most one ProfileContext. Managed
   target creation verifies the returned context before public registration, and
   fallback-created targets enter janitor ownership before they become
-  addressable.
+  addressable. Fallback ownership requires the exact new URL marker plus either
+  the expected opener ID or exact readback of a per-command random window name;
+  Profile membership alone is never sufficient.
 - **BR-33:** Switching to an existing target may update the owning Workspace's
   selected ProfileContext, but never prevents inventory or control of targets
   in other Profiles. No Profile selection is a permission grant.

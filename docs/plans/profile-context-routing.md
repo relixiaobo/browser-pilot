@@ -138,11 +138,13 @@ managed-target janitor:
    varies by regular Profile context.
 3. If Chrome rejects or misroutes that call, attach to a bounded representative
    page target in the selected context, create an isolated world, and call
-   `window.open("about:blank", "_blank", <fixed popup window features>)` with a
-   debugger user gesture.
-4. Identify exactly one new target by the pre-dispatch target set, opener ID,
-   Profile context, page type, and blank URL. Ambiguous or mismatched targets are
-   closed and the operation fails.
+   `window.open(<unique blank marker>, <unique window name>, <fixed popup window
+   features>)` with a debugger user gesture.
+4. Identify exactly one new page target by the pre-dispatch target set, unique
+   URL marker, and Profile context. Prove ownership through either the expected
+   opener ID or exact readback of the per-command random `window.name`; Chrome
+   may normalize the reported opener across regular Profile tabs. Ambiguous or
+   unverified targets are closed and the operation fails.
 5. Explicitly adopt the verified target into the janitor before registering it
    publicly, so Broker crash cleanup still closes it.
 6. Read and retain its window ID, bind the ManagedTabSet, register the opaque
@@ -177,7 +179,7 @@ candidate targets were closed.
 - [x] P4: update stdio integration guidance, adapters, skill, and release docs.
 - [x] P5: add protocol, dual-Profile, concurrency, reconnect, cleanup, and
   compatibility tests.
-- [ ] P6: run real Chrome acceptance and publish `v0.3.0-rc.1`.
+- [ ] P6: run real Chrome acceptance and publish `v0.3.0-rc.2`.
 
 ## Acceptance
 

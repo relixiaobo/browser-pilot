@@ -39,6 +39,9 @@ class BrowserFixtureTransport {
   rejectDirectProfileContexts = new Set();
   misrouteDirectProfileContexts = new Set();
   fallbackBrowserContextId;
+  fallbackOpenerTargetId;
+  fallbackWindowNameOverride;
+  fallbackWindowNames = new Map();
   suppressFallbackTarget = false;
   screenshotDimensions;
   responseBodies = new Map();
@@ -134,6 +137,7 @@ class BrowserFixtureTransport {
         this.targets.delete(params.targetId);
         this.windows.delete(params.targetId);
         this.loaders.delete(params.targetId);
+        this.fallbackWindowNames.delete(params.targetId);
         return { success: true };
       case 'Page.enable': return {};
       case 'Runtime.enable': return {};
@@ -175,19 +179,23 @@ class BrowserFixtureTransport {
       case 'Runtime.evaluate': {
         if (String(params.expression).startsWith('window.open(')) {
           if (this.suppressFallbackTarget) return { result: { value: true } };
-          const match = String(params.expression).match(/^window\.open\(("(?:\\.|[^"])*")/);
+          const match = String(params.expression).match(
+            /^window\.open\(("(?:\\.|[^"])*"),\s*("(?:\\.|[^"])*")/,
+          );
           const openedUrl = match ? JSON.parse(match[1]) : 'about:blank';
+          const windowName = match ? JSON.parse(match[2]) : '';
           const id = `fallback-${this.nextTarget++}`;
           this.targets.set(id, {
             targetId: id,
             type: 'page',
             title: '',
             url: openedUrl,
-            openerId: targetId,
+            openerId: this.fallbackOpenerTargetId ?? targetId,
             ...(this.fallbackBrowserContextId ?? target?.browserContextId
               ? { browserContextId: this.fallbackBrowserContextId ?? target?.browserContextId }
               : {}),
           });
+          this.fallbackWindowNames.set(id, this.fallbackWindowNameOverride ?? windowName);
           this.windows.set(id, this.nextWindow++);
           this.loaders.set(id, `loader:${id}:1`);
           return { result: { value: true } };
@@ -217,6 +225,9 @@ class BrowserFixtureTransport {
         if (params.expression === '1') return { result: { value: 1 } };
         if (params.expression === 'document') return { result: { objectId: `document:${targetId}` } };
         if (params.expression === 'document.readyState') return { result: { value: 'complete' } };
+        if (params.expression === 'window.name') {
+          return { result: { value: this.fallbackWindowNames.get(targetId) } };
+        }
         if (params.expression === '6 * 7') return { result: { value: 42 } };
         if (params.expression === 'location.href') return { result: { value: target.url } };
         if (String(params.expression).startsWith('JSON.stringify((function(){var el=document.querySelector(')) {
@@ -756,6 +767,103 @@ test('Profile routing is passive, explicit, fallback-safe, and binds one Managed
   assert.equal(transport.targets.has('user-b'), true);
   assert.equal(
     [...transport.targets.values()].some(target => target.url.includes('task')),
+    false,
+  );
+});
+
+test('fallback accepts a unique window-name proof when Chrome reports a different opener', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.targets.get('user-form').browserContextId = 'context-a';
+  transport.targets.set('user-b', {
+    targetId: 'user-b',
+    type: 'page',
+    title: 'Profile B reference',
+    url: 'https://profile-b.test/reference',
+    browserContextId: 'context-b',
+  });
+  transport.windows.set('user-b', 20);
+  transport.loaders.set('user-b', 'loader:user-b:1');
+  transport.rejectDirectProfileContexts.add('context-b');
+  transport.fallbackOpenerTargetId = 'user-form';
+
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.2.0',
+    brokerProcessIdentity: 'broker:fallback-window-name',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:fallback-window-name',
+    'com.example.profile-agent',
+    'instance:fallback-window-name',
+    2,
+  );
+  const profiles = await tool(runtime, client, 'browser.profiles.list', {});
+  const profileB = profiles.profiles.find(profile => (
+    profile.representativeTabs.some(tab => tab.title === 'Profile B reference')
+  ));
+
+  const opened = await tool(runtime, client, 'browser.open', {
+    url: 'https://profile-b.test/task',
+    newTarget: true,
+    profileContextId: profileB.profileContextId,
+  });
+
+  assert.equal(opened.profileContextId, profileB.profileContextId);
+  assert.ok(transport.calls.some(call => (
+    call.method === 'Runtime.evaluate' && call.params.expression === 'window.name'
+  )));
+  assert.equal(
+    [...transport.targets.values()].some(target => target.url.startsWith('about:blank#browser-pilot-')),
+    false,
+  );
+});
+
+test('fallback closes a marked target when neither opener nor window name proves ownership', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.targets.get('user-form').browserContextId = 'context-a';
+  transport.targets.set('user-b', {
+    targetId: 'user-b',
+    type: 'page',
+    title: 'Profile B reference',
+    url: 'https://profile-b.test/reference',
+    browserContextId: 'context-b',
+  });
+  transport.windows.set('user-b', 20);
+  transport.loaders.set('user-b', 'loader:user-b:1');
+  transport.rejectDirectProfileContexts.add('context-b');
+  transport.fallbackOpenerTargetId = 'user-form';
+  transport.fallbackWindowNameOverride = 'unverified-window';
+
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.2.0',
+    brokerProcessIdentity: 'broker:fallback-unverified-owner',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:fallback-unverified-owner',
+    'com.example.profile-agent',
+    'instance:fallback-unverified-owner',
+    2,
+  );
+  const profiles = await tool(runtime, client, 'browser.profiles.list', {});
+  const profileB = profiles.profiles.find(profile => (
+    profile.representativeTabs.some(tab => tab.title === 'Profile B reference')
+  ));
+
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.open', {
+      url: 'https://profile-b.test/task',
+      newTarget: true,
+      profileContextId: profileB.profileContextId,
+    }),
+    error => error.code === 'profile_context_unavailable',
+  );
+  assert.equal(
+    [...transport.targets.values()].some(target => target.url.startsWith('about:blank#browser-pilot-')),
     false,
   );
 });

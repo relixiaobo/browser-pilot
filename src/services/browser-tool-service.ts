@@ -1844,7 +1844,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     } catch {
       // Target inventory below is authoritative for whether cleanup completed.
     }
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
         const current = await this.transport.send('Target.getTargets');
         if (
@@ -1854,7 +1854,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       } catch {
         // Retry the bounded verification before declaring the outcome unknown.
       }
-      if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt < 19) await new Promise(resolve => setTimeout(resolve, 50));
     }
     return false;
   }
@@ -1977,7 +1977,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         });
       }
 
-      for (let attempt = 0; attempt < 40; attempt += 1) {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
         const current = await this.transport.send('Target.getTargets');
         const markerTargets = Array.isArray(current?.targetInfos)
           ? current.targetInfos.filter((target: any) => (
@@ -1985,7 +1985,6 @@ export class BrowserToolService implements BrowserToolExecutor {
             typeof target.targetId === 'string' &&
             !existing.has(target.targetId) &&
             target.type === 'page' &&
-            target.openerId === representative.cdpTargetId &&
             target.url === marker
           ))
           : [];
@@ -2005,6 +2004,24 @@ export class BrowserToolService implements BrowserToolExecutor {
             throw new BrowserPilotError(
               'profile_context_unavailable',
               'Chrome created the managed window in a different Profile context',
+              {
+                retryable: true,
+                context: { profileContextId: profile.id },
+                remediation: {
+                  code: 'relist_profile_contexts',
+                  message: 'List Profile contexts again and retry with a current Profile context.',
+                  actionRequired: true,
+                },
+              },
+            );
+          }
+          if (
+            candidate.openerId !== representative.cdpTargetId &&
+            !(await this.targetWindowNameMatches(candidate.targetId, windowName))
+          ) {
+            throw new BrowserPilotError(
+              'profile_context_unavailable',
+              'Chrome could not prove ownership of the managed Profile window',
               {
                 retryable: true,
                 context: { profileContextId: profile.id },
@@ -2036,6 +2053,38 @@ export class BrowserToolService implements BrowserToolExecutor {
       const cleanup = await Promise.all(unadopted.map(targetId => this.closeTargetAndVerify(targetId)));
       await this.transport.send('Target.detachFromTarget', { sessionId }).catch(() => {});
       if (cleanup.some(closed => !closed)) throw this.managedTargetUnknownOutcome(profile);
+    }
+  }
+
+  private async targetWindowNameMatches(targetId: string, expected: string): Promise<boolean> {
+    let sessionId: string | undefined;
+    try {
+      const attached = await this.transport.send('Target.attachToTarget', {
+        targetId,
+        flatten: true,
+      });
+      if (typeof attached?.sessionId !== 'string') return false;
+      sessionId = attached.sessionId;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        try {
+          const result = await this.transport.send('Runtime.evaluate', {
+            expression: 'window.name',
+            returnByValue: true,
+          }, sessionId);
+          if (result?.result?.value === expected) return true;
+          if (result?.result?.value !== undefined) return false;
+        } catch {
+          // The target may not have an execution context on its first event.
+        }
+        if (attempt < 9) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      if (sessionId) {
+        await this.transport.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      }
     }
   }
 
