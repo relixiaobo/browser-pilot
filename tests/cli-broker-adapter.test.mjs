@@ -32,6 +32,7 @@ function observation(overrides = {}) {
     workspaceId: 'workspace:cli',
     leaseId: 'lease:cli',
     targetId: 'target:managed',
+    profileContextId: 'profile-context:work',
     url: 'https://example.test/form',
     observationId: 'observation:current',
     title: 'Example Form',
@@ -47,17 +48,76 @@ async function startFakeDaemon(root) {
   const stateDirectory = join(root, '.browser-pilot');
   const socketPath = join(stateDirectory, 'daemon.sock');
   const calls = [];
+  let selectedProfileContextId;
   await mkdir(stateDirectory, { recursive: true });
   await writeFile(join(stateDirectory, 'daemon.pid'), String(process.pid));
 
   const toolResult = async (name, args) => {
     switch (name) {
+      case 'browser.connect':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          browserInstanceId: 'browser-instance:fake',
+          connectionGeneration: 1,
+          state: 'connected',
+        };
+      case 'browser.profiles.list': {
+        const profiles = [
+          {
+            profileContextId: 'profile-context:work',
+            label: 'Profile 1',
+            displayName: 'Work',
+            tabCount: 2,
+            eligibleTabCount: 2,
+            selected: selectedProfileContextId === 'profile-context:work',
+            representativeTabs: [{
+              targetId: 'target:managed',
+              title: 'Example Form',
+              url: 'https://example.test/form',
+            }],
+          },
+          {
+            profileContextId: 'profile-context:personal',
+            label: 'Profile 2',
+            displayName: 'Personal',
+            tabCount: 1,
+            eligibleTabCount: 1,
+            selected: selectedProfileContextId === 'profile-context:personal',
+            representativeTabs: [{
+              targetId: 'target:personal',
+              title: 'Personal Inbox',
+              url: 'https://mail.example.test/',
+            }],
+          },
+        ];
+        return { workspaceId: 'workspace:cli', leaseId: 'lease:cli', profiles };
+      }
+      case 'browser.profiles.select': {
+        selectedProfileContextId = args.profileContextId;
+        const selected = selectedProfileContextId === 'profile-context:personal'
+          ? { label: 'Profile 2', displayName: 'Personal' }
+          : { label: 'Profile 1', displayName: 'Work' };
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          profileContextId: selectedProfileContextId,
+          ...selected,
+        };
+      }
+      case 'browser.open':
+        return observation({
+          profileContextId: args.profileContextId ?? selectedProfileContextId ?? 'profile-context:work',
+          url: args.url,
+          observationId: 'observation:after-open',
+        });
       case 'browser.tabs.list':
         return {
           workspaceId: 'workspace:cli',
           leaseId: 'lease:cli',
           targets: [{
             targetId: 'target:managed',
+            profileContextId: 'profile-context:work',
             title: 'Example Form',
             url: 'https://example.test/form',
             active: true,
@@ -172,7 +232,7 @@ async function startFakeDaemon(root) {
         return {
           serviceVersion: PACKAGE_VERSION,
           executableVersion: PACKAGE_VERSION,
-          protocol: { major: 1, minor: 1 },
+          protocol: { major: 1, minor: 2 },
           supportedCapabilities: [],
           capabilities: { granted: [], unsupported: [] },
           brokerProcessIdentity: 'broker:fake',
@@ -282,6 +342,40 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
   const snapshot = await runCli(root, ['snapshot', '--limit', '9']);
   assert.equal(snapshot.ok, true);
   assert.equal(snapshot.elements[0].name, 'Submit');
+
+  const connected = await runCli(root, ['connect']);
+  assert.equal(connected.profileSelectionRequired, true);
+  assert.equal(connected.profiles.length, 2);
+  assert.equal(
+    calls.some(call => call.body?.params?.name === 'browser.open'),
+    false,
+    'multi-Profile connect must not create a managed target before selection',
+  );
+
+  const profiles = await runCli(root, ['profiles']);
+  assert.deepEqual(profiles.profiles.map(profile => [profile.index, profile.displayName]), [
+    [0, 'Work'],
+    [1, 'Personal'],
+  ]);
+
+  const selectedProfile = await runCli(root, ['profile', 'Personal']);
+  assert.equal(selectedProfile.profileContextId, 'profile-context:personal');
+  const selectedCall = calls.find(call => call.body?.params?.name === 'browser.profiles.select');
+  assert.deepEqual(selectedCall.body.params.arguments, {
+    profileContextId: 'profile-context:personal',
+  });
+
+  const opened = await runCli(root, [
+    'open', 'https://work.example.test/task', '--new', '--profile', '0', '--limit', '12',
+  ]);
+  assert.equal(opened.profileContextId, 'profile-context:work');
+  const openCall = calls.find(call => call.body?.params?.name === 'browser.open');
+  assert.deepEqual(openCall.body.params.arguments, {
+    url: 'https://work.example.test/task',
+    newTarget: true,
+    profileContextId: 'profile-context:work',
+    observationLimit: 12,
+  });
 
   const clicked = await runCli(root, ['click', '1', '--limit', '7']);
   assert.equal(clicked.ok, true);

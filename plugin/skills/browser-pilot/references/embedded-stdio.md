@@ -31,7 +31,11 @@ For complete envelopes and schemas, use the installed package's
 7. List tabs before adopting current browser context. Inventory contains
    managed tabs and eligible user tabs; one physical target is controlled by at
    most one Lease.
-8. On shutdown, release the Lease and Workspace, then send `shutdown`. EOF also
+8. On protocol 1.2, list Profiles before unanchored new work. Existing tabs
+   across all Profiles need no selection. With multiple Profiles and no intended
+   target context, ask the user and pass the returned opaque Profile ID to
+   selection or `browser.open`; never reconnect per Profile.
+9. On shutdown, release the Lease and Workspace, then send `shutdown`. EOF also
    releases Connection-owned Leases, but explicit cleanup is preferable.
 
 Maintain Workspace, Lease, target, frame, Observation, Command, Artifact, and
@@ -105,6 +109,9 @@ the structured hint and current browser state.
 | `action_not_verified` | Inspect fresh tab/frame/Observation state. Retry only after correcting the stated condition. |
 | `unknown_outcome` | Query `commands/get`, inspect current browser state, and never automatically replay the mutation. |
 | `browser_disconnected` | Pause browser work, explicitly call `browser.connect` when reconnection is appropriate, then relist tabs and re-observe after `connection.restored`. Old target/frame/ref IDs are invalid. |
+| `profile_selection_required` | List current Profiles and ask the user when intent is ambiguous; do not choose the first Profile or reconnect. |
+| `profile_context_stale` | Relist Profiles after reconnect or inventory change and use only a current opaque ID. |
+| `profile_context_unavailable` | Follow structured remediation, such as opening a neutral tab in that Profile, then relist before retrying. |
 | `target_busy` | Another Lease controls the physical target. Choose another tab or wait for `target_control.released`; do not steal control. |
 | `target_not_owned` | Rebuild inventory in the owning Workspace; do not substitute a raw target ID. |
 | `lease_expired` | Create a new Lease, reacquire target control, and rebuild transient state. |
@@ -184,5 +191,7 @@ field names, and do not remove taint when transforming content.
   remove operations at launch or apply its own task approval UX.
 - Do not persist refs, browser target mappings, cookies, credentials, network
   bodies, or Command state across Broker restart.
+- Treat Profile selection as transient new-target routing, never as permission
+  to list or control existing eligible tabs.
 - Releasing a Workspace may clean up managed tabs but must leave user tabs
   open. Closing a user tab is always an explicit targeted action.

@@ -7,6 +7,7 @@ import {
   type ArtifactDescriptor,
   type Capability,
   type JsonValue,
+  type ProtocolVersion,
   type Sensitivity,
 } from './model.js';
 import {
@@ -322,6 +323,7 @@ function resultSchema(
   }
   if (context === 'target') {
     contextProperties.targetId = opaqueIdSchema;
+    contextProperties.profileContextId = opaqueIdSchema;
     contextProperties.url = boundedUrl;
     contextRequired.push('targetId', 'url');
   }
@@ -397,6 +399,25 @@ const dropdownChoiceSchema: JsonSchema = {
   ],
 };
 
+const profileRepresentativeTabSchema = objectSchema({
+  targetId: opaqueIdSchema,
+  title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
+  url: boundedUrl,
+}, ['targetId', 'title', 'url']);
+
+const profileContextSchema = objectSchema({
+  profileContextId: opaqueIdSchema,
+  label: stringSchema({ minLength: 1, maxLength: 128 }),
+  displayName: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+  tabCount: integerSchema({ minimum: 0 }),
+  eligibleTabCount: integerSchema({ minimum: 0 }),
+  selected: booleanSchema(),
+  representativeTabs: arraySchema(profileRepresentativeTabSchema, { maxItems: 3 }),
+}, [
+  'profileContextId', 'label', 'tabCount', 'eligibleTabCount', 'selected',
+  'representativeTabs',
+]);
+
 function tool(definition: ToolDefinition): ToolDefinition {
   return definition;
 }
@@ -454,6 +475,40 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     artifactKinds: [],
   }),
   tool({
+    name: 'browser.profiles.list',
+    title: 'List browser Profiles',
+    description: 'Passively list live Profile contexts and bounded representative tabs.',
+    context: 'workspace',
+    inputSchema: emptyInput,
+    outputSchema: resultSchema('workspace', {
+      profiles: arraySchema(profileContextSchema, { maxItems: 128 }),
+    }, ['profiles']),
+    requiredCapabilities: ['browser.control'],
+    mutating: false,
+    idempotency: 'read_only',
+    cancellation: 'not_applicable',
+    sensitivity: { input: [], output: ['browser_data'] },
+    artifactKinds: [],
+  }),
+  tool({
+    name: 'browser.profiles.select',
+    title: 'Select browser Profile',
+    description: 'Select one current Profile context for new managed targets in this Workspace.',
+    context: 'workspace',
+    inputSchema: objectSchema({ profileContextId: opaqueIdSchema }, ['profileContextId']),
+    outputSchema: resultSchema('workspace', {
+      profileContextId: opaqueIdSchema,
+      label: stringSchema({ minLength: 1, maxLength: 128 }),
+      displayName: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+    }, ['profileContextId', 'label']),
+    requiredCapabilities: ['browser.control'],
+    mutating: true,
+    idempotency: 'idempotent',
+    cancellation: 'before_dispatch',
+    sensitivity: { input: [], output: ['browser_data'] },
+    artifactKinds: [],
+  }),
+  tool({
     name: 'browser.open',
     title: 'Open URL',
     description: 'Navigate an authorized controlled target or create a new target in the ManagedTabSet.',
@@ -462,6 +517,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       url: boundedUrl,
       targetId: opaqueIdSchema,
       newTarget: booleanSchema(),
+      profileContextId: opaqueIdSchema,
       observationLimit: integerSchema({ minimum: 1, maximum: OBSERVATION_V1_LIMITS.maxElements }),
     }, ['url']),
     outputSchema: observationOutput,
@@ -857,6 +913,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     outputSchema: resultSchema('workspace', {
       targets: arraySchema(objectSchema({
         targetId: opaqueIdSchema,
+        profileContextId: opaqueIdSchema,
         title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
         url: boundedUrl,
         active: booleanSchema(),
@@ -1204,6 +1261,17 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 ];
 
 const toolsByName = new Map(TOOL_DEFINITIONS.map(definition => [definition.name, definition]));
+const PROTOCOL_1_2_TOOLS = new Set([
+  'browser.profiles.list',
+  'browser.profiles.select',
+]);
+
+export function isToolAvailableInProtocol(
+  name: string,
+  protocol: ProtocolVersion,
+): boolean {
+  return protocol.major === 1 && (protocol.minor >= 2 || !PROTOCOL_1_2_TOOLS.has(name));
+}
 
 function schemaSensitivities(schema: JsonSchema, result = new Set<Sensitivity>()): Set<Sensitivity> {
   for (const value of schema['x-browser-pilot-sensitivity'] ?? []) result.add(value);
@@ -1287,12 +1355,14 @@ export function validateToolResult(name: string, value: unknown): JsonValue {
 export function getToolManifest(
   capabilities?: readonly Capability[],
   availableTools?: readonly string[],
+  protocol?: ProtocolVersion,
 ): ToolManifest {
   const granted = capabilities ? new Set<string>(capabilities) : null;
   const available = availableTools ? new Set(availableTools) : null;
   const tools = TOOL_DEFINITIONS.filter(definition => (
     (!granted || definition.requiredCapabilities.every(capability => granted.has(capability))) &&
-    (!available || available.has(definition.name))
+    (!available || available.has(definition.name)) &&
+    (!protocol || isToolAvailableInProtocol(definition.name, protocol))
   ));
   return { schemaVersion: 1, tools };
 }

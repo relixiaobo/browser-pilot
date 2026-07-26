@@ -34,6 +34,12 @@ class BrowserFixtureTransport {
   sessions = new Map();
   nextTarget = 1;
   nextSession = 1;
+  nextWindow = 100;
+  windows = new Map([['user-form', 10]]);
+  rejectDirectProfileContexts = new Set();
+  misrouteDirectProfileContexts = new Set();
+  fallbackBrowserContextId;
+  suppressFallbackTarget = false;
   screenshotDimensions;
   responseBodies = new Map();
   childFrames = [];
@@ -85,12 +91,36 @@ class BrowserFixtureTransport {
       case 'Target.getTargets':
         return { targetInfos: [...this.targets.values()].map(value => ({ ...value })) };
       case 'Target.createTarget': {
+        if (
+          typeof params.browserContextId === 'string' &&
+          this.rejectDirectProfileContexts.has(params.browserContextId)
+        ) {
+          throw new Error('Failed to find browser context');
+        }
         const id = `managed-${this.nextTarget++}`;
-        this.targets.set(id, { targetId: id, type: 'page', title: '', url: params.url });
+        const windowId = Number.isSafeInteger(params.windowId) ? params.windowId : this.nextWindow++;
+        const windowPeer = [...this.windows].find(([, candidate]) => candidate === windowId)?.[0];
+        const browserContextId = typeof params.browserContextId === 'string'
+          ? this.misrouteDirectProfileContexts.has(params.browserContextId)
+            ? `misrouted:${params.browserContextId}`
+            : params.browserContextId
+          : windowPeer ? this.targets.get(windowPeer)?.browserContextId : undefined;
+        this.targets.set(id, {
+          targetId: id,
+          type: 'page',
+          title: '',
+          url: params.url,
+          ...(browserContextId ? { browserContextId } : {}),
+        });
+        this.windows.set(id, windowId);
         this.loaders.set(id, `loader:${id}:1`);
         return { targetId: id };
       }
-      case 'Browser.getWindowForTarget': return { windowId: 42, bounds: {} };
+      case 'Target.getTargetInfo': return { targetInfo: { ...this.targets.get(params.targetId) } };
+      case 'Browser.getWindowForTarget': return {
+        windowId: this.windows.get(params.targetId) ?? 42,
+        bounds: {},
+      };
       case 'Target.activateTarget': return {};
       case 'Target.attachToTarget': {
         const id = `session-${this.nextSession++}`;
@@ -102,6 +132,7 @@ class BrowserFixtureTransport {
         return {};
       case 'Target.closeTarget':
         this.targets.delete(params.targetId);
+        this.windows.delete(params.targetId);
         this.loaders.delete(params.targetId);
         return { success: true };
       case 'Page.enable': return {};
@@ -142,6 +173,25 @@ class BrowserFixtureTransport {
           },
         };
       case 'Runtime.evaluate': {
+        if (String(params.expression).startsWith('window.open(')) {
+          if (this.suppressFallbackTarget) return { result: { value: true } };
+          const match = String(params.expression).match(/^window\.open\(("(?:\\.|[^"])*")/);
+          const openedUrl = match ? JSON.parse(match[1]) : 'about:blank';
+          const id = `fallback-${this.nextTarget++}`;
+          this.targets.set(id, {
+            targetId: id,
+            type: 'page',
+            title: '',
+            url: openedUrl,
+            openerId: targetId,
+            ...(this.fallbackBrowserContextId ?? target?.browserContextId
+              ? { browserContextId: this.fallbackBrowserContextId ?? target?.browserContextId }
+              : {}),
+          });
+          this.windows.set(id, this.nextWindow++);
+          this.loaders.set(id, `loader:${id}:1`);
+          return { result: { value: true } };
+        }
         if (String(params.expression).includes('createImageBitmap')) {
           return {
             result: {
@@ -484,7 +534,7 @@ const binding = {
   },
 };
 
-function initialize(runtime, bridge, clientId, instanceId) {
+function initialize(runtime, bridge, clientId, instanceId, protocolMinor = 0) {
   return runtime.call(bridge, 'initialize', {
     client: {
       id: clientId,
@@ -492,7 +542,7 @@ function initialize(runtime, bridge, clientId, instanceId) {
       version: '1.0.0',
       instanceId,
     },
-    protocol: { min: { major: 1, minor: 0 }, max: { major: 1, minor: 0 } },
+    protocol: { min: { major: 1, minor: protocolMinor }, max: { major: 1, minor: protocolMinor } },
     requestedCapabilities: [
       'browser.discovery',
       'browser.control',
@@ -511,8 +561,8 @@ function initialize(runtime, bridge, clientId, instanceId) {
   });
 }
 
-async function createClient(runtime, bridge, clientId, instanceId) {
-  await initialize(runtime, bridge, clientId, instanceId);
+async function createClient(runtime, bridge, clientId, instanceId, protocolMinor = 0) {
+  await initialize(runtime, bridge, clientId, instanceId, protocolMinor);
   const { workspace, managedTabSet, eventCursor } = await runtime.call(bridge, 'workspaces/create', {});
   const { lease } = await runtime.call(bridge, 'leases/create', { workspaceId: workspace.id });
   return { bridge, workspace, managedTabSet, lease, eventCursor };
@@ -539,7 +589,7 @@ test('production tools/list exposes only fully wired Browser tools', async () =>
     browsers: [binding],
     toolExecutor: browserTools,
   });
-  await initialize(runtime, 'bridge:list', 'com.example.agent', 'instance:list');
+  await initialize(runtime, 'bridge:list', 'com.example.agent', 'instance:list', 2);
 
   const manifest = await runtime.call('bridge:list', 'tools/list', {});
   const names = manifest.tools.map(definition => definition.name);
@@ -588,6 +638,281 @@ test('tools/call lists user tabs, creates a managed target, and preserves user t
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(transport.targets.has('user-form'), true);
   assert.equal([...transport.targets.keys()].some(id => id.startsWith('managed-')), false);
+});
+
+test('Profile routing is passive, explicit, fallback-safe, and binds one ManagedTabSet per context', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.targets.get('user-form').browserContextId = 'context-a';
+  transport.targets.set('user-b', {
+    targetId: 'user-b',
+    type: 'page',
+    title: 'Profile B reference',
+    url: 'https://profile-b.test/reference',
+    browserContextId: 'context-b',
+  });
+  transport.windows.set('user-b', 20);
+  transport.loaders.set('user-b', 'loader:user-b:1');
+  transport.rejectDirectProfileContexts.add('context-b');
+
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.2.0',
+    brokerProcessIdentity: 'broker:profiles',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:profiles',
+    'com.example.profile-agent',
+    'instance:profiles',
+    2,
+  );
+
+  const profiles = await tool(runtime, client, 'browser.profiles.list', {});
+  assert.equal(profiles.profiles.length, 2);
+  assert.equal(
+    transport.calls.some(call => [
+      'Target.createTarget',
+      'Target.attachToTarget',
+      'Target.activateTarget',
+    ].includes(call.method)),
+    false,
+    'Profile listing must not attach, activate, or create targets',
+  );
+  const profileA = profiles.profiles.find(profile => (
+    profile.representativeTabs.some(tab => tab.title === 'User Form')
+  ));
+  const profileB = profiles.profiles.find(profile => (
+    profile.representativeTabs.some(tab => tab.title === 'Profile B reference')
+  ));
+  assert.ok(profileA);
+  assert.ok(profileB);
+
+  const createCallsBeforeAmbiguity = transport.calls.filter(call => call.method === 'Target.createTarget').length;
+  await assert.rejects(
+    () => runtime.call(client.bridge, 'tools/call', {
+      name: 'browser.open',
+      arguments: { url: 'https://ambiguous.test/', newTarget: true },
+      workspaceId: client.workspace.id,
+      leaseId: client.lease.id,
+    }),
+    error => error.code === 'profile_selection_required' && error.context?.profiles?.length === 2,
+  );
+  assert.equal(
+    transport.calls.filter(call => call.method === 'Target.createTarget').length,
+    createCallsBeforeAmbiguity,
+    'ambiguous Profile selection must fail before browser dispatch',
+  );
+
+  await tool(runtime, client, 'browser.profiles.select', {
+    profileContextId: profileB.profileContextId,
+  });
+  const openedB = await tool(runtime, client, 'browser.open', {
+    url: 'https://profile-b.test/task',
+    newTarget: true,
+  });
+  assert.equal(openedB.profileContextId, profileB.profileContextId);
+  const rawB = [...transport.targets.values()].find(target => target.url === 'https://profile-b.test/task');
+  assert.equal(rawB.browserContextId, 'context-b');
+  assert.equal(
+    transport.calls.some(call => (
+      call.method === 'Runtime.evaluate' && String(call.params.expression).startsWith('window.open(')
+    )),
+    true,
+    'a regular Profile direct-create failure must use the isolated-window fallback',
+  );
+
+  await tool(runtime, client, 'browser.profiles.select', {
+    profileContextId: profileA.profileContextId,
+  });
+  const openedFromSelection = await tool(runtime, client, 'browser.open', {
+    url: 'https://profile-a.test/selected-task',
+    newTarget: true,
+  });
+  assert.equal(openedFromSelection.profileContextId, profileA.profileContextId);
+
+  const listed = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
+  const userA = listed.targets.find(target => target.title === 'User Form');
+  await tool(runtime, client, 'browser.tabs.switch', { targetId: userA.targetId });
+  const openedA = await tool(runtime, client, 'browser.open', {
+    url: 'https://profile-a.test/task',
+    newTarget: true,
+  });
+  assert.equal(openedA.profileContextId, profileA.profileContextId);
+  const rawA = [...transport.targets.values()].find(target => target.url === 'https://profile-a.test/task');
+  assert.equal(rawA.browserContextId, 'context-a');
+
+  const workspace = await runtime.call(client.bridge, 'workspaces/get', {
+    workspaceId: client.workspace.id,
+  });
+  assert.deepEqual(
+    new Set(workspace.managedTabSets.map(tabSet => tabSet.profileContextId)),
+    new Set([profileA.profileContextId, profileB.profileContextId]),
+  );
+  assert.equal(workspace.workspace.selectedProfileContextId, profileA.profileContextId);
+
+  await runtime.call(client.bridge, 'workspaces/release', { workspaceId: client.workspace.id });
+  assert.equal(transport.targets.has('user-form'), true);
+  assert.equal(transport.targets.has('user-b'), true);
+  assert.equal(
+    [...transport.targets.values()].some(target => target.url.includes('task')),
+    false,
+  );
+});
+
+test('misrouted direct Profile creation is closed before isolated-window fallback', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.targets.get('user-form').browserContextId = 'context-a';
+  transport.targets.set('user-b', {
+    targetId: 'user-b',
+    type: 'page',
+    title: 'Profile B reference',
+    url: 'https://profile-b.test/reference',
+    browserContextId: 'context-b',
+  });
+  transport.windows.set('user-b', 20);
+  transport.loaders.set('user-b', 'loader:user-b:1');
+  transport.misrouteDirectProfileContexts.add('context-b');
+
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.2.0',
+    brokerProcessIdentity: 'broker:profile-misroute',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:profile-misroute',
+    'com.example.profile-agent',
+    'instance:profile-misroute',
+    2,
+  );
+  const profiles = await tool(runtime, client, 'browser.profiles.list', {});
+  const profileB = profiles.profiles.find(profile => (
+    profile.representativeTabs.some(tab => tab.title === 'Profile B reference')
+  ));
+
+  const opened = await tool(runtime, client, 'browser.open', {
+    url: 'https://profile-b.test/task',
+    newTarget: true,
+    profileContextId: profileB.profileContextId,
+  });
+  assert.equal(opened.profileContextId, profileB.profileContextId);
+  assert.equal(
+    [...transport.targets.values()].some(target => target.browserContextId === 'misrouted:context-b'),
+    false,
+  );
+  assert.ok(transport.calls.some(call => (
+    call.method === 'Target.closeTarget' && String(call.params.targetId).startsWith('managed-')
+  )));
+  assert.equal(
+    [...transport.targets.values()].find(target => target.url === 'https://profile-b.test/task')?.browserContextId,
+    'context-b',
+  );
+});
+
+test('misrouted isolated-window fallback is closed and never registered', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.targets.get('user-form').browserContextId = 'context-a';
+  transport.targets.set('user-b', {
+    targetId: 'user-b',
+    type: 'page',
+    title: 'Profile B reference',
+    url: 'https://profile-b.test/reference',
+    browserContextId: 'context-b',
+  });
+  transport.windows.set('user-b', 20);
+  transport.loaders.set('user-b', 'loader:user-b:1');
+  transport.rejectDirectProfileContexts.add('context-b');
+  transport.fallbackBrowserContextId = 'context-a';
+
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.2.0',
+    brokerProcessIdentity: 'broker:fallback-misroute',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:fallback-misroute',
+    'com.example.profile-agent',
+    'instance:fallback-misroute',
+    2,
+  );
+  const profiles = await tool(runtime, client, 'browser.profiles.list', {});
+  const profileB = profiles.profiles.find(profile => (
+    profile.representativeTabs.some(tab => tab.title === 'Profile B reference')
+  ));
+
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.open', {
+      url: 'https://profile-b.test/task',
+      newTarget: true,
+      profileContextId: profileB.profileContextId,
+    }),
+    error => error.code === 'profile_context_unavailable',
+  );
+  assert.equal(
+    [...transport.targets.values()].some(target => target.url.startsWith('about:blank#browser-pilot-')),
+    false,
+  );
+  const listed = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
+  assert.deepEqual(listed.targets.map(target => target.title).sort(), [
+    'Profile B reference',
+    'User Form',
+  ]);
+});
+
+test('unobservable isolated-window creation returns unknown_outcome without automatic retry', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.targets.get('user-form').browserContextId = 'context-a';
+  transport.targets.set('user-b', {
+    targetId: 'user-b',
+    type: 'page',
+    title: 'Profile B reference',
+    url: 'https://profile-b.test/reference',
+    browserContextId: 'context-b',
+  });
+  transport.windows.set('user-b', 20);
+  transport.loaders.set('user-b', 'loader:user-b:1');
+  transport.rejectDirectProfileContexts.add('context-b');
+  transport.suppressFallbackTarget = true;
+
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.2.0',
+    brokerProcessIdentity: 'broker:fallback-unknown',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:fallback-unknown',
+    'com.example.profile-agent',
+    'instance:fallback-unknown',
+    2,
+  );
+  const profiles = await tool(runtime, client, 'browser.profiles.list', {});
+  const profileB = profiles.profiles.find(profile => (
+    profile.representativeTabs.some(tab => tab.title === 'Profile B reference')
+  ));
+
+  await assert.rejects(
+    () => tool(runtime, client, 'browser.open', {
+      url: 'https://profile-b.test/task',
+      newTarget: true,
+      profileContextId: profileB.profileContextId,
+    }),
+    error => (
+      error.code === 'unknown_outcome' &&
+      error.remediation?.code === 'inspect_profile_tabs'
+    ),
+  );
+  assert.equal(
+    transport.calls.filter(call => (
+      call.method === 'Runtime.evaluate' && String(call.params.expression).startsWith('window.open(')
+    )).length,
+    1,
+  );
 });
 
 test('Observations return deterministic browser guidance and authentication transitions', async () => {

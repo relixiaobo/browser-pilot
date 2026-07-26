@@ -203,6 +203,63 @@ test('Broker negotiates protocol 1.1 transport limits per Connection', async () 
   );
 });
 
+test('Broker hides and rejects protocol 1.2 Profile routing on protocol 1.1', async () => {
+  let executions = 0;
+  const runtime = createRuntime({
+    toolExecutor: {
+      supportedTools: [
+        'browser.open',
+        'browser.profiles.list',
+        'browser.profiles.select',
+      ],
+      async call() {
+        executions += 1;
+        throw new Error('protocol guard failed');
+      },
+    },
+  });
+  await initialize(runtime, 'bridge:profile-protocol-11', {
+    client: { instanceId: 'instance:profile-protocol-11' },
+    protocol: {
+      min: { major: 1, minor: 1 },
+      max: { major: 1, minor: 1 },
+    },
+  });
+  const manifest = await runtime.call('bridge:profile-protocol-11', 'tools/list', {});
+  assert.equal(manifest.tools.some(tool => tool.name === 'browser.profiles.list'), false);
+  assert.equal(manifest.tools.some(tool => tool.name === 'browser.profiles.select'), false);
+  assert.equal(manifest.tools.some(tool => tool.name === 'browser.open'), true);
+
+  const { workspace } = await runtime.call('bridge:profile-protocol-11', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:profile-protocol-11', 'leases/create', {
+    workspaceId: workspace.id,
+  });
+  const call = (name, args) => runtime.call('bridge:profile-protocol-11', 'tools/call', {
+    name,
+    arguments: args,
+    workspaceId: workspace.id,
+    leaseId: lease.id,
+  });
+
+  await assert.rejects(
+    () => call('browser.profiles.list', {}),
+    error => error.code === 'protocol_incompatible' && error.context?.tool === 'browser.profiles.list',
+  );
+  await assert.rejects(
+    () => call('browser.profiles.select', { profileContextId: 'profile-context:current' }),
+    error => error.code === 'protocol_incompatible' && error.context?.tool === 'browser.profiles.select',
+  );
+  await assert.rejects(
+    () => call('browser.open', {
+      url: 'https://example.com/task',
+      newTarget: true,
+      profileContextId: 'profile-context:current',
+    }),
+    error => error.code === 'protocol_incompatible' && error.context?.tool === 'browser.open',
+  );
+  assert.equal(executions, 0);
+});
+
 test('One-shot initialize reuses only the same Connection identity and contract', async () => {
   const runtime = createRuntime();
   const first = await initializeOneShot(runtime, 'bridge:cli');

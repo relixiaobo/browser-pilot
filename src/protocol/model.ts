@@ -7,6 +7,7 @@ export type OpaqueId<T extends string> = string & { readonly [opaqueId]: T };
 export type ClientPrincipalId = OpaqueId<'ClientPrincipalId'>;
 export type ClientConnectionId = OpaqueId<'ClientConnectionId'>;
 export type BrowserInstanceId = OpaqueId<'BrowserInstanceId'>;
+export type ProfileContextId = OpaqueId<'ProfileContextId'>;
 export type BrowserWorkspaceId = OpaqueId<'BrowserWorkspaceId'>;
 export type ManagedTabSetId = OpaqueId<'ManagedTabSetId'>;
 export type ControlLeaseId = OpaqueId<'ControlLeaseId'>;
@@ -33,6 +34,7 @@ export interface ProtocolRange {
 export const SUPPORTED_PROTOCOL_VERSIONS = [
   { major: 1, minor: 0 },
   { major: 1, minor: 1 },
+  { major: 1, minor: 2 },
 ] as const satisfies readonly ProtocolVersion[];
 
 export const CAPABILITIES = [
@@ -277,10 +279,21 @@ export interface BrowserInstance {
   state: 'connected' | 'disconnected' | 'reconnecting';
 }
 
+export interface ProfileContext {
+  id: ProfileContextId;
+  browserInstanceId: BrowserInstanceId;
+  browserConnectionGeneration: number;
+  label: string;
+  displayName?: string;
+  tabCount: number;
+  eligibleTabCount: number;
+}
+
 export interface BrowserWorkspace {
   id: BrowserWorkspaceId;
   principalId: ClientPrincipalId;
   browserInstanceId: BrowserInstanceId;
+  selectedProfileContextId?: ProfileContextId;
   clientKey?: string;
   createdAt: number;
   updatedAt: number;
@@ -291,6 +304,7 @@ export interface ManagedTabSet {
   id: ManagedTabSetId;
   workspaceId: BrowserWorkspaceId;
   browserInstanceId: BrowserInstanceId;
+  profileContextId?: ProfileContextId;
   windowId?: number;
   createdAt: number;
   state: 'active' | 'closing' | 'closed';
@@ -331,6 +345,7 @@ export interface ControlledTarget {
   id: ControlledTargetId;
   workspaceId: BrowserWorkspaceId;
   browserInstanceId: BrowserInstanceId;
+  profileContextId: ProfileContextId;
   cdpTargetId: string;
   openerCdpTargetId?: string;
   origin: ControlledTargetOrigin;

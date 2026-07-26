@@ -5,6 +5,10 @@ import type {
   BrowserTargetCatalog,
   EligibleUserTarget,
 } from './browser-control-policy.js';
+import {
+  MemoryProfileContextRegistry,
+  type ProfileTargetSnapshot,
+} from './profile-context-registry.js';
 
 export interface BrowserIdentitySnapshot {
   profileIdentity: string;
@@ -13,12 +17,17 @@ export interface BrowserIdentitySnapshot {
 
 export type BrowserIdentityProvider = () => BrowserIdentitySnapshot | undefined;
 
-export interface BrowserTargetCandidate extends EligibleUserTarget {
+export interface BrowserTargetCandidate {
+  cdpTargetId: string;
+  title: string;
+  url: string;
+  openerCdpTargetId?: string;
   type: string;
 }
 
 export interface CdpBrowserTargetCatalogOptions {
   isExcludedTarget: (target: BrowserTargetCandidate) => boolean;
+  profileContexts?: MemoryProfileContextRegistry;
 }
 
 export function isEligibleUserPage(target: BrowserTargetCandidate): boolean {
@@ -39,25 +48,31 @@ export function isEligibleUserPage(target: BrowserTargetCandidate): boolean {
 }
 
 export class CdpBrowserTargetCatalog implements BrowserTargetCatalog {
+  private readonly profileContexts: MemoryProfileContextRegistry;
+
   constructor(
     private readonly transport: Transport,
     private readonly browserInstanceId: BrowserInstanceId,
     private readonly identity: BrowserIdentityProvider,
     private readonly options: CdpBrowserTargetCatalogOptions,
-  ) {}
+  ) {
+    this.profileContexts = options.profileContexts ?? new MemoryProfileContextRegistry(browserInstanceId);
+  }
 
   async getBrowserIdentity(browserInstanceId: BrowserInstanceId): Promise<BrowserIdentitySnapshot | undefined> {
     return browserInstanceId === this.browserInstanceId ? this.identity() : undefined;
   }
 
   async listEligibleUserTargets(browserInstanceId: BrowserInstanceId): Promise<EligibleUserTarget[]> {
-    if (browserInstanceId !== this.browserInstanceId || !this.identity()) return [];
+    const identity = this.identity();
+    if (browserInstanceId !== this.browserInstanceId || !identity) return [];
     const result = await this.transport.send('Target.getTargets');
     if (!Array.isArray(result?.targetInfos)) {
       throw new BrowserPilotError('internal_error', 'Chrome returned invalid target metadata');
     }
 
-    const eligible: EligibleUserTarget[] = [];
+    const candidates: BrowserTargetCandidate[] = [];
+    const snapshots: ProfileTargetSnapshot[] = [];
     for (const value of result.targetInfos) {
       if (!value || typeof value !== 'object' || typeof value.targetId !== 'string') continue;
       const candidate: BrowserTargetCandidate = {
@@ -67,9 +82,27 @@ export class CdpBrowserTargetCatalog implements BrowserTargetCatalog {
         type: typeof value.type === 'string' ? value.type : '',
         ...(typeof value.openerId === 'string' ? { openerCdpTargetId: value.openerId } : {}),
       };
-      if (!isEligibleUserPage(candidate) || this.options.isExcludedTarget(candidate)) continue;
+      const eligible = isEligibleUserPage(candidate) && !this.options.isExcludedTarget(candidate);
+      snapshots.push({
+        ...candidate,
+        eligible,
+        ...(typeof value.browserContextId === 'string'
+          ? { cdpBrowserContextId: value.browserContextId }
+          : {}),
+      });
+      if (eligible) candidates.push(candidate);
+    }
+    this.profileContexts.reconcile(identity.connectionGeneration, snapshots);
+
+    const eligible: EligibleUserTarget[] = [];
+    for (const candidate of candidates) {
+      const profile = this.profileContexts.forTarget(
+        candidate.cdpTargetId,
+        identity.connectionGeneration,
+      );
+      if (!profile) continue;
       const { type: _type, ...target } = candidate;
-      eligible.push(target);
+      eligible.push({ ...target, profileContextId: profile.id });
     }
     return eligible;
   }

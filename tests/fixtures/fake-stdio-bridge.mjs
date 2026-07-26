@@ -9,6 +9,7 @@ const ids = {
   workspaceId: 'workspace:fake',
   leaseId: 'lease:fake',
   targetId: 'target:fake',
+  profileContextId: 'profile-context:fake',
   observationId: 'observation:fake',
   artifactId: 'artifact:fake',
 };
@@ -34,6 +35,7 @@ const observation = () => ({
   workspaceId: ids.workspaceId,
   leaseId: ids.leaseId,
   targetId: ids.targetId,
+  profileContextId: ids.profileContextId,
   url: 'about:blank',
   observationId: ids.observationId,
   title: '',
@@ -99,7 +101,12 @@ function toolOutcome(name, result) {
       deadlineAt: now() + 30_000,
       dispatchedAt: now(),
       completedAt: now(),
-      mutating: ['browser.connect', 'browser.open', 'browser.tabs.close'].includes(name),
+      mutating: [
+        'browser.connect',
+        'browser.open',
+        'browser.profiles.select',
+        'browser.tabs.close',
+      ].includes(name),
     },
     result,
   };
@@ -116,7 +123,7 @@ async function handle(message) {
     response(id, {
       serviceVersion: '1.0.0-fixture',
       executableVersion: '1.0.0-fixture',
-      protocol: { major: 1, minor: 1 },
+      protocol: { major: 1, minor: 2 },
       supportedCapabilities: params.requestedCapabilities,
       capabilities: { granted: params.requestedCapabilities, denied: [], unsupported: [] },
       brokerProcessIdentity: 'broker:fake',
@@ -134,7 +141,16 @@ async function handle(message) {
   if (method === 'tools/list') {
     response(id, {
       schemaVersion: 1,
-      tools: ['browser.connect', 'browser.open', 'browser.observe', 'browser.capture', 'browser.tabs.list', 'browser.tabs.close'].map(name => ({
+      tools: [
+        'browser.connect',
+        'browser.profiles.list',
+        'browser.profiles.select',
+        'browser.open',
+        'browser.observe',
+        'browser.capture',
+        'browser.tabs.list',
+        'browser.tabs.close',
+      ].map(name => ({
         name,
         title: name,
         description: name,
@@ -142,7 +158,7 @@ async function handle(message) {
         inputSchema: { type: 'object' },
         outputSchema: { type: 'object' },
         requiredCapabilities: [],
-        mutating: name.includes('connect') || name.includes('open') || name.includes('close'),
+        mutating: name.includes('connect') || name.includes('select') || name.includes('open') || name.includes('close'),
         idempotency: 'idempotent',
         cancellation: 'before_dispatch',
         sensitivity: { input: [], output: [] },
@@ -208,6 +224,34 @@ async function handle(message) {
       }));
       return;
     }
+    if (params.name === 'browser.profiles.list') {
+      response(id, toolOutcome(params.name, {
+        workspaceId: ids.workspaceId,
+        leaseId: ids.leaseId,
+        profiles: [{
+          profileContextId: ids.profileContextId,
+          label: 'Profile 1',
+          tabCount: 1,
+          eligibleTabCount: 1,
+          selected: true,
+          representativeTabs: [{
+            targetId: ids.targetId,
+            title: '',
+            url: 'about:blank',
+          }],
+        }],
+      }));
+      return;
+    }
+    if (params.name === 'browser.profiles.select') {
+      response(id, toolOutcome(params.name, {
+        workspaceId: ids.workspaceId,
+        leaseId: ids.leaseId,
+        profileContextId: ids.profileContextId,
+        label: 'Profile 1',
+      }));
+      return;
+    }
     if (params.name === 'browser.open' || params.name === 'browser.observe') {
       if (params.name === 'browser.open') notification();
       response(id, toolOutcome(params.name, observation()));
@@ -219,6 +263,7 @@ async function handle(message) {
         leaseId: ids.leaseId,
         targets: [{
           targetId: ids.targetId,
+          profileContextId: ids.profileContextId,
           title: '',
           url: 'about:blank',
           active: true,

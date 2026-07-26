@@ -28,6 +28,9 @@ a Chrome WebSocket and never display the Allow dialog.
 Use `bp connect --browser <id|product|channel>` for an explicit choice. Product
 embedders can pass the same selector to `browser-pilot bridge --stdio
 --browser <selector>`; otherwise selection follows a stable platform order.
+One connection covers every live Chrome Profile on that endpoint. When several
+Profiles are open, `bp connect` lists them without creating a Pilot window; use
+`bp profiles` and `bp profile <index>`, or pass `--profile` to `bp open --new`.
 
 ### 2. Install the plugin for your agent
 
@@ -66,6 +69,7 @@ The agent will use `bp` commands automatically. Your real login sessions are pre
 
 - **No extension required** — Uses Chrome 144's native remote debugging toggle, not the Extension Debugger API
 - **Real login sessions** — Operates your actual browser profile. Cookies, extensions, logins all intact
+- **Multi-Profile routing** — Lists user tabs across live Chrome Profiles and creates managed work only in a resolved Profile
 - **CLI-native** — Any agent with bash access can use it. No MCP protocol, no SDK integration needed
 - **Auto-snapshot** — Every action returns page state with numbered `[ref]` elements, so the agent always knows what's on screen
 - **Adaptive page views** — Bounded read, text search, DOM metadata, page geometry, and annotated screenshots let an agent choose the smallest useful representation
@@ -139,8 +143,9 @@ launching the bridge. Bulk cleanup remains limited to managed tabs, and user
 tabs remain open when a session ends.
 
 The `browser-pilot bridge --stdio` transport, Broker lifecycle, browser tool
-dispatch, event replay, protected Artifacts, and protocol 1.1 transport limit
-negotiation are implemented. Browser disconnect and explicit reconnect handling, scoped
+dispatch, event replay, protected Artifacts, protocol 1.1 transport limit
+negotiation, and protocol 1.2 Chrome Profile routing are implemented. Browser
+disconnect and explicit reconnect handling, scoped
 download Artifacts, Workspace resource isolation, and typed watchdog events for
 stalled navigation, selected-frame detach, pending dialogs, and repeated
 browser-observable no-progress actions are also implemented. Bounded page
@@ -177,7 +182,7 @@ A project can pin Browser Pilot locally and run the same CLI without a global
 installation:
 
 ```bash
-npm install --save-exact browser-pilot-cli@0.2.2
+npm install --save-exact browser-pilot-cli@0.3.0-rc.1
 npx --no-install browser-pilot tabs
 ```
 
@@ -205,6 +210,7 @@ an incompatible isolated Broker.
 | Command | Returns | Description |
 |---------|---------|-------------|
 | `bp open <url>` | snapshot | Navigate to URL |
+| `bp open <url> --new --profile <selector>` | snapshot | Create managed work in one live Chrome Profile |
 | `bp snapshot` | snapshot | Get interactive elements |
 | `bp read [selector]` | text | Get bounded readable page/region content |
 | `bp search <text>` | matches | Find bounded visible text and nearby context |
@@ -243,8 +249,9 @@ dialogs are scoped to the compatibility Workspace and isolated from embedded
 Broker clients.
 
 Run `bp tabs` to list Pilot-managed tabs, their popups, and eligible tabs the
-user opened elsewhere in the same browser. `bp tab <n>` switches control to any
-listed tab.
+user opened elsewhere across all live Profiles in the same browser endpoint.
+Each JSON entry includes its opaque `profileContextId`; `bp tab <n>` switches
+control to any listed tab.
 
 ### Network
 
@@ -263,8 +270,10 @@ listed tab.
 
 | Command | Description |
 |---------|-------------|
-| `bp connect` | Connect to Chrome, create pilot window |
+| `bp connect` | Connect to Chrome; create a Pilot window immediately only when Profile routing is unambiguous |
 | `bp disconnect` | Close the CLI Pilot window; stop the daemon when no embedded client is live |
+| `bp profiles` | List live Chrome Profile contexts and representative tabs |
+| `bp profile <index\|id\|label\|name>` | Select a Profile for subsequent managed tabs |
 | `bp tabs` | List all controllable tabs in the current browser |
 | `bp tab <n>` | Switch to any listed managed or user tab |
 | `bp close` | Close the current tab (`--all` closes Pilot-managed tabs only) |

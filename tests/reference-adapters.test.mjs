@@ -48,13 +48,20 @@ test('Tenon adapter maps Thread/Turn lifecycle, target context, and native image
   assert.equal(sameTurn, turn);
   const tools = tenon.createTools(turn);
   const open = tools.find(tool => tool.name === 'browser_pilot_browser_open');
+  const profiles = tools.find(tool => tool.name === 'browser_pilot_browser_profiles_list');
   const observe = tools.find(tool => tool.name === 'browser_pilot_browser_observe');
   const capture = tools.find(tool => tool.name === 'browser_pilot_browser_capture');
-  assert.ok(open && observe && capture);
+  assert.ok(open && profiles && observe && capture);
+  assert.deepEqual(adapter.initializeResult.protocol, { major: 1, minor: 2 });
   assert.equal(observe.parameters.required.includes('controlTargetId'), true);
 
   const opened = await open.execute('call-open', { url: 'about:blank', newTarget: true });
   assert.equal(opened.details.browserPilot.result.targetId, 'target:fake');
+  const listedProfiles = await profiles.execute('call-profiles', {});
+  assert.equal(
+    listedProfiles.details.browserPilot.result.profiles[0].profileContextId,
+    'profile-context:fake',
+  );
   await observe.execute('call-observe', { controlTargetId: 'target:fake', limit: 10 });
   const captured = await capture.execute('call-capture', { controlTargetId: 'target:fake' });
   assert.equal(captured.content.some(item => item.type === 'image' && item.mimeType === 'image/png'), true);

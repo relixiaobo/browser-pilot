@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CdpBrowserTargetCatalog } from '../dist/services.js';
+import {
+  CdpBrowserTargetCatalog,
+  MemoryProfileContextRegistry,
+} from '../dist/services.js';
 
 class CatalogTransport {
   constructor(targetInfos) {
@@ -31,7 +34,12 @@ test('CDP browser target catalog returns eligible user pages and preserves opene
     transport,
     'browser:main',
     () => ({ profileIdentity: 'profile:default', connectionGeneration: 3 }),
-    { isExcludedTarget: target => target.cdpTargetId === 'managed' || target.cdpTargetId === 'chooser' },
+    {
+      isExcludedTarget: target => target.cdpTargetId === 'managed' || target.cdpTargetId === 'chooser',
+      profileContexts: new MemoryProfileContextRegistry('browser:main', {
+        idFactory: () => 'profile-context:test',
+      }),
+    },
   );
 
   assert.deepEqual(await catalog.getBrowserIdentity('browser:main'), {
@@ -39,14 +47,25 @@ test('CDP browser target catalog returns eligible user pages and preserves opene
     connectionGeneration: 3,
   });
   assert.deepEqual(await catalog.listEligibleUserTargets('browser:main'), [
-    { cdpTargetId: 'user', title: 'User form', url: 'https://example.test/form' },
+    {
+      cdpTargetId: 'user',
+      profileContextId: 'profile-context:test',
+      title: 'User form',
+      url: 'https://example.test/form',
+    },
     {
       cdpTargetId: 'popup',
+      profileContextId: 'profile-context:test',
       title: 'Popup',
       url: 'https://example.test/popup',
       openerCdpTargetId: 'user',
     },
-    { cdpTargetId: 'blank', title: '', url: 'about:blank' },
+    {
+      cdpTargetId: 'blank',
+      profileContextId: 'profile-context:test',
+      title: '',
+      url: 'about:blank',
+    },
   ]);
   assert.deepEqual(await catalog.listEligibleUserTargets('browser:other'), []);
   assert.deepEqual(transport.calls, ['Target.getTargets']);

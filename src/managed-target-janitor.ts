@@ -74,13 +74,20 @@ async function createTarget(params: Record<string, unknown>): Promise<{ targetId
   if (params.url !== 'about:blank') throw new Error('Managed targets must start at about:blank');
   const newWindow = params.newWindow === true;
   const windowId = params.windowId;
+  const browserContextId = params.browserContextId;
   if (newWindow === (windowId !== undefined)) throw new Error('Exactly one managed target window selector is required');
   if (windowId !== undefined && (!Number.isSafeInteger(windowId) || Number(windowId) < 0)) {
     throw new Error('Invalid managed target window ID');
   }
+  if (browserContextId !== undefined && (
+    typeof browserContextId !== 'string' || browserContextId.length === 0 || browserContextId.length > 1024
+  )) {
+    throw new Error('Invalid managed target browser context ID');
+  }
   const created = await cdp.send('Target.createTarget', {
     url: 'about:blank',
     ...(newWindow ? { newWindow: true } : { windowId }),
+    ...(browserContextId ? { browserContextId } : {}),
   });
   if (typeof created?.targetId !== 'string' || created.targetId.length === 0) {
     throw new Error('Chrome returned an invalid managed target ID');

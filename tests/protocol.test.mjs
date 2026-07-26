@@ -144,6 +144,64 @@ test('canonical tool manifest is internally consistent and capability-filtered',
   assert.equal(TOOL_DEFINITIONS.some(tool => tool.name.startsWith('browser.access.')), false);
 });
 
+test('protocol 1.2 exposes Profile routing while older manifests remain compatible', () => {
+  const capabilities = ['browser.control', 'observation.read'];
+  const protocol11 = getToolManifest(capabilities, undefined, { major: 1, minor: 1 });
+  const protocol12 = getToolManifest(capabilities, undefined, { major: 1, minor: 2 });
+  const names11 = protocol11.tools.map(tool => tool.name);
+  const names12 = protocol12.tools.map(tool => tool.name);
+
+  assert.equal(names11.includes('browser.profiles.list'), false);
+  assert.equal(names11.includes('browser.profiles.select'), false);
+  assert.equal(names11.includes('browser.open'), true);
+  assert.equal(names12.includes('browser.profiles.list'), true);
+  assert.equal(names12.includes('browser.profiles.select'), true);
+
+  assert.deepEqual(validateToolArguments('browser.profiles.select', {
+    profileContextId: 'profile-context:current',
+  }), {
+    profileContextId: 'profile-context:current',
+  });
+  assert.deepEqual(validateToolArguments('browser.open', {
+    url: 'https://example.com/task',
+    newTarget: true,
+    profileContextId: 'profile-context:current',
+  }), {
+    url: 'https://example.com/task',
+    newTarget: true,
+    profileContextId: 'profile-context:current',
+  });
+
+  const profilesResult = {
+    workspaceId: 'workspace:123',
+    leaseId: 'lease:123',
+    profiles: [{
+      profileContextId: 'profile-context:current',
+      label: 'Profile 1',
+      displayName: 'Work',
+      tabCount: 2,
+      eligibleTabCount: 1,
+      selected: true,
+      representativeTabs: [{
+        targetId: 'target:representative',
+        title: 'Form',
+        url: 'https://example.com/form',
+      }],
+    }],
+  };
+  assert.deepEqual(
+    validateToolResult('browser.profiles.list', profilesResult),
+    profilesResult,
+  );
+  assert.throws(
+    () => validateToolResult('browser.profiles.list', {
+      ...profilesResult,
+      profiles: [{ ...profilesResult.profiles[0], profileContextId: undefined }],
+    }),
+    error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+  );
+});
+
 test('canonical schemas propagate field-level sensitivity without changing values', () => {
   const tool = name => TOOL_DEFINITIONS.find(definition => definition.name === name);
   const sensitivity = schema => schema['x-browser-pilot-sensitivity'];

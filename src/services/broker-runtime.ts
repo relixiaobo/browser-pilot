@@ -29,12 +29,14 @@ import {
   type ManagedTabSet,
   type ManagedTabSetId,
   type ProtocolLimits,
+  type ProfileContextId,
   type ToolCallParams,
   type ControlledTargetId,
 } from '../protocol/model.js';
 import {
   getToolDefinition,
   getToolManifest,
+  isToolAvailableInProtocol,
   validateToolArguments,
   validateToolResult,
   type ToolDefinition,
@@ -163,6 +165,8 @@ export interface BrokerToolCallContext {
   browser: BrokerBrowserBinding;
   signal: AbortSignal;
   markDispatched(): void;
+  selectProfileContext?(profileContextId: ProfileContextId): void;
+  managedTabSetForProfile?(profileContextId: ProfileContextId): ManagedTabSet;
 }
 
 export interface BrowserToolExecutor {
@@ -188,7 +192,7 @@ export interface BrowserToolExecutor {
   releaseWorkspace?(
     principal: ClientPrincipal,
     workspace: BrowserWorkspace,
-    managedTabSet: ManagedTabSet,
+    managedTabSets: readonly ManagedTabSet[],
   ): void;
 }
 
@@ -212,6 +216,7 @@ interface NotificationWaiter {
 interface RuntimeWorkspace {
   value: BrowserWorkspace;
   managedTabSet: ManagedTabSet;
+  additionalManagedTabSets: Map<ProfileContextId, ManagedTabSet>;
 }
 
 function asJson(value: unknown): JsonValue {
@@ -224,6 +229,10 @@ function cloneWorkspace(value: BrowserWorkspace): BrowserWorkspace {
 
 function cloneManagedTabSet(value: ManagedTabSet): ManagedTabSet {
   return { ...value };
+}
+
+function runtimeManagedTabSets(record: RuntimeWorkspace): ManagedTabSet[] {
+  return [record.managedTabSet, ...record.additionalManagedTabSets.values()];
 }
 
 function cloneLease(value: ControlLease): ControlLease {
@@ -354,6 +363,7 @@ export class MemoryBrokerRuntime {
         return asJson(getToolManifest(
           connection.grantedCapabilities,
           this.options.toolExecutor?.supportedTools,
+          connection.value.protocol,
         ));
       case 'tools/call':
         return this.callTool(connection, params);
@@ -771,6 +781,7 @@ export class MemoryBrokerRuntime {
       return asJson({
         workspace: cloneWorkspace(existing.value),
         managedTabSet: cloneManagedTabSet(existing.managedTabSet),
+        managedTabSets: runtimeManagedTabSets(existing).map(cloneManagedTabSet),
         eventCursor: this.events.currentCursor(existing.value.id),
       });
     }
@@ -823,11 +834,16 @@ export class MemoryBrokerRuntime {
       createdAt: now,
       state: 'active',
     };
-    this.workspaces.set(workspaceId, { value: workspace, managedTabSet });
+    this.workspaces.set(workspaceId, {
+      value: workspace,
+      managedTabSet,
+      additionalManagedTabSets: new Map(),
+    });
     const eventCursor = this.events.createWorkspace(workspaceId);
     return asJson({
       workspace: cloneWorkspace(workspace),
       managedTabSet: cloneManagedTabSet(managedTabSet),
+      managedTabSets: [cloneManagedTabSet(managedTabSet)],
       eventCursor,
     });
   }
@@ -839,6 +855,7 @@ export class MemoryBrokerRuntime {
     return asJson({
       workspace: cloneWorkspace(record.value),
       managedTabSet: cloneManagedTabSet(record.managedTabSet),
+      managedTabSets: runtimeManagedTabSets(record).map(cloneManagedTabSet),
       eventCursor: this.events.currentCursor(record.value.id),
     });
   }
@@ -975,6 +992,54 @@ export class MemoryBrokerRuntime {
     return record;
   }
 
+  private selectWorkspaceProfileContext(
+    record: RuntimeWorkspace,
+    profileContextId: ProfileContextId,
+  ): void {
+    if (record.value.state !== 'active') {
+      throw new BrowserPilotError('workspace_not_found', 'Workspace is not active', {
+        context: { workspaceId: record.value.id },
+      });
+    }
+    record.value.selectedProfileContextId = profileContextId;
+    record.value.updatedAt = this.now();
+  }
+
+  private managedTabSetForProfile(
+    record: RuntimeWorkspace,
+    profileContextId: ProfileContextId,
+  ): ManagedTabSet {
+    if (record.value.state !== 'active') {
+      throw new BrowserPilotError('workspace_not_found', 'Workspace is not active', {
+        context: { workspaceId: record.value.id },
+      });
+    }
+    if (record.managedTabSet.profileContextId === profileContextId) {
+      return cloneManagedTabSet(record.managedTabSet);
+    }
+    if (!record.managedTabSet.profileContextId) {
+      record.managedTabSet.profileContextId = profileContextId;
+      return cloneManagedTabSet(record.managedTabSet);
+    }
+    const existing = record.additionalManagedTabSets.get(profileContextId);
+    if (existing) return cloneManagedTabSet(existing);
+    if (record.additionalManagedTabSets.size >= 127) {
+      throw new BrowserPilotError('result_too_large', 'ManagedTabSet Profile context limit reached', {
+        context: { workspaceId: record.value.id, maxManagedTabSets: 128 },
+      });
+    }
+    const managedTabSet: ManagedTabSet = {
+      id: this.nextManagedTabSetId(),
+      workspaceId: record.value.id,
+      browserInstanceId: record.value.browserInstanceId,
+      profileContextId,
+      createdAt: this.now(),
+      state: 'active',
+    };
+    record.additionalManagedTabSets.set(profileContextId, managedTabSet);
+    return cloneManagedTabSet(managedTabSet);
+  }
+
   private requireLease(
     connection: RuntimeConnection,
     leaseId: ControlLeaseId,
@@ -1019,7 +1084,8 @@ export class MemoryBrokerRuntime {
         this.releaseLeaseRecord(lease, 'released');
       }
     }
-    record.managedTabSet.state = 'closed';
+    const managedTabSets = runtimeManagedTabSets(record);
+    for (const managedTabSet of managedTabSets) managedTabSet.state = 'closed';
     record.value.updatedAt = this.now();
     record.value.state = 'released';
     const principal = this.principals.get(record.value.principalId);
@@ -1027,7 +1093,7 @@ export class MemoryBrokerRuntime {
       this.options.toolExecutor?.releaseWorkspace?.(
         { ...principal, capabilities: [...principal.capabilities] },
         cloneWorkspace(record.value),
-        cloneManagedTabSet(record.managedTabSet),
+        managedTabSets.map(cloneManagedTabSet),
       );
     }
     this.options.onWorkspaceReleased?.(
@@ -1052,7 +1118,9 @@ export class MemoryBrokerRuntime {
     for (const record of released) {
       this.workspaces.delete(record.value.id);
       this.events.releaseWorkspace(record.value.id);
-      this.managedTabSetIds.delete(record.managedTabSet.id);
+      for (const managedTabSet of runtimeManagedTabSets(record)) {
+        this.managedTabSetIds.delete(managedTabSet.id);
+      }
       for (const [leaseId, lease] of this.leases) {
         if (lease.workspaceId === record.value.id) this.leases.delete(leaseId);
       }
@@ -1102,6 +1170,12 @@ export class MemoryBrokerRuntime {
   private async callTool(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
     const params = validateToolCallParams(value);
     const definition = getToolDefinition(params.name);
+    if (!isToolAvailableInProtocol(definition.name, connection.value.protocol)) {
+      throw protocolIncompatible(`${definition.name} requires protocol 1.2 or newer`, {
+        tool: definition.name,
+        selectedProtocol: `${connection.value.protocol.major}.${connection.value.protocol.minor}`,
+      });
+    }
     const isBrowserConnectTool = definition.name === 'browser.connect';
     const executor = this.options.toolExecutor;
     if (!executor || !executor.supportedTools.includes(definition.name)) {
@@ -1109,6 +1183,19 @@ export class MemoryBrokerRuntime {
     }
     this.assertCapabilities(connection, definition.requiredCapabilities);
     const args = validateToolArguments(definition.name, params.arguments);
+    if (
+      definition.name === 'browser.open' &&
+      connection.value.protocol.minor < 2 &&
+      args &&
+      typeof args === 'object' &&
+      !Array.isArray(args) &&
+      args.profileContextId !== undefined
+    ) {
+      throw protocolIncompatible('browser.open profileContextId requires protocol 1.2 or newer', {
+        tool: definition.name,
+        selectedProtocol: `${connection.value.protocol.major}.${connection.value.protocol.minor}`,
+      });
+    }
     if (definition.name === 'browser.discover') {
       return this.callBrowserDiscover(connection, params, args, definition);
     }
@@ -1154,6 +1241,12 @@ export class MemoryBrokerRuntime {
       ...(workspaceRecord ? {
         workspace: cloneWorkspace(workspaceRecord.value),
         managedTabSet: cloneManagedTabSet(workspaceRecord.managedTabSet),
+        selectProfileContext: (profileContextId: ProfileContextId) => {
+          this.selectWorkspaceProfileContext(workspaceRecord!, profileContextId);
+        },
+        managedTabSetForProfile: (profileContextId: ProfileContextId) => (
+          this.managedTabSetForProfile(workspaceRecord!, profileContextId)
+        ),
       } : {}),
       ...(lease ? { lease: cloneLease(lease) } : {}),
       ...(params.targetId ? { targetId: params.targetId } : {}),

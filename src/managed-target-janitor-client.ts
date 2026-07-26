@@ -9,6 +9,7 @@ import type {
   ManagedTargetCreateParams,
   ManagedTargetLifecycle,
 } from './services/managed-target-lifecycle.js';
+import { ManagedTargetCreationRejectedError } from './services/managed-target-lifecycle.js';
 import { internalProcessInvocation, type InternalProcessInvocation } from './runtime-layout.js';
 
 const MAX_PENDING_REQUESTS = 1024;
@@ -19,6 +20,7 @@ interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
+  method: WorkerRequest['method'];
 }
 
 interface WorkerRequest {
@@ -120,6 +122,16 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
     return { targetId: result.targetId };
   }
 
+  async adoptTarget(targetId: string): Promise<void> {
+    await this.ensureWorker();
+    if (this.ownedTargetIds.has(targetId)) return;
+    const result = await this.request('adopt', { targetIds: [targetId] }) as { adopted?: unknown };
+    if (result?.adopted !== 1) {
+      throw new BrowserPilotError('internal_error', 'Managed browser connection could not adopt the target');
+    }
+    this.ownedTargetIds.add(targetId);
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -219,9 +231,13 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
       const description = typeof error.message === 'string'
         ? error.message.slice(0, 1024)
         : 'Managed browser connection failed';
-      pending.reject(error.code === 'cdp_error'
-        ? new Error(description)
-        : new BrowserPilotError('browser_disconnected', description, { retryable: true }));
+      if (error.code === 'cdp_error') {
+        pending.reject(new Error(description));
+      } else if (error.code === 'janitor_error' && pending.method === 'create') {
+        pending.reject(new ManagedTargetCreationRejectedError(description));
+      } else {
+        pending.reject(new BrowserPilotError('internal_error', description, { retryable: true }));
+      }
       return;
     }
     pending.resolve(message.result);
@@ -266,10 +282,16 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
-        reject(new Error(`Managed browser connection timeout: ${method}`));
+        reject(method === 'create'
+          ? new BrowserPilotError(
+            'unknown_outcome',
+            'Managed target creation timed out before its outcome was received',
+            { retryable: true },
+          )
+          : new Error(`Managed browser connection timeout: ${method}`));
       }, REQUEST_TIMEOUT_MS);
       timer.unref();
-      this.pendingRequests.set(id, { resolve, reject, timer });
+      this.pendingRequests.set(id, { resolve, reject, timer, method });
       worker.send?.(request, error => {
         if (!error) return;
         const pending = this.pendingRequests.get(id);

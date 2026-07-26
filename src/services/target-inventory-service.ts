@@ -5,6 +5,7 @@ import type {
   ControlledTargetId,
   ControlLeaseId,
   ManagedTabSetId,
+  ProfileContextId,
 } from '../protocol/model.js';
 import type { Transport } from '../transport.js';
 import type {
@@ -18,6 +19,10 @@ import {
   type ControlledTargetView,
   type LiveTargetMetadata,
 } from './controlled-target-registry.js';
+import {
+  MemoryProfileContextRegistry,
+  type ProfileTargetSnapshot,
+} from './profile-context-registry.js';
 
 export interface TargetInventoryContext extends WorkspaceCallerContext {
   leaseId: ControlLeaseId;
@@ -26,6 +31,7 @@ export interface TargetInventoryContext extends WorkspaceCallerContext {
 
 export interface RegisterManagedTargetInput extends TargetInventoryContext {
   managedTabSetId: ManagedTabSetId;
+  profileContextId: ProfileContextId;
   cdpTargetId: string;
   openerCdpTargetId?: string;
   origin?: 'managed' | 'managed_popup';
@@ -39,6 +45,7 @@ export interface ResolvedControlledTarget {
   cdpTargetId: string;
   origin: ControlledTargetRecord['origin'];
   managedTabSetId?: ManagedTabSetId;
+  profileContextId: ProfileContextId;
   newlyAcquired: boolean;
 }
 
@@ -54,6 +61,7 @@ export interface TargetInventoryServiceOptions {
   onControlAcquired?: (target: ControlledTargetRecord, leaseId: ControlLeaseId) => void;
   onControlReleased?: (target: ControlledTargetRecord, leaseId: ControlLeaseId) => void;
   isCurrentContext?: (context: TargetInventoryContext) => boolean;
+  profileContexts?: MemoryProfileContextRegistry;
 }
 
 interface RootTargetInfo extends LiveTargetMetadata {
@@ -71,6 +79,7 @@ export class TargetInventoryService {
   private readonly onControlAcquired?: TargetInventoryServiceOptions['onControlAcquired'];
   private readonly onControlReleased?: TargetInventoryServiceOptions['onControlReleased'];
   private readonly isCurrentContext?: TargetInventoryServiceOptions['isCurrentContext'];
+  private readonly profileContexts: MemoryProfileContextRegistry;
   private readonly refreshTails = new Map<string, Promise<void>>();
 
   constructor(
@@ -86,6 +95,7 @@ export class TargetInventoryService {
     this.onControlAcquired = options.onControlAcquired;
     this.onControlReleased = options.onControlReleased;
     this.isCurrentContext = options.isCurrentContext;
+    this.profileContexts = options.profileContexts ?? new MemoryProfileContextRegistry(browserInstanceId);
   }
 
   registerManagedTarget(input: RegisterManagedTargetInput): ControlledTargetRecord {
@@ -95,6 +105,7 @@ export class TargetInventoryService {
       browserInstanceId: this.browserInstanceId,
       browserConnectionGeneration: input.browserConnectionGeneration,
       managedTabSetId: input.managedTabSetId,
+      profileContextId: input.profileContextId,
       cdpTargetId: input.cdpTargetId,
       ...(input.openerCdpTargetId ? { openerCdpTargetId: input.openerCdpTargetId } : {}),
       origin: input.origin ?? 'managed',
@@ -132,7 +143,11 @@ export class TargetInventoryService {
         .filter(target => target.controllerLeaseId)
         .map(target => [target.id, target]),
     );
-    const liveTargets = await this.readLiveTargets();
+    const liveTargets = await this.readLiveTargets(
+      Number.isSafeInteger(context.browserConnectionGeneration)
+        ? context.browserConnectionGeneration
+        : 1,
+    );
     this.assertCurrent(context);
     const userTargets = (await this.policy.listUserTargets(this.browserInstanceId))
       .filter(target => target.browserInstanceId === this.browserInstanceId);
@@ -210,6 +225,7 @@ export class TargetInventoryService {
       ...(acquisition.target.managedTabSetId
         ? { managedTabSetId: acquisition.target.managedTabSetId }
         : {}),
+      profileContextId: acquisition.target.profileContextId,
       newlyAcquired: acquisition.newlyAcquired,
     };
   }
@@ -283,6 +299,10 @@ export class TargetInventoryService {
     return this.registry.activeTarget(context, context.leaseId);
   }
 
+  clearActive(context: TargetInventoryContext): void {
+    this.registry.clearActive(context, context.leaseId);
+  }
+
   releaseWorkspace(context: WorkspaceCallerContext): ControlledTargetInvalidation[] {
     const controlled = this.registry.activeRecords(context).filter(target => target.controllerLeaseId);
     const invalidated = this.registry.releaseWorkspace(context);
@@ -293,25 +313,50 @@ export class TargetInventoryService {
     return invalidated;
   }
 
-  private async readLiveTargets(): Promise<Map<string, RootTargetInfo>> {
+  private async readLiveTargets(
+    browserConnectionGeneration: number,
+  ): Promise<Map<string, RootTargetInfo>> {
     const result = await this.transport.send('Target.getTargets');
     if (!Array.isArray(result?.targetInfos)) {
       throw new BrowserPilotError('internal_error', 'Chrome returned invalid target metadata');
     }
-    const targets = new Map<string, RootTargetInfo>();
+    const snapshots: ProfileTargetSnapshot[] = [];
     for (const value of result.targetInfos) {
       if (!value || typeof value !== 'object') continue;
       const targetId = readString(value.targetId);
       if (!targetId) continue;
       const url = readString(value.url);
-      targets.set(targetId, {
+      snapshots.push({
         cdpTargetId: targetId,
         title: readString(value.title) ?? '',
         url: url || 'about:blank',
+        type: readString(value.type) ?? '',
+        eligible: readString(value.type) === 'page',
         ...(readString(value.openerId)
           ? { openerCdpTargetId: readString(value.openerId)! }
           : {}),
-        ...(readString(value.type) ? { type: readString(value.type) } : {}),
+        ...(readString(value.browserContextId)
+          ? { cdpBrowserContextId: readString(value.browserContextId)! }
+          : {}),
+      });
+    }
+    this.profileContexts.reconcile(browserConnectionGeneration, snapshots);
+    const targets = new Map<string, RootTargetInfo>();
+    for (const snapshot of snapshots) {
+      const profile = this.profileContexts.forTarget(
+        snapshot.cdpTargetId,
+        browserConnectionGeneration,
+      );
+      if (!profile) continue;
+      targets.set(snapshot.cdpTargetId, {
+        cdpTargetId: snapshot.cdpTargetId,
+        profileContextId: profile.id,
+        title: snapshot.title,
+        url: snapshot.url,
+        ...(snapshot.openerCdpTargetId
+          ? { openerCdpTargetId: snapshot.openerCdpTargetId }
+          : {}),
+        ...(snapshot.type ? { type: snapshot.type } : {}),
       });
     }
     return targets;
@@ -330,13 +375,21 @@ export class TargetInventoryService {
       for (const target of liveTargets.values()) {
         if (active.has(target.cdpTargetId) || (target.type && target.type !== 'page')) continue;
         const ancestor = this.findManagedAncestor(target, active, liveTargets);
-        if (!ancestor?.managedTabSetId) continue;
+        if (
+          !ancestor?.managedTabSetId ||
+          (
+            ancestor.profileContextId &&
+            target.profileContextId &&
+            ancestor.profileContextId !== target.profileContextId
+          )
+        ) continue;
         const record = this.registry.registerManaged({
           principalId: context.principalId,
           workspaceId: context.workspaceId,
           browserInstanceId: this.browserInstanceId,
           browserConnectionGeneration: context.browserConnectionGeneration,
           managedTabSetId: ancestor.managedTabSetId,
+          profileContextId: target.profileContextId,
           cdpTargetId: target.cdpTargetId,
           ...(target.openerCdpTargetId ? { openerCdpTargetId: target.openerCdpTargetId } : {}),
           origin: 'managed_popup',

@@ -78,12 +78,12 @@ export class BrowserToolRouter implements BrowserToolExecutor {
   releaseWorkspace(
     principal: ClientPrincipal,
     workspace: BrowserWorkspace,
-    managedTabSet: ManagedTabSet,
+    managedTabSets: readonly ManagedTabSet[],
   ): void {
     this.services.get(workspace.browserInstanceId)?.releaseWorkspace(
       principal,
       workspace,
-      managedTabSet,
+      managedTabSets,
     );
   }
 

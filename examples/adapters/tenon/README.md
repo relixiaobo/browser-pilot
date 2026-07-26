@@ -77,6 +77,12 @@ tool catalog/configuration flow rather than bypassing it with a hidden tool.
 Browser Pilot itself grants full browser capability; any Tenon approval or tool
 visibility behavior remains a Tenon concern.
 
+Expose `browser.profiles.list` and `browser.profiles.select` like every other
+runtime-discovered tool. When a Turn needs a new managed tab and several
+Profiles are available without a target anchor, Tenon should render the Profile
+summaries as its normal Agent/user choice and send only the returned opaque ID.
+Tabs the user already opened remain directly controllable across Profiles.
+
 On `connection.lost`, pause browser mutations for affected Turns. After
 `connection.restored`, list tabs again, select the intended opaque target, and
 observe again. Never reuse a prior target/frame/Observation/ref mapping. Poll

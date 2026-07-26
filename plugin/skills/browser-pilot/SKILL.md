@@ -47,13 +47,22 @@ command succeeds. `bp browsers` is passive and never prompts. While one
 `bp connect` is waiting for Allow, do not launch another; all clients reuse the
 same pending service-side connection.
 
+One successful connection covers all live Chrome Profiles exposed by that
+browser endpoint. If `bp connect` reports multiple Profiles, do not connect
+again. Run `bp profiles`; when the intended Profile is clear from the user's
+request and representative tabs, select it with `bp profile <index>`. Otherwise
+ask the user which Profile to use. Profile selection routes new managed tabs and
+does not grant or restrict access to existing tabs.
+
 ## Operate from Current State
 
 1. Resolve the intended tab.
    - If the user refers to a page already open, run `bp tabs`, identify it by
-     URL/title/origin, then run `bp tab <index>`.
+     URL/title/origin/Profile context, then run `bp tab <index>`.
    - For independent work, prefer `bp open <url> --new` so an unrelated user tab
      is not replaced.
+   - If several Profiles are live and the new tab must use a specific one, run
+     `bp profiles` and use `bp open <url> --new --profile <index|id|label>`.
    - Use plain `bp open <url>` only when navigating the currently selected tab
      is intended.
 2. Inspect the right representation.
@@ -98,7 +107,10 @@ same pending service-side connection.
 ```bash
 bp tabs                              # all controllable managed and user tabs
 bp tab 2                             # select tab index 2
+bp profiles                          # live Chrome Profile contexts
+bp profile 1                         # route subsequent managed tabs
 bp open "https://example.com" --new  # create an independent managed tab
+bp open "https://example.com" --new --profile 1
 bp snapshot                          # interactive controls with refs
 bp read                              # readable page content
 bp read "main" --limit 10000         # bounded region text
@@ -147,6 +159,11 @@ is known, but do not replace a user-opened form or draft merely to save steps.
 Selecting a user tab makes it the current controlled tab. `bp close` explicitly
 closes the current tab even when it is user-owned; `bp close --all` closes only
 managed tabs. Do not close a tab unless the task requires it.
+
+Tabs may span several live Chrome Profiles under one authorized browser
+connection. Existing tabs need no prior Profile selection. `profileContextId`
+and `bp profiles` are routing context for new managed work; after Chrome
+reconnect, list Profiles and tabs again instead of reusing an old ID.
 
 Use `bp frame` to list frames, `bp frame <index>` to select one, and `bp frame 0`
 to return to the top frame. Refresh the snapshot after changing frames.
@@ -206,6 +223,10 @@ arguments for secrets when the surrounding Agent runtime supports it. Avoid
 
 - Not connected: run `bp connect`, wait for authorization, then retry the read
   or state-discovery command.
+- Profile selection required: run `bp profiles`; select from fresh results or
+  ask the user when the intended Profile is ambiguous. Do not reconnect.
+- Profile stale/unavailable: list Profiles again and follow the structured
+  remediation. Do not substitute an old ID or silently choose the first entry.
 - Ref not found/stale: run `bp snapshot` and select a ref from that result.
 - Selector not found: inspect `bp snapshot` or `bp read`; correct the selector
   instead of repeating it.

@@ -235,7 +235,7 @@ test('simultaneous bridge processes start and reuse exactly one per-user Broker'
   assert.equal(locator.schemaVersion, 2);
   assert.equal(locator.serviceVersion, locator.executable.version);
   assert.deepEqual(locator.protocol, {
-    min: { major: 1, minor: 0 }, max: { major: 1, minor: 1 },
+    min: { major: 1, minor: 0 }, max: { major: 1, minor: 2 },
   });
 
   process.kill(locator.pid, 'SIGKILL');

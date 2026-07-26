@@ -171,24 +171,37 @@ Broker and associated with exactly one ClientPrincipal after initialization.
 
 ### BrowserInstance
 
-One running, discoverable Chromium-family browser process identified by a
-process-stable identity, product, profile path, debugging endpoint, and
-connection generation.
+One running, discoverable Chromium-family browser endpoint identified by a
+process-stable identity, product, user-data root, debugging endpoint, and
+connection generation. One endpoint may expose several simultaneously live
+Chrome Profile contexts; those are not separate BrowserInstances.
+
+### ProfileContext
+
+One live regular browser context inside a BrowserInstance. Its public
+`profileContextId` is opaque and scoped to the current browser connection
+generation; the raw CDP browser-context ID is internal. A ProfileContext has a
+connection-scoped neutral label, optional verified display metadata, bounded
+representative tabs, and current tab counts. Passive discovery never opens a
+tab to infer its display name. Reconnect invalidates every ProfileContext ID.
 
 ### BrowserWorkspace
 
 A logical browser working set owned by one ClientPrincipal. It owns one or more
-ManagedTabSets and transient scoped state. Workspaces live in Broker memory by
-default and are recreated after Broker restart; Agent adapters map their own
-active lifecycle to this object.
+ManagedTabSets, an optional selected ProfileContext, and transient scoped state.
+Workspaces live in Broker memory by default and are recreated after Broker
+restart; Agent adapters map their own active lifecycle to this object. Profile
+selection is never persisted as a global browser default.
 
 ### ManagedTabSet
 
 The logical collection of Broker-created tabs used for isolated Agent work. It
 is normally backed by a dedicated visible Pilot window because Browser Pilot
 does not use extension-only native tab-group APIs. New task navigation and
-owned popups stay in this set by default. Workspace cleanup may close this set,
-but never user-owned tabs outside it.
+owned popups stay in this set by default. A ManagedTabSet is permanently bound
+to at most one ProfileContext; a Workspace that creates managed work in multiple
+Profiles owns one set per Profile. Workspace cleanup may close these sets, but
+never user-owned tabs outside them.
 
 ### ControlLease
 
@@ -207,7 +220,8 @@ inside the running bridge.
 ### ControlledTarget
 
 A target addressable by a Workspace. Its origin is `managed`, `managed_popup`,
-or `user_tab`, and it records an optional ManagedTabSet. A user tab retains user
+or `user_tab`, and it records its ProfileContext and an optional ManagedTabSet.
+A user tab retains user
 ownership: releasing a Workspace removes Broker mappings without closing the
 tab. Every result identifies its Workspace, Lease, opaque controlled-target ID,
 URL, origin, and browser connection generation. Raw CDP target IDs are not a
@@ -397,6 +411,23 @@ transient mappings and rules but leaves user tabs open. Closing a user tab
 always requires an explicit target-specific command; bulk cleanup applies only
 to ManagedTabSets.
 
+### FLOW-6 Multiple live Chrome Profiles
+
+`browser.tabs.list` inventories eligible tabs from every Profile context exposed
+by the selected BrowserInstance. Existing targets are immediately controllable
+and carry an opaque `profileContextId`. New managed work resolves a Profile from
+an explicit context, the current active target, the Workspace selection, or a
+single available context, in that order. Multiple contexts without an anchor
+return `profile_selection_required` before creating a target. The Agent host
+asks the user which Profile to use; Browser Pilot does not add an approval UI.
+
+`browser.profiles.list` is passive and returns bounded, connection-scoped
+summaries. `browser.profiles.select` updates only the owning Workspace. A Chrome
+reconnect invalidates old ProfileContext IDs and requires relisting and
+reselection. Selection clears only the Lease's logical active-target anchor; it
+does not release control, activate a tab, or change Chrome focus. The exact
+creation and compatibility algorithm is frozen in `docs/plans/profile-context-routing.md`.
+
 ## Machine Protocol
 
 `bridge --stdio` uses JSON-RPC 2.0 over newline-delimited UTF-8 JSON. Each line
@@ -447,6 +478,12 @@ selected limits take effect. Artifact and journal capacities remain service
 resource limits. Pending ordinary and out-of-band control calls have separate
 bounds so overload cannot create an unbounded Promise queue or prevent dialog
 and cancellation control from overtaking a blocked action.
+
+Protocol 1.2 adds connection-generation-scoped ProfileContext discovery and
+selection, Profile identity on tab inventory, and context-aware managed target
+creation. Protocol 1.0/1.1 clients retain existing-target control and automatic
+single-context behavior, but an ambiguous multi-context open fails rather than
+silently selecting a Profile.
 
 ### Tool Contract
 
@@ -566,6 +603,22 @@ Artifacts. Raw CDP is never listed. `eval` requires `developer.eval`.
 - **BR-27:** Bulk cleanup and `close --all` default to the ManagedTabSet. No
   bulk operation closes user tabs outside it. Each user tab requires an
   explicit target-specific close command.
+- **BR-29:** Runtime Profile contexts are discovered from live target metadata,
+  not only `Target.getBrowserContexts`. Public ProfileContext IDs never expose
+  raw CDP identifiers and are invalid after browser reconnect.
+- **BR-30:** Profile listing is passive. It cannot create, attach, activate, or
+  navigate a target solely to infer a Profile name. Unverified names are
+  omitted instead of guessed.
+- **BR-31:** New-target Profile routing follows explicit context, active target,
+  Workspace selection, then single available context. Multiple unanchored
+  contexts fail with `profile_selection_required` before browser dispatch.
+- **BR-32:** Every ManagedTabSet is bound to at most one ProfileContext. Managed
+  target creation verifies the returned context before public registration, and
+  fallback-created targets enter janitor ownership before they become
+  addressable.
+- **BR-33:** Switching to an existing target may update the owning Workspace's
+  selected ProfileContext, but never prevents inventory or control of targets
+  in other Profiles. No Profile selection is a permission grant.
 
 ## Command Reliability
 
@@ -782,9 +835,14 @@ the first new download session is configured.
 ## Browser Discovery and Setup
 
 Discovery returns every supported local browser candidate with product,
-channel, profile, process state, remote-debugging state, authorization state,
+channel, user-data root, process state, remote-debugging state, authorization state,
 and structured remediation. It does not silently select the first filesystem
 match when several viable instances exist.
+
+After connection, Profile discovery separately returns every live regular
+Profile context on that endpoint. Browser candidates and Profile contexts are
+different layers: selecting Chrome Stable does not silently select one of its
+simultaneously open Profiles.
 
 The client may select an instance explicitly or use a deterministic persisted
 preference. Setup that requires Chrome UI remains a user-visible action. Browser
@@ -824,6 +882,7 @@ and optional structured remediation. Required codes include:
 protocol_incompatible   not_initialized       capability_denied
 browser_not_found       browser_not_authorized browser_disconnected
 broker_in_use
+profile_selection_required profile_context_stale profile_context_unavailable
 workspace_not_found     lease_expired          target_not_owned
 target_busy             stale_ref               command_cancelled
 action_not_verified     command_expired         unknown_outcome
@@ -900,8 +959,14 @@ fields, never on message text.
 - **FR-8 Browser reliability:** Browser capability improvements do not alter the
   public lifecycle and isolation contract.
   - **AC-8:** Observation and action conformance tests pass against the public
-    tool interface, including frame, navigation, stale-ref, obstruction, and
-    input readback cases.
+  tool interface, including frame, navigation, stale-ref, obstruction, and
+  input readback cases.
+- **FR-9 Multi-Profile routing:** One endpoint can expose all eligible tabs from
+  multiple live Chrome Profiles without ambiguous new-target placement.
+  - **AC-9:** Existing tabs remain directly controllable; every tab result has a
+    connection-scoped ProfileContext ID; ambiguous open returns
+    `profile_selection_required`; explicit or inferred routing is verified; and
+    reconnect requires relisting rather than reusing stale Profile IDs.
 
 ## Non-Functional Requirements
 
@@ -949,6 +1014,12 @@ fields, never on message text.
    version output, bridge initialization, private Broker startup, and cleanup.
    Native verification additionally checks manifest hashes, signature state,
    private child roles, and archive checksums on each target platform.
+8. Multi-Profile tests cover passive discovery, explicit and inferred
+   selection, multiple ManagedTabSets, direct-create fallback, janitor adoption,
+   concurrent Workspace routing, reconnect invalidation, and protocol 1.1
+   ambiguous-open failure. Real Chrome acceptance verifies at least two live
+   Profiles on one endpoint without reconnecting or requesting authorization
+   again.
 
 ## Implementation Boundary
 

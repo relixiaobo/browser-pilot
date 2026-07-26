@@ -54,6 +54,7 @@ cp -r skills/browser-pilot ~/.agents/skills/
 After installation, your AI agent learns to use `bp` commands via bash:
 
 - `bp open <url>` — navigate and get page snapshot
+- `bp profiles` / `bp profile <index>` — route new managed tabs across live Chrome Profiles
 - `bp click <ref>` — click elements by reference number
 - `bp type <ref> "text"` — fill form fields
 - `bp eval <js>` — run JavaScript

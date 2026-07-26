@@ -41,6 +41,13 @@ stable Browser Pilot Command/idempotency identities, so OpenClaw retries cannot
 redispatch a completed mutation. `unknown_outcome` must be shown to the Agent as
 inspect-before-retry, never as an automatic retry signal.
 
+The runtime-generated dispatcher automatically includes protocol 1.2 Profile
+operations. For unanchored new work in a multi-Profile browser, OpenClaw should
+call `browser.profiles.list`, ask through its normal user-interaction path, and
+pass the chosen opaque `profileContextId` to selection or `browser.open`.
+Existing user tabs need no Profile grant and remain available through
+`browser.tabs.list`.
+
 Browser event notifications are low-latency hints. The plugin should retain the
 last fully processed cursor in the live adapter Workspace and recover with
 `pollEvents`. Process the complete page before calling `acknowledgeEvents`; do

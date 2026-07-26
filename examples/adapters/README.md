@@ -10,6 +10,7 @@ Both adapters use the same black-box process owner in
 
 - direct absolute-path launch without a shell;
 - protocol/capability negotiation and runtime tool discovery;
+- protocol 1.2 Profile discovery and selection without Agent-specific routing;
 - Workspace/Lease creation, heartbeat, event cursors, and bounded cleanup;
 - explicit target context with no hidden active-tab state;
 - stable Command IDs and idempotency keys derived from host tool-call IDs;
@@ -78,6 +79,14 @@ notifications are dropped. Process every returned event before calling
 `acknowledgeEvents(nextCursor)`; polling again without acknowledgement safely
 replays from the last processed cursor. After `cursor_expired`, rebuild tabs and
 Observations before calling `resetEventCursor` for a new baseline.
+
+After browser connection, list tabs and Profiles. Existing user tabs from every
+live Chrome Profile are immediately controllable and already carry
+`profileContextId`. Before `browser.open` creates independent managed work in a
+multi-Profile browser with no target anchor, present `browser.profiles.list` to
+the user and pass the chosen opaque ID to `browser.profiles.select` or directly
+to `browser.open`. Never treat Profile selection as permission or persist it as
+a product-wide default.
 
 The only identity intended to survive product restarts is the host's normal,
 installation-scoped `client.instanceId`. It identifies the embedding product to

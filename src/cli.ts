@@ -3,7 +3,11 @@ import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { BROWSER_PILOT_VERSION as PKG_VERSION } from './version.js';
 import { BrowserPilotError } from './protocol/errors.js';
-import type { ArtifactDescriptor, ControlledTargetId, JsonValue } from './protocol/model.js';
+import type {
+  ArtifactDescriptor,
+  ControlledTargetId,
+  JsonValue,
+} from './protocol/model.js';
 import { DaemonBridgeBackend } from './bridge/daemon-bridge-backend.js';
 import { runStdioBridge } from './bridge/stdio-bridge.js';
 import { discoverBrowserCandidates } from './chrome.js';
@@ -13,6 +17,7 @@ import {
   shutdownCompatibility,
   withCompatibilityTarget,
   type CompatibilityBrokerClient,
+  type CompatibilityProfile,
   type CompatibilityTarget,
 } from './compatibility-broker-client.js';
 
@@ -25,7 +30,10 @@ program
   .addHelpText('after', `
 Workflow:
   bp connect                          # one-time setup (click Allow in Chrome)
+  bp profiles                         # list live Chrome Profile contexts
+  bp profile <index>                  # route new managed tabs to one Profile
   bp open <url>                       # navigate — returns snapshot with [ref] numbers
+  bp open <url> --new --profile <id>  # create managed work in one Profile
   bp click <ref>                      # interact — returns updated snapshot
   bp click --xy 400,300              # click at coordinates (canvas/maps)
   bp locate ".selector"              # get element coordinates for click --xy
@@ -131,6 +139,9 @@ function emitObservation(result: Record<string, JsonValue>): void {
       truncationReasons,
       ...(Array.isArray(result.hints) ? { hints: result.hints } : {}),
       ...(result.evidence && typeof result.evidence === 'object' ? { evidence: result.evidence } : {}),
+      ...(typeof result.profileContextId === 'string'
+        ? { profileContextId: result.profileContextId }
+        : {}),
     }));
   } else {
     const lines = [`[page] ${title} | ${url}`, ''];
@@ -226,6 +237,49 @@ async function requireCompatibility(): Promise<CompatibilityBrokerClient> {
   return client;
 }
 
+async function resolveCliProfile(
+  client: CompatibilityBrokerClient,
+  selector: string,
+): Promise<CompatibilityProfile> {
+  const profiles = await client.listProfiles();
+  const exactId = profiles.find(profile => profile.profileContextId === selector);
+  if (exactId) return exactId;
+  if (/^\d+$/.test(selector)) {
+    const index = Number(selector);
+    if (Number.isSafeInteger(index) && profiles[index]) return profiles[index];
+    throw invalidCliProfile(`Profile index out of range (0-${Math.max(0, profiles.length - 1)})`, selector);
+  }
+  const normalized = selector.trim().toLocaleLowerCase();
+  const matches = profiles.filter(profile => (
+    profile.label.toLocaleLowerCase() === normalized ||
+    profile.displayName?.toLocaleLowerCase() === normalized
+  ));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw invalidCliProfile('Profile selector is ambiguous; use its index or Profile context ID', selector);
+  }
+  throw invalidCliProfile('Profile selector does not match a live Chrome Profile', selector);
+}
+
+function invalidCliProfile(message: string, selector: string): BrowserPilotError {
+  return new BrowserPilotError('invalid_argument', message, {
+    context: { field: 'profile', selector },
+  });
+}
+
+function cliProfile(profile: CompatibilityProfile, index: number): Record<string, JsonValue> {
+  return {
+    index,
+    profileContextId: profile.profileContextId,
+    label: profile.label,
+    ...(profile.displayName ? { displayName: profile.displayName } : {}),
+    tabCount: profile.tabCount,
+    eligibleTabCount: profile.eligibleTabCount,
+    selected: profile.selected,
+    representativeTabs: profile.representativeTabs,
+  };
+}
+
 function withCliTarget<T>(
   operation: (client: CompatibilityBrokerClient, target: CompatibilityTarget) => Promise<T>,
 ): Promise<T> {
@@ -277,7 +331,7 @@ program.command('browsers')
   }));
 
 program.command('connect')
-  .description('Connect to Chrome and create pilot window')
+  .description('Connect to Chrome and prepare unambiguous managed browsing')
   .option('-b, --browser <name>', 'browser to connect to')
   .addHelpText('after', '\nExamples:\n  bp connect\n  bp connect --browser brave')
   .action(action(async (opts) => {
@@ -287,10 +341,19 @@ program.command('connect')
     }
     const client = await connectCompatibility(PKG_VERSION, opts.browser);
     await client.connectBrowser();
-    await client.ensureManagedTarget();
+    const profiles = await client.listProfiles();
+    if (profiles.length <= 1) await client.ensureManagedTarget();
     const browser = client.initialized.browsers.find(candidate => candidate.state === 'ready')?.product ?? 'browser';
+    if (profiles.length > 1) {
+      const listed = profiles.map(cliProfile);
+      emit(
+        { ok: true, browser, profileSelectionRequired: true, profiles: listed },
+        `\u2713 Connected to ${browser}\nMultiple Chrome Profiles are open. Run 'bp profiles', then 'bp profile <index>'.`,
+      );
+      return;
+    }
     emit(
-      { ok: true, browser },
+      { ok: true, browser, profileSelectionRequired: false },
       `\u2713 Connected to ${browser}\n\u2713 Pilot window ready (daemon running in background)\n\nReady! Try: bp open https://example.com`,
     );
   }));
@@ -331,18 +394,68 @@ program.command('disconnect')
 
 // ─── open ───────────────────────────────────────────
 
+program.command('profiles')
+  .description('List live Chrome Profile contexts')
+  .action(action(async () => {
+    const profiles = (await (await requireCompatibility()).listProfiles()).map(cliProfile);
+    if (useJson()) {
+      console.log(JSON.stringify({ ok: true, profiles }));
+      return;
+    }
+    if (profiles.length === 0) {
+      console.log('No live Chrome Profile contexts found.');
+      return;
+    }
+    for (const profile of profiles) {
+      const name = profile.displayName ? ` (${profile.displayName})` : '';
+      console.log(`${profile.selected ? '*' : ' '} ${profile.index}  ${profile.label}${name}  ${profile.tabCount} tab(s)`);
+    }
+  }));
+
+program.command('profile <selector>')
+  .description('Select a Chrome Profile context for new managed tabs')
+  .action(action(async (selector) => {
+    const client = await requireCompatibility();
+    const profile = await resolveCliProfile(client, String(selector));
+    const selected = await client.selectProfile(profile.profileContextId);
+    emit(
+      {
+        ok: true,
+        profileContextId: selected.profileContextId,
+        label: selected.label,
+        ...(selected.displayName ? { displayName: selected.displayName } : {}),
+      },
+      `\u2713 Selected ${selected.displayName ?? selected.label}`,
+    );
+  }));
+
 program.command('open <url>')
   .description('Navigate to URL and return page snapshot')
   .option('-n, --new', 'open in new tab')
+  .option('--profile <selector>', 'Profile index, ID, label, or verified display name (requires --new)')
   .option('-l, --limit <n>', 'max elements in snapshot', '50')
-  .addHelpText('after', '\nExamples:\n  bp open https://github.com\n  bp open github.com --new\n  bp open https://example.com --limit 20')
+  .addHelpText('after', '\nExamples:\n  bp open https://github.com\n  bp open github.com --new\n  bp open https://example.com --new --profile 1\n  bp open https://example.com --limit 20')
   .action(action(async (url, opts) => {
     url = normalizeUrl(url);
     const limit = parseLimit(opts.limit);
+    if (opts.profile && !opts.new) throw new Error('--profile requires --new');
+    if (opts.new) {
+      const client = await requireCompatibility();
+      const profile = opts.profile
+        ? await resolveCliProfile(client, String(opts.profile))
+        : undefined;
+      emitObservation(await client.callTool('browser.open', {
+        url,
+        newTarget: true,
+        ...(profile ? { profileContextId: profile.profileContextId } : {}),
+        observationLimit: limit,
+      }));
+      return;
+    }
     await withCliTarget(async (client, target) => {
       const result = await client.callTool('browser.open', {
         url,
-        ...(opts.new ? { newTarget: true } : { targetId: target.targetId }),
+        targetId: target.targetId,
         observationLimit: limit,
       });
       emitObservation(result);

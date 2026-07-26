@@ -5,6 +5,7 @@ import {
   type BrowserOperation,
   type BrowserWorkspaceId,
   type ClientPrincipalId,
+  type ProfileContextId,
 } from '../protocol/model.js';
 
 export interface WorkspaceCallerContext {
@@ -14,6 +15,7 @@ export interface WorkspaceCallerContext {
 
 export interface EligibleUserTarget {
   cdpTargetId: string;
+  profileContextId: ProfileContextId;
   title: string;
   url: string;
   openerCdpTargetId?: string;

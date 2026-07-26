@@ -13,6 +13,7 @@ import {
   type InitializeResult,
   type JsonValue,
   type ObservationId,
+  type ProfileContextId,
 } from './protocol/model.js';
 
 const BRIDGE_SESSION_ID = 'bridge:browser-pilot-cli';
@@ -33,12 +34,27 @@ interface LeaseCreateResult {
 
 export interface CompatibilityTarget {
   targetId: ControlledTargetId;
+  profileContextId: ProfileContextId;
   title: string;
   url: string;
   active: boolean;
   origin: 'managed' | 'managed_popup' | 'user_tab';
   managedTabSetId?: string;
   controlState: 'available' | 'controlled' | 'busy';
+}
+
+export interface CompatibilityProfile {
+  profileContextId: ProfileContextId;
+  label: string;
+  displayName?: string;
+  tabCount: number;
+  eligibleTabCount: number;
+  selected: boolean;
+  representativeTabs: Array<{
+    targetId: ControlledTargetId;
+    title: string;
+    url: string;
+  }>;
 }
 
 function asRecord(value: JsonValue, label: string): Record<string, JsonValue> {
@@ -78,7 +94,7 @@ export class CompatibilityBrokerClient {
         version: executableVersion,
         instanceId: 'local:one-shot',
       },
-      protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
+      protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 2 } },
       requestedCapabilities: [...CAPABILITIES],
       launchMode: 'one-shot',
     }), 'initialize') as unknown as InitializeResult;
@@ -137,6 +153,26 @@ export class CompatibilityBrokerClient {
     return result.targets as unknown as CompatibilityTarget[];
   }
 
+  async listProfiles(): Promise<CompatibilityProfile[]> {
+    const result = await this.callTool('browser.profiles.list');
+    if (!Array.isArray(result.profiles)) {
+      throw new BrowserPilotError('internal_error', 'browser.profiles.list returned invalid Profiles');
+    }
+    return result.profiles as unknown as CompatibilityProfile[];
+  }
+
+  async selectProfile(profileContextId: ProfileContextId): Promise<CompatibilityProfile> {
+    const result = await this.callTool('browser.profiles.select', { profileContextId });
+    const profiles = await this.listProfiles();
+    const selected = profiles.find(profile => profile.profileContextId === result.profileContextId);
+    if (!selected) {
+      throw new BrowserPilotError('profile_context_stale', 'Selected Profile context is no longer available', {
+        retryable: true,
+      });
+    }
+    return selected;
+  }
+
   async ensureTarget(): Promise<CompatibilityTarget> {
     const targets = await this.listTabs('all');
     const selected = targets.find(target => target.active) ??
@@ -172,6 +208,7 @@ export class CompatibilityBrokerClient {
     });
     return {
       targetId: opened.targetId as ControlledTargetId,
+      profileContextId: opened.profileContextId as ProfileContextId,
       title: String(opened.title ?? ''),
       url: String(opened.url),
       active: true,

@@ -319,7 +319,7 @@ export class BrowserPilotProcessAdapter {
     try {
       this.initializeResult = await this.peer.call('initialize', {
         client: this.options.client,
-        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
+        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 2 } },
         requestedCapabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES,
         launchMode: 'embedded',
         limits: {

@@ -105,7 +105,7 @@ exception because a browser dialog can pause the command that caused it.
 `initialize` must be the first successful request on a bridge Connection:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"client":{"id":"com.example.agent","name":"Example Agent","version":"2.0.0","instanceId":"install:01J..."},"protocol":{"min":{"major":1,"minor":1},"max":{"major":1,"minor":1}},"requestedCapabilities":["browser.control","workspace.manage","observation.read","action.input","artifact.read","event.read"],"launchMode":"embedded","limits":{"maxMessageBytes":1048576,"maxResultBytes":4194304}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"client":{"id":"com.example.agent","name":"Example Agent","version":"2.0.0","instanceId":"install:01J..."},"protocol":{"min":{"major":1,"minor":1},"max":{"major":1,"minor":2}},"requestedCapabilities":["browser.control","workspace.manage","observation.read","action.input","artifact.read","event.read"],"launchMode":"embedded","limits":{"maxMessageBytes":1048576,"maxResultBytes":4194304}}}
 ```
 
 The response returns the selected protocol, supported and granted
@@ -126,6 +126,12 @@ send `limits.maxMessageBytes` and `limits.maxResultBytes`; each must be from
 64 KiB through 1 GiB. The selected value is the smaller client/service maximum
 and applies only to that bridge Connection. `maxArtifactBytes` and
 `eventJournalSize` remain service resource limits, not client preferences.
+
+Protocol 1.2 adds connection-scoped Chrome Profile routing. It exposes
+`browser.profiles.list`, `browser.profiles.select`, and `profileContextId` on
+tab inventory and new-target operations. Protocol 1.0/1.1 clients retain their
+existing tools; the Broker hides 1.2-only operations and rejects a manually
+constructed Profile call with `protocol_incompatible`.
 
 The initialize request and response use the service's fixed bootstrap limits.
 The bridge switches limits only after the successful response has been written,
@@ -169,11 +175,13 @@ also provide `clientKey` to make active Workspace creation idempotent within
 their Principal; reusing a key for another browser fails. Without a browser ID,
 the Broker prefers its first ready connection and otherwise uses its selected
 stable-order browser binding. It returns a Workspace, its default logical
-ManagedTabSet, and an `eventCursor`. `workspaces/get` returns the current cursor
-as a recovery baseline. Creating a Workspace does not itself create a browser
+ManagedTabSet, the complete `managedTabSets` array, and an `eventCursor`.
+`workspaces/get` also returns the Workspace's transient
+`selectedProfileContextId` when one is selected and the current cursor as a
+recovery baseline. Creating a Workspace does not itself create a browser
 connection or window. Call the Workspace-scoped `browser.connect` tool to
 request Chrome authorization; the first managed navigation then creates the
-dedicated browser window.
+dedicated browser window in its resolved Profile context.
 
 `leases/create` accepts a `workspaceId` and optional `ttlMs`. Protocol 1.1
 clients may also provide a `clientKey`; repeating that key on the same live
@@ -242,6 +250,43 @@ it never claims rollback. A mutating command whose deadline elapses after
 browser dispatch becomes `unknown_outcome` and is never automatically replayed.
 Known tool failures are stored as a completed Command with a nested JSON-RPC
 `error`; the original call also returns that error normally.
+
+### Chrome Profile routing
+
+One connected Chrome endpoint may expose ordinary tabs from several live
+Profiles. Browser Pilot authorizes the endpoint once; it does not reconnect or
+show another Chrome Allow dialog per Profile. `browser.tabs.list` returns every
+eligible managed and user-opened tab across those contexts, each with an opaque
+`profileContextId`. Existing tabs can be selected and controlled immediately;
+Profile selection is routing for new managed targets, not a permission grant.
+
+Protocol 1.2 hosts should use this flow when creating independent work:
+
+1. Call `browser.profiles.list`. It is passive and returns neutral labels,
+   bounded representative tabs, counts, and the Workspace selection.
+2. If there is one Profile, `browser.open` can infer it. If there are several
+   and no current target or Workspace selection, ask the user which Profile to
+   use.
+3. Call `browser.profiles.select` with the returned opaque ID, or pass that ID
+   directly as `browser.open.arguments.profileContextId`.
+4. Treat IDs as scoped to the current browser connection generation. After
+   reconnect, relist Profiles, tabs, frames, and Observations.
+
+Profile names are included only when Browser Pilot has verified them without a
+visible discovery tab; otherwise hosts present the neutral label and
+representative page titles/URLs. Never expose or persist raw CDP context IDs.
+New-target routing uses an explicit call argument, the Lease's logical active
+target, the Workspace selection, or the only available context, in that order.
+`browser.profiles.select` clears only the logical active-target anchor so its
+selection applies to the next new managed target; it does not release control,
+activate a user tab, or change Chrome focus.
+
+With multiple unanchored contexts, `browser.open` fails before browser dispatch
+with `profile_selection_required`. Relist on `profile_context_stale`; on
+`profile_context_unavailable`, follow its setup remediation. An
+`unknown_outcome` during Profile-window creation means Chrome may have created
+a target that Browser Pilot could not prove absent; list tabs and Profiles and
+inspect current state before deciding whether to retry.
 
 `browser.click` returns a new Observation plus bounded evidence. For example,
 a checkbox may return:
@@ -407,8 +452,8 @@ instead of automatically repeating the same action or navigation.
 
 `connection.lost` keeps the last connection generation and causes later browser
 tools to fail with retryable `browser_disconnected`. The daemon passively
-refreshes the originally selected profile's endpoint metadata and does not
-switch profiles or open a WebSocket. The host calls `browser.connect` when it is
+refreshes the selected browser endpoint metadata and does not select a Profile
+context or open a WebSocket. The host calls `browser.connect` when it is
 ready to request reconnection. `connection.restored` then carries a strictly
 newer generation. Existing Workspaces
 and active Leases remain valid, but old target IDs, frame IDs, CDP sessions,
@@ -570,7 +615,7 @@ pattern into their own integration and continue treating this document plus the
 runtime manifest as authoritative.
 
 The shared example launches an absolute executable path without a shell,
-negotiates protocol 1.1, discovers tools at runtime, and maps a host work scope
+negotiates protocol 1.1 through 1.2, discovers tools at runtime, and maps a host work scope
 to a Workspace plus its active invocation to a renewable Lease. It never stores
 an active tab, frame, Observation, ref, credential, rule, Artifact, or event
 cursor on disk. Host tool-call IDs become Command and idempotency identities;
@@ -595,7 +640,7 @@ and stale tools cannot continue issuing calls.
 
 `tools/list` is generated from the canonical schemas used for argument and
 result validation, and production filtering prevents unwired tools from being
-advertised. The current bridge supports discovery, connect, open, all-tab
+advertised. The current bridge supports discovery, connect, Profile routing, open, all-tab
 inventory, observe/read/search/find, scroll and dropdown actions, annotated
 screenshots, core actions, scoped frames, explicit dialogs, cookies, auth,
 network observation/rules, eval, PDF, protected upload import, scoped download

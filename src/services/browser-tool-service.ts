@@ -18,6 +18,7 @@ import {
   type NetworkRuleId,
   type ObservationId,
   type ObservationInvalidationReason,
+  type ProfileContextId,
 } from '../protocol/model.js';
 import type { ToolDefinition } from '../protocol/tools.js';
 import { INJECT_BORDER } from '../page-scripts.js';
@@ -84,10 +85,15 @@ import {
   type ScreenshotViewport,
 } from './screenshot-annotation-service.js';
 import {
+  ManagedTargetCreationRejectedError,
   TransportManagedTargetLifecycle,
   type ManagedTargetLifecycle,
 } from './managed-target-lifecycle.js';
 import { TargetInventoryService, type TargetInventoryContext } from './target-inventory-service.js';
+import {
+  MemoryProfileContextRegistry,
+  type ProfileContextRecord,
+} from './profile-context-registry.js';
 import { UploadService, type UploadVerificationEvidence } from './upload-service.js';
 import {
   WorkspaceNetworkController,
@@ -103,6 +109,8 @@ import type {
 export const BASE_BROWSER_TOOL_NAMES = [
   'browser.discover',
   'browser.connect',
+  'browser.profiles.list',
+  'browser.profiles.select',
   'browser.open',
   'browser.observe',
   'browser.observation.latest',
@@ -335,6 +343,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly registry = new MemoryControlledTargetRegistry();
   private readonly observations: MemoryObservationStore;
   private readonly inventory: TargetInventoryService;
+  private readonly profileContexts: MemoryProfileContextRegistry;
   private readonly sessions = new Map<string, TargetSession>();
   private readonly guidanceBySession = new Map<string, {
     frameId?: string;
@@ -390,6 +399,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.supportedTools = this.artifactStore
       ? ALL_BROWSER_TOOL_NAMES
       : BASE_BROWSER_TOOL_NAMES;
+    this.profileContexts = new MemoryProfileContextRegistry(binding.instance.id);
     const catalog = new CdpBrowserTargetCatalog(
       transport,
       binding.instance.id,
@@ -398,6 +408,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         connectionGeneration: binding.instance.connectionGeneration,
       }),
       {
+        profileContexts: this.profileContexts,
         isExcludedTarget: target => this.registry.isManagedCdpTarget(
           binding.instance.id,
           target.cdpTargetId,
@@ -411,6 +422,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       policy,
       this.registry,
       {
+        profileContexts: this.profileContexts,
         onInvalidated: invalidation => {
           this.observations.invalidateTarget(invalidation.targetId, invalidation.reason);
           this.publishEvent({
@@ -465,6 +477,9 @@ export class BrowserToolService implements BrowserToolExecutor {
   }
 
   browserConnectionChanged(previous: BrowserInstance, current: BrowserInstance): void {
+    if (previous.connectionGeneration !== current.connectionGeneration || current.state !== 'connected') {
+      this.profileContexts.invalidate();
+    }
     this.binding.instance = { ...current };
     this.binding.candidate.state = current.state === 'connected' ? 'ready' : 'disconnected';
     if (current.state === 'connected') {
@@ -531,6 +546,8 @@ export class BrowserToolService implements BrowserToolExecutor {
     switch (definition.name) {
       case 'browser.discover': return this.discover();
       case 'browser.connect': return this.connect(context, args);
+      case 'browser.profiles.list': return this.listProfiles(context);
+      case 'browser.profiles.select': return this.selectProfile(context, args);
       case 'browser.tabs.list': return this.listTabs(context, args);
       case 'browser.tabs.switch': return this.switchTab(context, args);
       case 'browser.tabs.close': return this.closeTab(context);
@@ -628,7 +645,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   releaseWorkspace(
     principal: BrokerToolCallContext['principal'],
     workspace: NonNullable<BrokerToolCallContext['workspace']>,
-    managedTabSet: NonNullable<BrokerToolCallContext['managedTabSet']>,
+    managedTabSets: readonly NonNullable<BrokerToolCallContext['managedTabSet']>[],
   ): void {
     const caller = { principalId: principal.id, workspaceId: workspace.id };
     const records = this.registry.activeRecords(caller);
@@ -636,7 +653,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.downloads?.releaseWorkspace(workspace.id);
     this.inventory.releaseWorkspace(caller);
     this.observations.releaseWorkspace(workspace.id);
-    this.managedWindowIds.delete(managedTabSet.id);
+    for (const managedTabSet of managedTabSets) this.managedWindowIds.delete(managedTabSet.id);
     this.network.releaseWorkspace(workspace.id);
     for (const [key, session] of this.sessions) {
       if (session.workspaceId !== workspace.id) continue;
@@ -715,6 +732,54 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
   }
 
+  private async listProfiles(context: BrokerToolCallContext): Promise<JsonValue> {
+    const inventoryContext = this.inventoryContext(context);
+    const targets = await this.inventory.list(inventoryContext, 'all');
+    const profiles = this.profileContexts.list(inventoryContext.browserConnectionGeneration);
+    return asJson({
+      workspaceId: inventoryContext.workspaceId,
+      leaseId: inventoryContext.leaseId,
+      profiles: profiles.map(profile => ({
+        profileContextId: profile.id,
+        label: profile.label,
+        ...(profile.displayName ? { displayName: profile.displayName } : {}),
+        tabCount: profile.tabCount,
+        eligibleTabCount: profile.eligibleTabCount,
+        selected: context.workspace?.selectedProfileContextId === profile.id,
+        representativeTabs: targets
+          .filter(target => target.profileContextId === profile.id)
+          .slice(0, 3)
+          .map(target => ({
+            targetId: target.targetId,
+            title: target.title,
+            url: target.url,
+          })),
+      })),
+    });
+  }
+
+  private async selectProfile(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const inventoryContext = this.inventoryContext(context);
+    await this.inventory.refresh(inventoryContext);
+    const profile = this.profileContexts.resolve(
+      args.profileContextId as ProfileContextId,
+      inventoryContext.browserConnectionGeneration,
+    );
+    this.markDispatched(context);
+    this.inventory.clearActive(inventoryContext);
+    this.selectWorkspaceProfile(context, profile.id);
+    return asJson({
+      workspaceId: inventoryContext.workspaceId,
+      leaseId: inventoryContext.leaseId,
+      profileContextId: profile.id,
+      label: profile.label,
+      ...(profile.displayName ? { displayName: profile.displayName } : {}),
+    });
+  }
+
   private async switchTab(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const inventoryContext = this.inventoryContext(context);
     const targetId = args.targetId as ControlledTargetId;
@@ -723,6 +788,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     const resolved = await this.inventory.activate(inventoryContext, targetId);
     const record = this.registry.get(inventoryContext, targetId);
     await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
+    this.selectWorkspaceProfile(context, record.profileContextId);
     return asJson(this.targetResult(context, targetId, record.url));
   }
 
@@ -839,13 +905,26 @@ export class BrowserToolService implements BrowserToolExecutor {
     let targetId = requestedTargetId;
     if (!targetId && !newTarget) targetId = this.inventory.activeTarget(inventoryContext)?.id;
     if (!targetId) {
+      const profile = this.resolveNewTargetProfile(context, args, inventoryContext);
       this.markDispatched(context);
-      targetId = await this.createManagedTarget(context, inventoryContext);
+      targetId = await this.createManagedTarget(context, inventoryContext, profile);
+      this.selectWorkspaceProfile(context, profile.id);
+    } else if (args.profileContextId) {
+      const target = this.registry.get(inventoryContext, targetId);
+      const requestedProfile = this.profileContexts.resolve(
+        args.profileContextId as ProfileContextId,
+        inventoryContext.browserConnectionGeneration,
+      );
+      if (requestedProfile.id !== target.profileContextId) {
+        throw invalidArgument('profileContextId does not match the existing target', 'profileContextId');
+      }
     }
 
     const resolved = await this.inventory.resolveForOperation(inventoryContext, targetId, 'page.navigate');
     this.markDispatched(context);
     this.registry.setActive(inventoryContext, inventoryContext.leaseId, targetId);
+    const activeTarget = this.registry.get(inventoryContext, targetId);
+    this.selectWorkspaceProfile(context, activeTarget.profileContextId);
     const session = await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
     session.activeFrame = undefined;
     await Promise.all(
@@ -1668,25 +1747,56 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async createManagedTarget(
     context: BrokerToolCallContext,
     inventoryContext: TargetInventoryContext,
+    profile: ProfileContextRecord,
   ): Promise<ControlledTargetId> {
-    const { managedTabSet } = this.requireWorkspaceContext(context);
-    const windowId = this.managedWindowIds.get(managedTabSet.id);
-    const created = await this.managedTargets.createTarget({
-      url: 'about:blank',
-      ...(windowId !== undefined ? { windowId } : { newWindow: true }),
-    });
-    if (typeof created?.targetId !== 'string') {
-      throw new BrowserPilotError('internal_error', 'Chrome returned an invalid target ID');
+    if (!context.managedTabSetForProfile) {
+      throw new BrowserPilotError('internal_error', 'Broker cannot bind a ManagedTabSet to a Profile context');
     }
+    const managedTabSet = context.managedTabSetForProfile(profile.id);
+    const windowId = this.managedWindowIds.get(managedTabSet.id);
+    let createdTargetId: string | undefined;
+
+    if (windowId !== undefined) {
+      try {
+        createdTargetId = await this.tryCreateManagedTarget({ url: 'about:blank', windowId }, profile);
+      } catch (error) {
+        this.managedWindowIds.delete(managedTabSet.id);
+        if (!(error instanceof ManagedTargetCreationRejectedError)) throw error;
+      }
+    }
+
+    if (!createdTargetId) {
+      try {
+        createdTargetId = await this.tryCreateManagedTarget({
+          url: 'about:blank',
+          newWindow: true,
+          ...(profile.cdpBrowserContextId
+            ? { browserContextId: profile.cdpBrowserContextId }
+            : {}),
+        }, profile);
+      } catch (error) {
+        // Regular Chrome Profile contexts do not consistently support direct creation.
+        if (!(error instanceof ManagedTargetCreationRejectedError)) throw error;
+      }
+    }
+
+    if (!createdTargetId) {
+      createdTargetId = await this.createManagedProfileWindow(profile);
+    }
+
     try {
-      if (windowId === undefined) {
-        const window = await this.transport.send('Browser.getWindowForTarget', { targetId: created.targetId });
-        if (Number.isSafeInteger(window?.windowId)) this.managedWindowIds.set(managedTabSet.id, window.windowId);
+      if (!this.managedWindowIds.has(managedTabSet.id)) {
+        const window = await this.transport.send('Browser.getWindowForTarget', { targetId: createdTargetId });
+        if (!Number.isSafeInteger(window?.windowId)) {
+          throw new BrowserPilotError('internal_error', 'Chrome returned an invalid managed window ID');
+        }
+        this.managedWindowIds.set(managedTabSet.id, window.windowId);
       }
       const registered = this.inventory.registerManagedTarget({
         ...inventoryContext,
         managedTabSetId: managedTabSet.id,
-        cdpTargetId: created.targetId,
+        profileContextId: profile.id,
+        cdpTargetId: createdTargetId,
         title: '',
         url: 'about:blank',
       });
@@ -1694,8 +1804,238 @@ export class BrowserToolService implements BrowserToolExecutor {
       await this.inventory.activate(inventoryContext, registered.id);
       return registered.id;
     } catch (error) {
-      await this.transport.send('Target.closeTarget', { targetId: created.targetId }).catch(() => {});
+      await this.transport.send('Target.closeTarget', { targetId: createdTargetId }).catch(() => {});
       throw error;
+    }
+  }
+
+  private async tryCreateManagedTarget(
+    params: Parameters<ManagedTargetLifecycle['createTarget']>[0],
+    profile: ProfileContextRecord,
+  ): Promise<string | undefined> {
+    let targetId: string | undefined;
+    try {
+      targetId = (await this.managedTargets.createTarget(params)).targetId;
+      if (await this.targetMatchesProfile(targetId, profile)) return targetId;
+      if (!(await this.closeTargetAndVerify(targetId))) {
+        throw this.managedTargetUnknownOutcome(profile);
+      }
+      return undefined;
+    } catch (error) {
+      if (!targetId) {
+        if (error instanceof BrowserPilotError) throw error;
+        throw error instanceof ManagedTargetCreationRejectedError
+          ? error
+          : new ManagedTargetCreationRejectedError(
+            error instanceof Error ? error.message : String(error),
+          );
+      }
+      if (!(await this.closeTargetAndVerify(targetId))) {
+        throw this.managedTargetUnknownOutcome(profile, error);
+      }
+      if (error instanceof BrowserPilotError && error.code === 'unknown_outcome') throw error;
+      return undefined;
+    }
+  }
+
+  private async closeTargetAndVerify(targetId: string): Promise<boolean> {
+    try {
+      await this.transport.send('Target.closeTarget', { targetId });
+    } catch {
+      // Target inventory below is authoritative for whether cleanup completed.
+    }
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        const current = await this.transport.send('Target.getTargets');
+        if (
+          Array.isArray(current?.targetInfos) &&
+          !current.targetInfos.some((target: any) => target?.targetId === targetId)
+        ) return true;
+      } catch {
+        // Retry the bounded verification before declaring the outcome unknown.
+      }
+      if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return false;
+  }
+
+  private managedTargetUnknownOutcome(
+    profile: ProfileContextRecord,
+    cause?: unknown,
+  ): BrowserPilotError {
+    return new BrowserPilotError(
+      'unknown_outcome',
+      'Managed Profile window creation could not be safely verified',
+      {
+        retryable: true,
+        context: { profileContextId: profile.id },
+        remediation: {
+          code: 'inspect_profile_tabs',
+          message: 'List tabs and Profile contexts before deciding whether to retry target creation.',
+          actionRequired: true,
+        },
+        ...(cause !== undefined ? { cause } : {}),
+      },
+    );
+  }
+
+  private async targetMatchesProfile(
+    targetId: string,
+    profile: ProfileContextRecord,
+  ): Promise<boolean> {
+    let target: any;
+    try {
+      const result = await this.transport.send('Target.getTargetInfo', { targetId });
+      target = result?.targetInfo;
+    } catch {
+      // Older Chromium builds and test transports may not expose this method.
+    }
+    if (!target || target.targetId !== targetId) {
+      const result = await this.transport.send('Target.getTargets');
+      target = Array.isArray(result?.targetInfos)
+        ? result.targetInfos.find((candidate: any) => candidate?.targetId === targetId)
+        : undefined;
+    }
+    if (!target || target.targetId !== targetId || target.type !== 'page') return false;
+    const rawContextId = typeof target.browserContextId === 'string'
+      ? target.browserContextId
+      : undefined;
+    return rawContextId === profile.cdpBrowserContextId;
+  }
+
+  private async createManagedProfileWindow(profile: ProfileContextRecord): Promise<string> {
+    const representative = profile.targets.find(target => target.type === 'page');
+    if (!representative) {
+      throw new BrowserPilotError('profile_context_unavailable', 'Profile has no representative page target', {
+        retryable: true,
+        context: { profileContextId: profile.id },
+        remediation: {
+          code: 'open_profile_tab',
+          message: 'Open a neutral tab in the intended Chrome Profile, then retry.',
+          actionRequired: true,
+        },
+      });
+    }
+
+    const attached = await this.transport.send('Target.attachToTarget', {
+      targetId: representative.cdpTargetId,
+      flatten: true,
+    });
+    if (typeof attached?.sessionId !== 'string') {
+      throw new BrowserPilotError('profile_context_unavailable', 'Chrome could not attach to a Profile representative', {
+        retryable: true,
+        context: { profileContextId: profile.id },
+      });
+    }
+    const sessionId = attached.sessionId;
+    const marker = `about:blank#browser-pilot-${randomUUID()}`;
+    const windowName = `browser-pilot-${randomUUID()}`;
+    let candidateTargetId: string | undefined;
+    let adoptedTargetId: string | undefined;
+    const spawnedTargetIds = new Set<string>();
+    try {
+      await this.transport.send('Page.enable', {}, sessionId);
+      const frameTree = await this.transport.send('Page.getFrameTree', {}, sessionId);
+      const frameId = frameTree?.frameTree?.frame?.id;
+      if (typeof frameId !== 'string') {
+        throw new BrowserPilotError('profile_context_unavailable', 'Profile representative has no attachable top frame', {
+          retryable: true,
+          context: { profileContextId: profile.id },
+        });
+      }
+      const isolated = await this.transport.send('Page.createIsolatedWorld', {
+        frameId,
+        worldName: 'browser-pilot-managed-window',
+        grantUniveralAccess: false,
+      }, sessionId);
+      if (!Number.isSafeInteger(isolated?.executionContextId)) {
+        throw new BrowserPilotError('profile_context_unavailable', 'Chrome could not create an isolated Profile world', {
+          retryable: true,
+          context: { profileContextId: profile.id },
+        });
+      }
+      const before = await this.transport.send('Target.getTargets');
+      const existing = new Set<string>(
+        Array.isArray(before?.targetInfos)
+          ? before.targetInfos
+            .filter((target: unknown) => target && typeof target === 'object' && typeof (target as any).targetId === 'string')
+            .map((target: any) => target.targetId)
+          : [],
+      );
+      const expression = `window.open(${JSON.stringify(marker)}, ${JSON.stringify(windowName)}, ` +
+        `${JSON.stringify('popup=yes,width=1280,height=900')}) !== null`;
+      const opened = await this.transport.send('Runtime.evaluate', {
+        expression,
+        contextId: isolated.executionContextId,
+        userGesture: true,
+        returnByValue: true,
+      }, sessionId);
+      if (opened?.result?.value !== true) {
+        throw new BrowserPilotError('profile_context_unavailable', 'Chrome blocked managed window creation', {
+          retryable: true,
+          context: { profileContextId: profile.id },
+        });
+      }
+
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const current = await this.transport.send('Target.getTargets');
+        const markerTargets = Array.isArray(current?.targetInfos)
+          ? current.targetInfos.filter((target: any) => (
+            target &&
+            typeof target.targetId === 'string' &&
+            !existing.has(target.targetId) &&
+            target.type === 'page' &&
+            target.openerId === representative.cdpTargetId &&
+            target.url === marker
+          ))
+          : [];
+        for (const target of markerTargets) spawnedTargetIds.add(target.targetId);
+        if (markerTargets.length > 1) {
+          throw new BrowserPilotError('profile_context_unavailable', 'Chrome created ambiguous managed window targets', {
+            retryable: true,
+            context: { profileContextId: profile.id },
+          });
+        }
+        if (markerTargets.length === 1) {
+          const candidate = markerTargets[0];
+          const candidateContextId = typeof candidate.browserContextId === 'string'
+            ? candidate.browserContextId
+            : undefined;
+          if (candidateContextId !== profile.cdpBrowserContextId) {
+            throw new BrowserPilotError(
+              'profile_context_unavailable',
+              'Chrome created the managed window in a different Profile context',
+              {
+                retryable: true,
+                context: { profileContextId: profile.id },
+                remediation: {
+                  code: 'relist_profile_contexts',
+                  message: 'List Profile contexts again and retry with a current Profile context.',
+                  actionRequired: true,
+                },
+              },
+            );
+          }
+          candidateTargetId = candidate.targetId;
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      if (!candidateTargetId) {
+        throw this.managedTargetUnknownOutcome(profile);
+      }
+      try {
+        await this.managedTargets.adoptTarget(candidateTargetId);
+        adoptedTargetId = candidateTargetId;
+      } catch (error) {
+        throw error;
+      }
+      return candidateTargetId;
+    } finally {
+      const unadopted = [...spawnedTargetIds].filter(targetId => targetId !== adoptedTargetId);
+      const cleanup = await Promise.all(unadopted.map(targetId => this.closeTargetAndVerify(targetId)));
+      await this.transport.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      if (cleanup.some(closed => !closed)) throw this.managedTargetUnknownOutcome(profile);
     }
   }
 
@@ -2345,12 +2685,80 @@ export class BrowserToolService implements BrowserToolExecutor {
     targetId: ControlledTargetId,
     url: string,
   ): Record<string, JsonValue> {
+    const target = this.registry.get({
+      principalId: context.principal.id,
+      workspaceId: context.workspace!.id,
+    }, targetId);
     return {
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
       targetId,
+      profileContextId: target.profileContextId,
       url,
     };
+  }
+
+  private resolveNewTargetProfile(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+    inventoryContext: TargetInventoryContext,
+  ): ProfileContextRecord {
+    const explicit = args.profileContextId as ProfileContextId | undefined;
+    if (explicit) {
+      return this.profileContexts.resolve(explicit, inventoryContext.browserConnectionGeneration);
+    }
+    const active = this.inventory.activeTarget(inventoryContext);
+    if (active) {
+      return this.profileContexts.resolve(
+        active.profileContextId,
+        inventoryContext.browserConnectionGeneration,
+      );
+    }
+    if (context.workspace?.selectedProfileContextId) {
+      return this.profileContexts.resolve(
+        context.workspace.selectedProfileContextId,
+        inventoryContext.browserConnectionGeneration,
+      );
+    }
+    const profiles = this.profileContexts.list(inventoryContext.browserConnectionGeneration);
+    if (profiles.length === 1) return profiles[0];
+    if (profiles.length === 0) {
+      throw new BrowserPilotError('profile_context_unavailable', 'Chrome exposes no live Profile context', {
+        retryable: true,
+        context: { workspaceId: inventoryContext.workspaceId },
+        remediation: {
+          code: 'open_profile_window',
+          message: 'Open a Chrome window in the intended Profile, then list Profile contexts again.',
+          actionRequired: true,
+        },
+      });
+    }
+    throw new BrowserPilotError('profile_selection_required', 'Select a Chrome Profile before opening a new target', {
+      context: {
+        workspaceId: inventoryContext.workspaceId,
+        profiles: profiles.map(profile => ({
+          profileContextId: profile.id,
+          label: profile.label,
+          tabCount: profile.tabCount,
+          eligibleTabCount: profile.eligibleTabCount,
+        })),
+      },
+      remediation: {
+        code: 'select_profile_context',
+        message: 'List Profile contexts, ask the user which one to use, and select that context.',
+        actionRequired: true,
+      },
+    });
+  }
+
+  private selectWorkspaceProfile(
+    context: BrokerToolCallContext,
+    profileContextId: ProfileContextId,
+  ): void {
+    if (!context.selectProfileContext) {
+      throw new BrowserPilotError('internal_error', 'Broker cannot update Workspace Profile selection');
+    }
+    context.selectProfileContext(profileContextId);
   }
 
   private requireWorkspaceContext(context: BrokerToolCallContext): {

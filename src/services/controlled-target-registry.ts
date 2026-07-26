@@ -9,6 +9,7 @@ import type {
   ControlledTargetOrigin,
   ControlLeaseId,
   ManagedTabSetId,
+  ProfileContextId,
 } from '../protocol/model.js';
 import type {
   UserBrowserTarget,
@@ -32,6 +33,7 @@ export interface ManagedTargetRegistration extends WorkspaceCallerContext {
   browserInstanceId: BrowserInstanceId;
   browserConnectionGeneration: number;
   managedTabSetId: ManagedTabSetId;
+  profileContextId: ProfileContextId;
   cdpTargetId: string;
   openerCdpTargetId?: string;
   origin: 'managed' | 'managed_popup';
@@ -41,6 +43,7 @@ export interface ManagedTargetRegistration extends WorkspaceCallerContext {
 
 export interface LiveTargetMetadata {
   cdpTargetId: string;
+  profileContextId: ProfileContextId;
   title: string;
   url: string;
   openerCdpTargetId?: string;
@@ -57,6 +60,7 @@ export type TargetControlState = 'available' | 'controlled' | 'busy';
 
 export interface ControlledTargetView {
   targetId: ControlledTargetId;
+  profileContextId: ProfileContextId;
   title: string;
   url: string;
   active: boolean;
@@ -122,6 +126,7 @@ export class MemoryControlledTargetRegistry {
       }
       existing.title = input.title;
       existing.url = input.url;
+      existing.profileContextId = input.profileContextId;
       existing.openerCdpTargetId = input.openerCdpTargetId;
       return cloneRecord(existing);
     }
@@ -133,6 +138,7 @@ export class MemoryControlledTargetRegistry {
       browserInstanceId: input.browserInstanceId,
       browserConnectionGeneration: input.browserConnectionGeneration,
       cdpTargetId: input.cdpTargetId,
+      profileContextId: input.profileContextId,
       ...(input.openerCdpTargetId ? { openerCdpTargetId: input.openerCdpTargetId } : {}),
       origin: input.origin,
       managedTabSetId: input.managedTabSetId,
@@ -190,6 +196,7 @@ export class MemoryControlledTargetRegistry {
         if (existing.origin !== 'user_tab') continue;
         existing.title = target.title;
         existing.url = target.url;
+        existing.profileContextId = target.profileContextId;
         targets.push(cloneRecord(existing));
         continue;
       }
@@ -201,6 +208,7 @@ export class MemoryControlledTargetRegistry {
         browserInstanceId: target.browserInstanceId,
         browserConnectionGeneration: context.browserConnectionGeneration,
         cdpTargetId: target.cdpTargetId,
+        profileContextId: target.profileContextId,
         origin: 'user_tab',
         title: target.title,
         url: target.url,
@@ -236,6 +244,13 @@ export class MemoryControlledTargetRegistry {
       record.title = live.title;
       record.url = live.url;
       record.openerCdpTargetId = live.openerCdpTargetId;
+      if (
+        record.profileContextId &&
+        live.profileContextId &&
+        record.profileContextId !== live.profileContextId
+      ) {
+        invalidated.push(this.invalidate(record, 'target_ineligible'));
+      }
     }
     return invalidated;
   }
@@ -259,6 +274,7 @@ export class MemoryControlledTargetRegistry {
 
     return records.map(record => ({
       targetId: record.id,
+      profileContextId: record.profileContextId,
       title: record.title,
       url: record.url,
       active: record.id === activeTargetId,
@@ -367,6 +383,14 @@ export class MemoryControlledTargetRegistry {
     }
     this.assertCallerOwns(context, record);
     return cloneRecord(record);
+  }
+
+  clearActive(context: WorkspaceCallerContext, leaseId: ControlLeaseId): void {
+    const targetId = this.activeByLease.get(leaseId);
+    if (!targetId) return;
+    const record = this.records.get(targetId);
+    if (record?.state === 'active') this.assertCallerOwns(context, record);
+    this.activeByLease.delete(leaseId);
   }
 
   releaseWorkspace(context: WorkspaceCallerContext): ControlledTargetInvalidation[] {

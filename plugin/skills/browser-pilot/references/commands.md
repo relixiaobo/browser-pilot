@@ -8,9 +8,22 @@ browser directly. Machine-oriented output is JSON when stdout is not a TTY;
 
 ### `bp connect [--browser <name>]`
 
-Connect to an authorized local Chromium browser and create the managed Pilot
-window. Supported compatibility names are `chrome`, `chromium`, `edge`, and
-`brave`. Chrome may ask the user to click Allow.
+Connect to an authorized local Chromium browser. Supported compatibility names
+are `chrome`, `chromium`, `edge`, and `brave`. Chrome may ask the user to click
+Allow. With one live Profile, Browser Pilot also creates the managed Pilot
+window. With several Profiles, it lists them and waits for explicit routing;
+do not run `connect` again.
+
+### `bp profiles`
+
+Passively list live Chrome Profile contexts, tab counts, bounded representative
+tabs, and the current Workspace selection. IDs last only for the current
+browser connection.
+
+### `bp profile <index|id|label|verified-name>`
+
+Select one freshly listed Profile for subsequent managed tabs. Selection is
+routing, not a permission grant, and does not focus or close a user tab.
 
 ### `bp disconnect`
 
@@ -24,18 +37,20 @@ Pilot.
 
 List all controllable page tabs in the connected browser. Results include
 Browser Pilot managed tabs, their eligible popups, and eligible user-opened
-tabs. Each JSON tab has `index`, `url`, `title`, `active`, and `origin`.
+tabs across all live Profiles. Each JSON tab has `index`, `url`, `title`,
+`active`, `origin`, and an opaque `profileContextId`.
 
 ### `bp tab <index>`
 
 Select any tab returned by the latest `bp tabs`. Tab indexes are inventory
 positions and may change; list again after tabs open or close.
 
-### `bp open <url> [--new] [--limit <n>]`
+### `bp open <url> [--new] [--profile <selector>] [--limit <n>]`
 
 Navigate the current tab and return a snapshot. `--new` creates a new managed
 tab instead of replacing the selected tab. A URL without a scheme defaults to
-HTTPS.
+HTTPS. `--profile` requires `--new` and resolves a fresh Profile index, opaque
+ID, neutral label, or verified display name.
 
 ### `bp close [--all]`
 
