@@ -22,12 +22,16 @@ For complete envelopes and schemas, use the installed package's
 3. Create a Workspace and retain its initial event cursor.
 4. Create a Lease, heartbeat it before expiry, and use that Lease for tool and
    Artifact operations.
-5. Call `tools/list`; register only returned tools and preserve every schema,
+5. If the selected browser is not already ready, call `browser.connect` once.
+   Bridge launch, `initialize`, discovery, and Workspace creation are passive and
+   never request Chrome authorization. Concurrent calls share one in-flight
+   request; do not poll by repeatedly calling connect.
+6. Call `tools/list`; register only returned tools and preserve every schema,
    including `x-browser-pilot-sensitivity` annotations.
-6. List tabs before adopting current browser context. Inventory contains
+7. List tabs before adopting current browser context. Inventory contains
    managed tabs and eligible user tabs; one physical target is controlled by at
    most one Lease.
-7. On shutdown, release the Lease and Workspace, then send `shutdown`. EOF also
+8. On shutdown, release the Lease and Workspace, then send `shutdown`. EOF also
    releases Connection-owned Leases, but explicit cleanup is preferable.
 
 Maintain Workspace, Lease, target, frame, Observation, Command, Artifact, and
@@ -100,7 +104,7 @@ the structured hint and current browser state.
 | `stale_ref` | Create a fresh Observation and choose a new ref. Never fall back to another target. |
 | `action_not_verified` | Inspect fresh tab/frame/Observation state. Retry only after correcting the stated condition. |
 | `unknown_outcome` | Query `commands/get`, inspect current browser state, and never automatically replay the mutation. |
-| `browser_disconnected` | Wait for `connection.restored`, relist tabs, reselect target/frame, and re-observe. Old target/frame/ref IDs are invalid. |
+| `browser_disconnected` | Pause browser work, explicitly call `browser.connect` when reconnection is appropriate, then relist tabs and re-observe after `connection.restored`. Old target/frame/ref IDs are invalid. |
 | `target_busy` | Another Lease controls the physical target. Choose another tab or wait for `target_control.released`; do not steal control. |
 | `target_not_owned` | Rebuild inventory in the owning Workspace; do not substitute a raw target ID. |
 | `lease_expired` | Create a new Lease, reacquire target control, and rebuild transient state. |
@@ -133,8 +137,9 @@ React to these state transitions:
 - `watchdog.navigation_stalled`: the navigation outcome is unknown; inspect the
   tab before deciding whether to navigate again.
 - `watchdog.no_progress`: stop repeating the same action and change strategy.
-- `connection.lost`: pause browser mutations. After `connection.restored`,
-  rebuild all target/frame/Observation mappings.
+- `connection.lost`: pause browser mutations. Browser Pilot does not retry on a
+  timer; explicitly call `browser.connect` when appropriate. After
+  `connection.restored`, rebuild all target/frame/Observation mappings.
 - `download`: wait for a terminal state and use only the completed Artifact.
 
 Process events in sequence order and advance the cursor only after downstream

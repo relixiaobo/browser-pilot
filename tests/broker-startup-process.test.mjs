@@ -117,12 +117,14 @@ async function startGatedCdpFixture() {
   const upgrades = [];
   let released = false;
   let connectionCount = 0;
+  let upgradeCount = 0;
   const accept = ({ request, socket, head }) => {
     websocket.handleUpgrade(request, socket, head, client => {
       websocket.emit('connection', client, request);
     });
   };
   server.on('upgrade', (request, socket, head) => {
+    upgradeCount += 1;
     const upgrade = { request, socket, head };
     socket.once('close', () => {
       const index = upgrades.indexOf(upgrade);
@@ -135,7 +137,10 @@ async function startGatedCdpFixture() {
     connectionCount += 1;
     socket.on('message', bytes => {
       const message = JSON.parse(bytes.toString());
-      socket.send(JSON.stringify({ id: message.id, result: {} }));
+      socket.send(JSON.stringify({
+        id: message.id,
+        result: message.method === 'Target.getTargets' ? { targetInfos: [] } : {},
+      }));
     });
   });
   await new Promise((resolve, reject) => {
@@ -145,7 +150,11 @@ async function startGatedCdpFixture() {
   return {
     wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/gated`,
     get connectionCount() { return connectionCount; },
+    get upgradeCount() { return upgradeCount; },
     get pendingUpgradeCount() { return upgrades.length; },
+    disconnectClients() {
+      for (const socket of websocket.clients) socket.terminate();
+    },
     release() {
       if (released) return;
       released = true;
@@ -158,6 +167,16 @@ async function startGatedCdpFixture() {
       await new Promise(resolve => server.close(resolve));
     },
   };
+}
+
+async function waitForValue(read, predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (predicate(value)) return value;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error('Timed out waiting for expected value');
 }
 
 function startLiveBridge(root, instanceId) {
@@ -237,6 +256,116 @@ test('simultaneous bridge processes start and reuse exactly one per-user Broker'
     recovered.messages[0].result.brokerProcessIdentity,
     locator.brokerProcessIdentity,
   );
+});
+
+test('passive Broker startup and concurrent explicit connects create exactly one authorization request', async t => {
+  const root = await mkdtemp('/tmp/bp-explicit-authorization-');
+  const stateDir = join(root, '.browser-pilot');
+  const socketPath = join(stateDir, 'daemon.sock');
+  const profile = join(root, 'Library', 'Application Support', 'Google', 'Chrome');
+  await mkdir(profile, { recursive: true });
+  await symlink('host-explicit', join(profile, 'SingletonLock'));
+  const cdp = await startGatedCdpFixture();
+  const port = new URL(cdp.wsUrl).port;
+  await writeFile(join(profile, 'DevToolsActivePort'), `${port}\n/devtools/browser/gated\n`);
+  t.after(async () => {
+    await stopDaemon(socketPath).catch(() => {});
+    await cdp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const started = await runBridge(root, 'authorization:passive');
+  assert.equal(started.code, 0, started.stderr);
+  assert.equal(cdp.upgradeCount, 0, 'bridge initialization must not request browser authorization');
+  assert.equal(cdp.pendingUpgradeCount, 0);
+
+  const initialize = async bridgeSessionId => {
+    const initialized = await daemonRequest(socketPath, '/broker/rpc', {
+      bridgeSessionId,
+      method: 'initialize',
+      params: {
+        client: {
+          id: 'com.example.authorization-test',
+          name: 'Authorization Test',
+          version: '1.0.0',
+          instanceId: bridgeSessionId,
+        },
+        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
+        requestedCapabilities: ['browser.control', 'workspace.manage'],
+        launchMode: 'one-shot',
+      },
+    });
+    const browserId = initialized.result.browsers[0].id;
+    const created = await daemonRequest(socketPath, '/broker/rpc', {
+      bridgeSessionId,
+      method: 'workspaces/create',
+      params: { browserId },
+    });
+    const leased = await daemonRequest(socketPath, '/broker/rpc', {
+      bridgeSessionId,
+      method: 'leases/create',
+      params: { workspaceId: created.result.workspace.id },
+    });
+    return {
+      bridgeSessionId,
+      browserId,
+      workspaceId: created.result.workspace.id,
+      leaseId: leased.result.lease.id,
+    };
+  };
+  const [first, second] = await Promise.all([
+    initialize('bridge:authorization-first'),
+    initialize('bridge:authorization-second'),
+  ]);
+  assert.equal(cdp.upgradeCount, 0, 'discovery and Workspace creation must remain passive');
+
+  const connect = (client, commandId) => daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: client.bridgeSessionId,
+    method: 'tools/call',
+    params: {
+      name: 'browser.connect',
+      arguments: { browserId: client.browserId },
+      workspaceId: client.workspaceId,
+      leaseId: client.leaseId,
+      commandId,
+    },
+  });
+  const firstConnect = connect(first, 'command:authorization-first');
+  await waitForValue(() => cdp.pendingUpgradeCount, value => value === 1);
+  const secondConnect = connect(second, 'command:authorization-second');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(cdp.upgradeCount, 1, 'concurrent clients must share the pending authorization request');
+  assert.equal(cdp.pendingUpgradeCount, 1);
+
+  cdp.release();
+  const connected = await Promise.all([firstConnect, secondConnect]);
+  assert.deepEqual(connected.map(response => response.result.result.state), ['connected', 'connected']);
+  assert.equal(cdp.upgradeCount, 1);
+
+  const tabs = await daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: first.bridgeSessionId,
+    method: 'tools/call',
+    params: {
+      name: 'browser.tabs.list',
+      arguments: {},
+      workspaceId: first.workspaceId,
+      leaseId: first.leaseId,
+      commandId: 'command:authorization-tabs',
+    },
+  });
+  assert.equal(tabs.error, undefined, JSON.stringify(tabs.error));
+  assert.equal(tabs.result.result.targets.length, 0);
+  assert.equal(cdp.upgradeCount, 1, 'normal browser commands must reuse the browser connection');
+
+  cdp.disconnectClients();
+  await waitForValue(
+    () => daemonRequest(socketPath, '/health'),
+    health => health.browser?.state === 'disconnected',
+  );
+  // Cross the daemon's two-second passive discovery refresh interval. This
+  // specifically guards against reintroducing timer-driven WebSocket probes.
+  await new Promise(resolve => setTimeout(resolve, 2_250));
+  assert.equal(cdp.upgradeCount, 1, 'a dropped browser connection must not start an authorization loop');
 });
 
 test('clients reuse a Broker that is still waiting for browser authorization', async t => {

@@ -778,32 +778,15 @@ export class MemoryBrokerRuntime {
       ? this.browserBindings.find(candidate => candidate.candidate.id === params.browserId)
       : this.browserBindings.find(candidate => (
         candidate.candidate.state === 'ready' && candidate.instance.state === 'connected'
-      ));
-    if (
-      !binding ||
-      binding.candidate.state !== 'ready' ||
-      binding.instance.state !== 'connected'
-    ) {
-      const fallbackRemediation = !binding
-        ? {
+      )) ?? this.browserBindings[0];
+    if (!binding) {
+      throw new BrowserPilotError('browser_not_found', 'No supported browser is registered', {
+        context: params.browserId ? { browserId: params.browserId } : undefined,
+        remediation: {
           code: 'install_or_select_supported_browser',
           message: 'Install or select a supported browser returned by browser discovery.',
           actionRequired: true,
-        }
-        : binding.candidate.state === 'ready'
-          ? {
-            code: 'retry_browser_connection',
-            message: 'The browser endpoint is ready but the Broker connection is still being established.',
-            actionRequired: false,
-          }
-          : {
-            code: 'enable_remote_debugging',
-            message: 'Start a supported browser and enable remote debugging.',
-            actionRequired: true,
-          };
-      throw new BrowserPilotError('browser_not_found', 'Selected browser is not ready', {
-        context: params.browserId ? { browserId: params.browserId } : undefined,
-        remediation: binding?.candidate.remediation ?? fallbackRemediation,
+        },
       });
     }
     const activeCount = [...this.workspaces.values()].filter(record => (
@@ -1119,6 +1102,7 @@ export class MemoryBrokerRuntime {
   private async callTool(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
     const params = validateToolCallParams(value);
     const definition = getToolDefinition(params.name);
+    const isBrowserConnectTool = definition.name === 'browser.connect';
     const executor = this.options.toolExecutor;
     if (!executor || !executor.supportedTools.includes(definition.name)) {
       throw invalidArgument(`Tool is not available in this Broker: ${definition.name}`, 'name');
@@ -1155,12 +1139,13 @@ export class MemoryBrokerRuntime {
       : this.browserBindings.find(candidate => (
         candidate.candidate.state === 'ready' && candidate.instance.state === 'connected'
       ));
-    if (!binding || binding.instance.state !== 'connected') {
+    if (!binding || (!isBrowserConnectTool && binding.instance.state !== 'connected')) {
       throw new BrowserPilotError('browser_disconnected', 'Workspace browser is disconnected', {
         retryable: true,
         context: workspaceRecord ? { workspaceId: workspaceRecord.value.id } : undefined,
       });
     }
+    const isBrowserConnectionAttempt = isBrowserConnectTool && binding.instance.state !== 'connected';
 
     const context: Omit<BrokerToolCallContext, 'signal' | 'markDispatched'> = {
       principal: { ...principal, capabilities: [...principal.capabilities] },
@@ -1204,7 +1189,9 @@ export class MemoryBrokerRuntime {
       ...(params.commandId ? { commandId: params.commandId } : {}),
       ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
       ...(params.deadlineMs !== undefined ? { deadlineMs: params.deadlineMs } : {}),
-      browserConnectionGeneration: context.browser.instance.connectionGeneration,
+      ...(context.browser.instance.connectionGeneration > 0
+        ? { browserConnectionGeneration: context.browser.instance.connectionGeneration }
+        : {}),
       method: definition.name,
       mutating: definition.mutating,
       cancellation: definition.cancellation,
@@ -1215,6 +1202,14 @@ export class MemoryBrokerRuntime {
         const current = this.browserBindings.find(candidate => (
           candidate.instance.id === context.browser.instance.id
         ));
+        if (isBrowserConnectionAttempt) {
+          if (!current) {
+            throw new BrowserPilotError('browser_disconnected', 'Browser instance disappeared during connection', {
+              retryable: true,
+            });
+          }
+          return;
+        }
         if (
           !current ||
           current.instance.state !== 'connected' ||
@@ -1244,7 +1239,18 @@ export class MemoryBrokerRuntime {
         definition,
         args,
       );
-      assertCurrentBrowserGeneration();
+      if (isBrowserConnectionAttempt) {
+        const current = this.browserBindings.find(candidate => (
+          candidate.instance.id === context.browser.instance.id
+        ));
+        if (!current || current.instance.state !== 'connected') {
+          throw new BrowserPilotError('browser_disconnected', 'Browser connection did not become ready', {
+            retryable: true,
+          });
+        }
+      } else {
+        assertCurrentBrowserGeneration();
+      }
       return validateToolResult(definition.name, result);
     }));
   }

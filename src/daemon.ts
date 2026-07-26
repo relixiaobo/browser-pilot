@@ -263,9 +263,19 @@ async function main() {
     maxArtifactBytes: DEFAULT_PROTOCOL_LIMITS.maxArtifactBytes,
   });
   await artifactStore.initialize();
+  const selectedController = {
+    discovered: selectedBrowser,
+    binding: browserBinding,
+    cdp,
+    lastAttemptedWsUrl: undefined as string | undefined,
+    connect: async (): Promise<void> => {
+      throw new BrowserPilotError('browser_disconnected', 'Browser connection coordinator is not ready');
+    },
+  };
   const browserTools = new BrowserToolService(cdp, browserBinding, {
     artifactStore,
     managedTargets: cdp,
+    connectBrowser: () => selectedController.connect(),
   });
   const compatibilityDialogs = new CompatibilityDialogService(
     cdp,
@@ -277,6 +287,8 @@ async function main() {
     discovered: DiscoveredBrowser;
     binding: BrokerBrowserBinding;
     cdp: ManagedTargetJanitorClient;
+    lastAttemptedWsUrl: string | undefined;
+    connect: () => Promise<void>;
   }> = [];
   const browserBindings: BrokerBrowserBinding[] = selectedBrowser ? [browserBinding] : [];
   for (const discovered of discoveredBrowsers) {
@@ -299,41 +311,22 @@ async function main() {
         `Managed browser connection (${discovered.candidate.product}): ${message}\n`,
       ),
     });
-    const service = new BrowserToolService(additionalCdp, binding, {
-      artifactStore,
-      managedTargets: additionalCdp,
-    });
-    toolRouter.register(instanceId, service);
-    additionalControllers.push({
+    const controller = {
       discovered,
       binding,
       cdp: additionalCdp,
+      lastAttemptedWsUrl: undefined as string | undefined,
+      connect: async (): Promise<void> => {
+        throw new BrowserPilotError('browser_disconnected', 'Browser connection coordinator is not ready');
+      },
+    };
+    const service = new BrowserToolService(additionalCdp, binding, {
+      artifactStore,
+      managedTargets: additionalCdp,
+      connectBrowser: () => controller.connect(),
     });
-    if (discovered.candidate.state === 'ready' && discovered.endpoint) {
-      try {
-        await additionalCdp.connect(discovered.endpoint.wsUrl);
-        await additionalCdp.send('Target.setDiscoverTargets', { discover: true });
-        binding.instance = {
-          ...binding.instance,
-          processIdentity: discovered.endpoint.wsUrl,
-          connectionGeneration: 1,
-          state: 'connected',
-        };
-      } catch {
-        await additionalCdp.browserDisconnected().catch(() => {});
-        binding.candidate = {
-          ...binding.candidate,
-          state: 'disconnected',
-          remoteDebuggingState: 'stale',
-          authorizationState: 'unknown',
-          remediation: {
-            code: 'reconnect_browser',
-            message: 'The browser endpoint changed while Browser Pilot was connecting. Retry discovery.',
-            actionRequired: false,
-          },
-        };
-      }
-    }
+    toolRouter.register(instanceId, service);
+    additionalControllers.push(controller);
   }
   const broker = new MemoryBrokerRuntime({
     serviceVersion: PKG_VERSION,
@@ -343,7 +336,8 @@ async function main() {
     toolExecutor: toolRouter,
     artifactStore,
   });
-  let reconnectTask: Promise<void> | undefined;
+  const controllers = [selectedController, ...additionalControllers];
+  const connectionAttempts = new Map<BrowserInstanceId, Promise<void>>();
   const resetDisconnectedState = (): void => {
     activeSessionId = undefined;
     networkEnabledSessions.clear();
@@ -354,139 +348,105 @@ async function main() {
     discoveredTargets.length = 0;
     compatibilityDialogs.clear();
   };
-  const wait = (ms: number): Promise<void> => new Promise(resolve => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref();
-  });
-  const reconnectBrowser = async (): Promise<void> => {
-    let retryDelayMs = 250;
-    while (!terminating) {
-      const chrome = discoverChromeAtDataDir(selectedProfile, selectedProduct);
+  const explicitlyConnect = (controller: typeof selectedController): Promise<void> => {
+    if (controller.binding.instance.state === 'connected') return Promise.resolve();
+    const existing = connectionAttempts.get(controller.binding.instance.id);
+    if (existing) return existing;
+
+    const attempt = (async (): Promise<void> => {
+      const chrome = discoverChromeAtDataDir(
+        controller.binding.instance.profilePath,
+        controller.binding.instance.product,
+      );
       if (!chrome) {
-        await wait(retryDelayMs);
-        retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
-        continue;
+        const latest = (await discoverBrowserCandidates()).find(browser => (
+          browser.candidate.id === controller.binding.candidate.id
+        ));
+        if (latest) {
+          controller.binding.candidate = { ...latest.candidate };
+          broker.updateBrowserCandidate(controller.binding.instance.id, latest.candidate);
+        }
+        throw new BrowserPilotError('browser_disconnected', 'Browser remote debugging endpoint is unavailable', {
+          retryable: true,
+          remediation: latest?.candidate.remediation ?? {
+            code: 'enable_remote_debugging',
+            message: 'Start the selected browser and enable remote debugging, then connect explicitly.',
+            actionRequired: true,
+          },
+        });
       }
+
+      controller.lastAttemptedWsUrl = chrome.wsUrl;
       try {
-        await cdp.connect(chrome.wsUrl);
-        await cdp.send('Target.setDiscoverTargets', { discover: true });
-        currentWsUrl = chrome.wsUrl;
-        broker.updateBrowserConnection(browserInstanceId, {
+        await controller.cdp.connect(chrome.wsUrl);
+        await controller.cdp.send('Target.setDiscoverTargets', { discover: true });
+        if (controller === selectedController) currentWsUrl = chrome.wsUrl;
+        broker.updateBrowserConnection(controller.binding.instance.id, {
           state: 'connected',
-          connectionGeneration: browserBinding.instance.connectionGeneration + 1,
+          connectionGeneration: controller.binding.instance.connectionGeneration + 1,
           processIdentity: chrome.wsUrl,
         });
-        return;
-      } catch {
-        await cdp.browserDisconnected().catch(() => {});
-        await wait(retryDelayMs);
-        retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
-      }
-    }
-  };
-  cdp.onConnectionState(event => {
-    if (event.state !== 'disconnected' || terminating) return;
-    void cdp.browserDisconnected().catch(error => {
-      process.stderr.write(`Managed browser connection reset error: ${error instanceof Error ? error.message : String(error)}\n`);
-    });
-    resetDisconnectedState();
-    if (browserBinding.instance.state === 'connected') {
-      try {
-        broker.updateBrowserConnection(browserInstanceId, {
-          state: 'disconnected',
-          connectionGeneration: browserBinding.instance.connectionGeneration,
-        });
       } catch (error) {
-        process.stderr.write(`Browser disconnect state error: ${error instanceof Error ? error.message : String(error)}\n`);
-      }
-    }
-    if (!reconnectTask) {
-      reconnectTask = reconnectBrowser()
-        .catch(error => {
-          process.stderr.write(`Browser reconnect error: ${error instanceof Error ? error.message : String(error)}\n`);
-        })
-        .finally(() => { reconnectTask = undefined; });
-      void reconnectTask;
-    }
-  });
-  if (selectedBrowser && browserBinding.instance.state !== 'connected') {
-    reconnectTask = reconnectBrowser()
-      .catch(error => {
-        process.stderr.write(`Browser reconnect error: ${error instanceof Error ? error.message : String(error)}\n`);
-      })
-      .finally(() => { reconnectTask = undefined; });
-    void reconnectTask;
-  }
-  for (const controller of additionalControllers) {
-    let additionalReconnectTask: Promise<void> | undefined;
-    const reconnectAdditional = async (): Promise<void> => {
-      let retryDelayMs = 250;
-      while (!terminating) {
-        const chrome = discoverChromeAtDataDir(
-          controller.discovered.dataDir,
-          controller.discovered.candidate.product,
+        await controller.cdp.browserDisconnected().catch(() => {});
+        const candidate = {
+          ...controller.binding.candidate,
+          processState: 'running' as const,
+          remoteDebuggingState: 'enabled' as const,
+          authorizationState: 'required' as const,
+          state: 'authorization_required' as const,
+          remediation: {
+            code: 'allow_remote_debugging',
+            message: 'Approve the existing Chrome remote debugging prompt, then retry the explicit connect operation.',
+            actionRequired: true,
+          },
+        };
+        controller.binding.candidate = candidate;
+        broker.updateBrowserCandidate(controller.binding.instance.id, candidate);
+        throw new BrowserPilotError(
+          'browser_not_authorized',
+          'Chrome remote debugging authorization was not completed',
+          {
+            retryable: true,
+            cause: error instanceof Error ? error : undefined,
+            remediation: candidate.remediation,
+          },
         );
-        if (!chrome) {
-          await wait(retryDelayMs);
-          retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
-          continue;
-        }
-        try {
-          await controller.cdp.connect(chrome.wsUrl);
-          await controller.cdp.send('Target.setDiscoverTargets', { discover: true });
-          broker.updateBrowserConnection(controller.binding.instance.id, {
-            state: 'connected',
-            connectionGeneration: controller.binding.instance.connectionGeneration + 1,
-            processIdentity: chrome.wsUrl,
-          });
-          return;
-        } catch {
-          await controller.cdp.browserDisconnected().catch(() => {});
-          await wait(retryDelayMs);
-          retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
-        }
       }
-    };
+    })();
+    connectionAttempts.set(controller.binding.instance.id, attempt);
+    void attempt.finally(() => {
+      if (connectionAttempts.get(controller.binding.instance.id) === attempt) {
+        connectionAttempts.delete(controller.binding.instance.id);
+      }
+    }).catch(() => {});
+    return attempt;
+  };
+
+  for (const controller of controllers) {
+    controller.connect = () => explicitlyConnect(controller);
     controller.cdp.onConnectionState(event => {
       if (event.state !== 'disconnected' || terminating) return;
       void controller.cdp.browserDisconnected().catch(error => {
         process.stderr.write(
-          `Managed browser connection reset (${controller.discovered.candidate.product}): ${error instanceof Error ? error.message : String(error)}\n`,
+          `Managed browser connection reset (${controller.binding.instance.product}): ${error instanceof Error ? error.message : String(error)}\n`,
         );
       });
-      if (controller.binding.instance.state === 'connected') {
-        try {
-          broker.updateBrowserConnection(controller.binding.instance.id, {
-            state: 'disconnected',
-            connectionGeneration: controller.binding.instance.connectionGeneration,
-          });
-        } catch (error) {
-          process.stderr.write(
-            `Browser disconnect state error (${controller.discovered.candidate.product}): ${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        }
+      if (controller === selectedController) {
+        currentWsUrl = undefined;
+        resetDisconnectedState();
       }
-      if (!additionalReconnectTask) {
-        additionalReconnectTask = reconnectAdditional()
-          .catch(error => {
-            process.stderr.write(
-              `Browser reconnect error (${controller.discovered.candidate.product}): ${error instanceof Error ? error.message : String(error)}\n`,
-            );
-          })
-          .finally(() => { additionalReconnectTask = undefined; });
-        void additionalReconnectTask;
+      if (controller.binding.instance.state !== 'connected') return;
+      try {
+        broker.updateBrowserConnection(controller.binding.instance.id, {
+          state: 'disconnected',
+          connectionGeneration: controller.binding.instance.connectionGeneration,
+        });
+      } catch (error) {
+        process.stderr.write(
+          `Browser disconnect state error (${controller.binding.instance.product}): ${error instanceof Error ? error.message : String(error)}\n`,
+        );
       }
     });
-    if (controller.binding.instance.state !== 'connected') {
-      additionalReconnectTask = reconnectAdditional()
-        .catch(error => {
-          process.stderr.write(
-            `Browser reconnect error (${controller.discovered.candidate.product}): ${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        })
-        .finally(() => { additionalReconnectTask = undefined; });
-      void additionalReconnectTask;
-    }
   }
   const leaseSweepTimer = setInterval(() => {
     broker.sweepExpiredLeases();
@@ -503,6 +463,14 @@ async function main() {
           if (binding.instance.state === 'connected') continue;
           const discovered = latest.find(browser => browser.candidate.id === binding.candidate.id);
           if (!discovered) continue;
+          const controller = controllers.find(current => current.binding.instance.id === binding.instance.id);
+          if (
+            binding.candidate.state === 'authorization_required' &&
+            controller?.lastAttemptedWsUrl === discovered.endpoint?.wsUrl
+          ) continue;
+          if (controller && controller.lastAttemptedWsUrl !== discovered.endpoint?.wsUrl) {
+            controller.lastAttemptedWsUrl = undefined;
+          }
           binding.candidate = { ...discovered.candidate };
           broker.updateBrowserCandidate(binding.instance.id, discovered.candidate);
         }

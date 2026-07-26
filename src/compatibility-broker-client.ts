@@ -119,6 +119,16 @@ export class CompatibilityBrokerClient {
     }), name);
   }
 
+  async connectBrowser(browserId?: string): Promise<void> {
+    const selected = browserId
+      ? this.initialized.browsers.find(candidate => candidate.id === browserId)
+      : this.initialized.browsers.find(candidate => candidate.state === 'ready') ?? this.initialized.browsers[0];
+    if (!selected) {
+      throw new BrowserPilotError('browser_not_found', 'No supported browser is available');
+    }
+    await this.callTool('browser.connect', { browserId: selected.id });
+  }
+
   async listTabs(scope: 'all' | 'managed_only' | 'user_tabs' = 'all'): Promise<CompatibilityTarget[]> {
     const result = await this.callTool('browser.tabs.list', { scope });
     if (!Array.isArray(result.targets)) {
@@ -254,7 +264,8 @@ export async function withCompatibilityTarget<T>(
   executableVersion: string,
   operation: (client: CompatibilityBrokerClient, target: CompatibilityTarget) => Promise<T>,
 ): Promise<T> {
-  const client = await connectCompatibility(executableVersion);
+  const client = await resumeCompatibility(executableVersion);
+  if (!client) throw new Error('Not connected');
   const target = await client.ensureTarget();
   return operation(client, target);
 }

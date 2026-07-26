@@ -120,7 +120,7 @@ test('daemon rediscovers the selected profile and publishes one restored generat
         instanceId: 'instance:daemon-test',
       },
       protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
-      requestedCapabilities: ['workspace.manage', 'event.read'],
+      requestedCapabilities: ['browser.control', 'workspace.manage', 'event.read'],
       launchMode: 'embedded',
     },
   });
@@ -129,6 +129,11 @@ test('daemon rediscovers the selected profile and publishes one restored generat
     bridgeSessionId: 'bridge:daemon-test',
     method: 'workspaces/create',
     params: {},
+  });
+  const leased = await daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: 'bridge:daemon-test',
+    method: 'leases/create',
+    params: { workspaceId: created.result.workspace.id },
   });
 
   await first.close();
@@ -144,6 +149,18 @@ test('daemon rediscovers the selected profile and publishes one restored generat
     join(profile, 'DevToolsActivePort'),
     `${second.port}\n/devtools/browser/second\n`,
   );
+  const connected = await daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: 'bridge:daemon-test',
+    method: 'tools/call',
+    params: {
+      name: 'browser.connect',
+      arguments: { browserId: initialize.result.browsers[0].id },
+      workspaceId: created.result.workspace.id,
+      leaseId: leased.result.lease.id,
+      commandId: 'command:explicit-reconnect',
+    },
+  });
+  assert.equal(connected.result.result.state, 'connected');
   const restored = await waitFor(
     () => daemonRequest(socketPath, '/health'),
     value => value.browser?.state === 'connected' && value.browser.connectionGeneration === 2,
@@ -159,7 +176,9 @@ test('daemon rediscovers the selected profile and publishes one restored generat
       cursor: created.result.eventCursor,
     },
   });
-  assert.deepEqual(replayed.result.events.map(event => event.type), [
+  assert.deepEqual(replayed.result.events
+    .filter(event => event.type === 'connection.lost' || event.type === 'connection.restored')
+    .map(event => event.type), [
     'connection.lost',
     'connection.restored',
   ]);
@@ -207,7 +226,7 @@ test('daemon initializes with structured remediation before remote debugging is 
         instanceId: 'instance:discovery-test',
       },
       protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
-      requestedCapabilities: ['browser.discovery', 'workspace.manage'],
+      requestedCapabilities: ['browser.discovery', 'browser.control', 'workspace.manage'],
       launchMode: 'embedded',
     },
   });
@@ -226,21 +245,39 @@ test('daemon initializes with structured remediation before remote debugging is 
   assert.ok(discoveredSelected);
   assert.equal(discoveredSelected.remoteDebuggingState, 'disabled');
 
-  cdp = await startCdpFixture();
-  await writeFile(
-    join(profile, 'DevToolsActivePort'),
-    `${cdp.port}\n/devtools/browser/enabled\n`,
-  );
-  await waitFor(
-    () => daemonRequest(socketPath, '/health'),
-    value => value.browser?.state === 'connected' && value.browser.connectionGeneration === 1,
-    10_000,
-  );
   const created = await daemonRequest(socketPath, '/broker/rpc', {
     bridgeSessionId: 'bridge:discovery-test',
     method: 'workspaces/create',
     params: { browserId: selected.id },
   });
+  const leased = await daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: 'bridge:discovery-test',
+    method: 'leases/create',
+    params: { workspaceId: created.result.workspace.id },
+  });
+
+  cdp = await startCdpFixture();
+  await writeFile(
+    join(profile, 'DevToolsActivePort'),
+    `${cdp.port}\n/devtools/browser/enabled\n`,
+  );
+  const connected = await daemonRequest(socketPath, '/broker/rpc', {
+    bridgeSessionId: 'bridge:discovery-test',
+    method: 'tools/call',
+    params: {
+      name: 'browser.connect',
+      arguments: { browserId: selected.id },
+      workspaceId: created.result.workspace.id,
+      leaseId: leased.result.lease.id,
+      commandId: 'command:explicit-connect',
+    },
+  });
+  assert.equal(connected.result.result.state, 'connected');
+  await waitFor(
+    () => daemonRequest(socketPath, '/health'),
+    value => value.browser?.state === 'connected' && value.browser.connectionGeneration === 1,
+    10_000,
+  );
   assert.equal(created.result.workspace.browserInstanceId, `browser-instance:${selected.id.slice('browser:'.length)}`);
   assert.equal(stderr.join(''), '');
 });

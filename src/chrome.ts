@@ -46,7 +46,6 @@ export interface BrowserDiscoveryOptions {
   env?: NodeJS.ProcessEnv;
   profiles?: readonly BrowserProfileDefinition[];
   runningCommands?: readonly string[] | null;
-  probeEndpoint?: (endpoint: ChromeInfo) => Promise<BrowserEndpointProbe>;
 }
 
 function readChromeInfo(browser: string, dataDir: string): ChromeInfo | null {
@@ -295,6 +294,7 @@ export async function probeBrowserEndpoint(
 
 function remediation(
   state: BrowserCandidate['state'],
+  endpointAvailable = false,
 ): BrowserCandidate['remediation'] | undefined {
   switch (state) {
     case 'not_running':
@@ -316,6 +316,13 @@ function remediation(
         actionRequired: true,
       };
     case 'disconnected':
+      if (endpointAvailable) {
+        return {
+          code: 'connect_browser',
+          message: 'Run an explicit browser connect operation to request remote debugging authorization.',
+          actionRequired: true,
+        };
+      }
       return {
         code: 'restart_remote_debugging',
         message: 'The recorded remote debugging endpoint is stale. Restart this browser profile and enable remote debugging again.',
@@ -331,7 +338,6 @@ export async function discoverBrowserCandidates(options: BrowserDiscoveryOptions
   const runningCommands = options.runningCommands === undefined
     ? readRunningCommands(os)
     : options.runningCommands;
-  const probe = options.probeEndpoint ?? probeBrowserEndpoint;
   const results: DiscoveredBrowser[] = [];
 
   for (const definition of definitions) {
@@ -344,23 +350,15 @@ export async function discoverBrowserCandidates(options: BrowserDiscoveryOptions
 
     if (!endpoint) {
       state = processState === 'running' ? 'remote_debugging_disabled' : 'not_running';
+    } else if (processState === 'not_running') {
+      remoteDebuggingState = 'stale';
+      authorizationState = 'unknown';
+      state = 'disconnected';
     } else {
-      const endpointState = await probe(endpoint);
-      if (endpointState === 'ready') {
-        processState = 'running';
-        remoteDebuggingState = 'enabled';
-        authorizationState = 'authorized';
-        state = 'ready';
-      } else if (endpointState === 'authorization_required') {
-        processState = 'running';
-        remoteDebuggingState = 'enabled';
-        authorizationState = 'required';
-        state = 'authorization_required';
-      } else {
-        remoteDebuggingState = 'stale';
-        authorizationState = 'unknown';
-        state = 'disconnected';
-      }
+      processState = 'running';
+      remoteDebuggingState = 'enabled';
+      authorizationState = 'unknown';
+      state = 'disconnected';
     }
 
     const candidate: BrowserCandidate = {
@@ -372,7 +370,9 @@ export async function discoverBrowserCandidates(options: BrowserDiscoveryOptions
       remoteDebuggingState,
       authorizationState,
       state,
-      ...(remediation(state) ? { remediation: remediation(state) } : {}),
+      ...(remediation(state, endpoint !== null && remoteDebuggingState === 'enabled')
+        ? { remediation: remediation(state, endpoint !== null && remoteDebuggingState === 'enabled') }
+        : {}),
     };
     results.push({ candidate, dataDir: definition.dataDir, ...(endpoint ? { endpoint } : {}) });
   }
@@ -383,7 +383,8 @@ export async function discoverChrome(browserFilter?: string): Promise<ChromeInfo
   const filter = browserFilter?.toLowerCase();
   const candidates = await discoverBrowserCandidates();
   const selected = candidates.find(({ candidate, endpoint }) => (
-    candidate.state === 'ready' &&
+    candidate.processState === 'running' &&
+    candidate.remoteDebuggingState === 'enabled' &&
     endpoint !== undefined &&
     (!filter || [candidate.id, candidate.product, candidate.channel]
       .some(value => value?.toLowerCase().includes(filter)))

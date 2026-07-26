@@ -51,6 +51,7 @@ test('stdio conformance runner validates a black-box executable and writes a bou
     'tool_manifest',
     'workspace_create',
     'lease_create_and_heartbeat',
+    'browser_connect',
     'managed_target_open',
     'observation',
     'screenshot_artifact',

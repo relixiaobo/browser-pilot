@@ -326,6 +326,7 @@ export interface BrowserToolServiceOptions {
   dialogTimeoutMs?: number;
   noProgressThreshold?: number;
   loadWaiter?: typeof waitForLoad;
+  connectBrowser?: () => Promise<void>;
 }
 
 export class BrowserToolService implements BrowserToolExecutor {
@@ -357,6 +358,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly watchdogs: BrowserWatchdogService;
   private readonly navigationTimeoutMs: number;
   private readonly loadWaiter: typeof waitForLoad;
+  private readonly connectBrowser?: () => Promise<void>;
   private eventPublisher?: (event: BrowserEventPublication) => void;
 
   constructor(
@@ -372,6 +374,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       throw new Error('navigationTimeoutMs must be a positive integer');
     }
     this.loadWaiter = options.loadWaiter ?? waitForLoad;
+    this.connectBrowser = options.connectBrowser;
     this.watchdogs = new BrowserWatchdogService(event => this.publishEvent(event), {
       dialogTimeoutMs: options.dialogTimeoutMs,
       noProgressThreshold: options.noProgressThreshold,
@@ -464,6 +467,12 @@ export class BrowserToolService implements BrowserToolExecutor {
   browserConnectionChanged(previous: BrowserInstance, current: BrowserInstance): void {
     this.binding.instance = { ...current };
     this.binding.candidate.state = current.state === 'connected' ? 'ready' : 'disconnected';
+    if (current.state === 'connected') {
+      this.binding.candidate.processState = 'running';
+      this.binding.candidate.remoteDebuggingState = 'enabled';
+      this.binding.candidate.authorizationState = 'authorized';
+      delete this.binding.candidate.remediation;
+    }
     if (current.state !== 'connected') {
       this.watchdogs.reset();
       for (const session of [...this.sessions.values()]) {
@@ -663,7 +672,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
   }
 
-  private connect(context: BrokerToolCallContext, args: Record<string, JsonValue>): JsonValue {
+  private async connect(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const { workspace, lease } = this.requireWorkspaceContext(context);
     if (args.browserId !== this.binding.candidate.id) {
       throw new BrowserPilotError('browser_not_found', 'Browser candidate does not match this Workspace', {
@@ -671,7 +680,16 @@ export class BrowserToolService implements BrowserToolExecutor {
       });
     }
     if (this.binding.instance.state !== 'connected') {
-      throw new BrowserPilotError('browser_disconnected', 'Workspace browser is disconnected', {
+      if (!this.connectBrowser) {
+        throw new BrowserPilotError('browser_disconnected', 'Workspace browser is disconnected', {
+          retryable: true,
+          context: { workspaceId: workspace.id },
+        });
+      }
+      await this.connectBrowser();
+    }
+    if (this.binding.instance.state !== 'connected') {
+      throw new BrowserPilotError('browser_disconnected', 'Browser connection did not become ready', {
         retryable: true,
         context: { workspaceId: workspace.id },
       });

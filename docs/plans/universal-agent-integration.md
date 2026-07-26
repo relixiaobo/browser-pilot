@@ -162,8 +162,8 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     Workspace reclamation, and idempotent Workspace release are implemented.
     Target, auth, network, frame, Observation, Artifact, and partial download
     cleanup is connected. Browser connection loss now rejects tools, invalidates
-    sessions/refs, rediscovers the selected profile, and advances generation on
-    restoration. A private child janitor solely owns the browser-level CDP
+    sessions/refs, passively rediscovers the selected profile, and advances
+    generation only after an explicit reconnect succeeds. A private child janitor solely owns the browser-level CDP
     connection, proxies daemon traffic over IPC, tracks verified managed popup
     descendants, and closes them on daemon-pipe EOF, including `SIGKILL`,
     without persisting target IDs or grouping by browser window. Process-level
@@ -245,9 +245,9 @@ Pilot. Tenon and OpenClaw are reference consumers only.
   - Covers: browser discovery contract.
   - Complete: discovery enumerates installed supported product/profile candidates
     with stable IDs and separate process, remote-debugging, and authorization
-    state. `initialize`, `browser.discover`, and `bp browsers` return bounded
-    remediation; the Broker can start before any candidate is ready, connect
-    candidates in place after setup, and route ready browser instances by
+    state. `initialize`, `browser.discover`, and `bp browsers` are passive and
+    return bounded remediation; the Broker can start before any candidate is
+    ready, connect candidates only through explicit `browser.connect`, and route ready browser instances by
     `browserId`. Selection is explicit (`--browser`/`browserId`) or stable-order
     deterministic and remains daemon-memory state only.
 - [x] **A6.2** Define the per-user Broker locator, socket/pipe permissions,
@@ -258,8 +258,8 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     deterministic short runtime path when required; Windows uses a per-user
     named pipe. State/runtime directories and metadata are owner-only. An
     atomic startup lock plus a post-lock health check makes concurrent launch a
-    single-winner operation. A pre-authorization starting record lets clients
-    survive launcher timeout and reuse the same daemon PID. Dead owners are
+    single-winner operation. Broker startup never requests Chrome authorization;
+    concurrent explicit connect calls share one in-flight attempt. Dead owners are
     reclaimed without killing a PID; live but unresponsive ready Brokers fail
     with explicit remediation and are never silently replaced.
 - [x] **A6.3** Implement executable/protocol negotiation, live-client upgrade

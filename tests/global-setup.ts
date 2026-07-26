@@ -30,11 +30,11 @@ export default async function globalSetup(): Promise<void | (() => Promise<void>
     connected = true;
 
     const browsers = bp('browsers');
-    const activeProfile = browsers.browsers?.find((candidate: { state?: string }) => (
-      candidate.state === 'ready'
-    ))?.profile;
-    if (activeProfile !== fixture.profile) {
-      throw new Error(`Browser Pilot selected a non-test profile: ${String(activeProfile)}`);
+    const isolated = browsers.browsers?.find((candidate: { profile?: string }) => (
+      candidate.profile === fixture.profile
+    ));
+    if (!isolated || isolated.remoteDebuggingState !== 'enabled') {
+      throw new Error('Browser Pilot did not discover the isolated test profile');
     }
     process.stdout.write(`[browser-pilot test] isolated Chrome ready at ${fixture.profile}\n`);
   } catch (error) {

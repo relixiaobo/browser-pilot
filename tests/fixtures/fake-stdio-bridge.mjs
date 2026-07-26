@@ -99,7 +99,7 @@ function toolOutcome(name, result) {
       deadlineAt: now() + 30_000,
       dispatchedAt: now(),
       completedAt: now(),
-      mutating: ['browser.open', 'browser.tabs.close'].includes(name),
+      mutating: ['browser.connect', 'browser.open', 'browser.tabs.close'].includes(name),
     },
     result,
   };
@@ -121,7 +121,7 @@ async function handle(message) {
       capabilities: { granted: params.requestedCapabilities, denied: [], unsupported: [] },
       brokerProcessIdentity: 'broker:fake',
       connectionId: 'connection:fake',
-      browsers: [{ id: 'browser:fake', product: 'Fixture Chrome', state: 'ready' }],
+      browsers: [{ id: 'browser:fake', product: 'Fixture Chrome', state: 'disconnected' }],
       limits: {
         maxMessageBytes: 1024 * 1024,
         maxResultBytes: 4 * 1024 * 1024,
@@ -134,7 +134,7 @@ async function handle(message) {
   if (method === 'tools/list') {
     response(id, {
       schemaVersion: 1,
-      tools: ['browser.open', 'browser.observe', 'browser.capture', 'browser.tabs.list', 'browser.tabs.close'].map(name => ({
+      tools: ['browser.connect', 'browser.open', 'browser.observe', 'browser.capture', 'browser.tabs.list', 'browser.tabs.close'].map(name => ({
         name,
         title: name,
         description: name,
@@ -142,7 +142,7 @@ async function handle(message) {
         inputSchema: { type: 'object' },
         outputSchema: { type: 'object' },
         requiredCapabilities: [],
-        mutating: name.includes('open') || name.includes('close'),
+        mutating: name.includes('connect') || name.includes('open') || name.includes('close'),
         idempotency: 'idempotent',
         cancellation: 'before_dispatch',
         sensitivity: { input: [], output: [] },
@@ -198,6 +198,16 @@ async function handle(message) {
     return;
   }
   if (method === 'tools/call') {
+    if (params.name === 'browser.connect') {
+      response(id, toolOutcome(params.name, {
+        workspaceId: ids.workspaceId,
+        leaseId: ids.leaseId,
+        browserInstanceId: 'browser-instance:fake',
+        connectionGeneration: 1,
+        state: 'connected',
+      }));
+      return;
+    }
     if (params.name === 'browser.open' || params.name === 'browser.observe') {
       if (params.name === 'browser.open') notification();
       response(id, toolOutcome(params.name, observation()));

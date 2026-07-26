@@ -235,8 +235,9 @@ Preserve Browser Pilot advantages:
 - [x] **B4.2** Add watchdogs for browser disconnect, stalled navigation,
   detached frames, unhandled dialogs, and repeated no-progress actions.
   - Covers: FR-5, FR-8.
-  - Complete: WebSocket loss emits connection state and starts selected-profile
-    rediscovery with bounded backoff. Navigation timeouts return structured
+  - Complete: WebSocket loss emits connection state and leaves the browser
+    disconnected. Selected-profile endpoint metadata refreshes passively, while
+    only an explicit `browser.connect` can establish another WebSocket. Navigation timeouts return structured
     `unknown_outcome`; selected-frame detach clears frame state; pending dialogs
     emit a bounded reminder without auto-response; and browser-observable action
     evidence drives a Lease/target-scoped no-progress streak. Timers and streaks

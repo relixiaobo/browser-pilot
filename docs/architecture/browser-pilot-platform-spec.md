@@ -315,12 +315,13 @@ diagnosis and explicit rollback; it does not preserve an executable or any
 browser, target, Workspace, Lease, ref, credential, rule, or command state. An
 atomic owner-recorded startup lock surrounds discovery and daemon launch. Every
 contender health-checks before and after the lock; therefore exactly one
-process starts the Broker and all others reuse it.
+process starts the Broker and all others reuse it. Broker startup and discovery
+are passive and do not open a browser WebSocket.
 A lock whose owner is dead can be reclaimed; a live owner is never displaced
-merely because startup is slow. Before browser authorization begins, the daemon
-writes an owner-only `starting` process record. If the launcher exits or times
-out, later contenders wait for that same PID and reuse its endpoint after it
-becomes ready; they never create a second Chrome authorization request. A dead
+merely because startup is slow. During Broker startup, the daemon writes an
+owner-only `starting` process record. Chrome authorization begins only after an
+explicit `browser.connect`; all concurrent callers share its single in-flight
+connection attempt. A dead
 locator/socket is removed without signaling its recorded PID. If a ready PID is
 alive but its endpoint is unresponsive, Browser Pilot returns structured
 restart remediation and never silently kills or replaces the process.
@@ -329,9 +330,11 @@ restart remediation and never silently kills or replaces the process.
 
 ### FLOW-1 Agent-managed one-shot use
 
-An Agent installs Browser Pilot globally or in its project, runs `bp connect`
-or a browser command, and the CLI starts or reuses the compatible per-user
-Broker. The compatibility Workspace and Lease select controlled targets.
+An Agent installs Browser Pilot globally or in its project and runs `bp connect`.
+The CLI starts or reuses the compatible per-user Broker, creates its
+compatibility Workspace and Lease, then explicitly requests the browser
+connection. Other browser commands require that connection and never trigger
+authorization implicitly.
 Existing and future eligible user tabs are available immediately. The command
 returns the existing JSON shape during migration. Failures include a stable
 machine code in addition to compatible human guidance. One-shot processes use
@@ -352,14 +355,18 @@ Workspace isolation prevents access to other clients' dialogs.
 An Agent product bundles or resolves the official executable and starts
 `browser-pilot bridge --stdio`. It initializes, negotiates protocol and
 capabilities, creates or resumes a Workspace, acquires a Lease, discovers tools,
-and maps those tools into its own runtime. It calls tools, consumes ordered
+calls `browser.connect` when the selected browser is not ready, and maps the
+remaining tools into its own runtime. Bridge launch, initialization, discovery,
+and Workspace creation stay passive. It calls tools, consumes ordered
 events, converts Artifact files into native media content, heartbeats while
 active, then releases the Lease. A process crash is recovered by Lease expiry.
 
 ### FLOW-3 Browser disconnect and recovery
 
 The Broker emits connection loss, stops dispatching target commands, and marks
-commands whose effects are uncertain as `unknown_outcome`. After reconnect it
+commands whose effects are uncertain as `unknown_outcome`. It never reconnects
+on a timer. A client explicitly calls `browser.connect` when recovery is
+appropriate. After that succeeds, the Broker
 creates a new browser connection generation, invalidates old CDP sessions,
 ControlledTarget mappings, frames, and Observations, and emits structured recovery
 state. The daemon rediscovers only the originally selected browser profile; it
@@ -537,9 +544,11 @@ Artifacts. Raw CDP is never listed. `eval` requires `developer.eval`.
   No handoff call accepts a foreign Lease or target ID.
 - **BR-7:** The Pilot window visibly identifies the controlling client without
   injecting mutable content into the page DOM.
-- **BR-21:** Invoking the CLI or bridge is the browser-control authorization
-  boundary. Browser Pilot does not infer task intent, ask for per-tab grants,
-  or perform per-action confirmation.
+- **BR-21:** Exposing the CLI or bridge to an Agent is the product-level
+  browser-control authorization boundary. Chrome's own remote-debugging
+  authorization is requested only by explicit `bp connect`/`browser.connect`.
+  Browser Pilot does not infer task intent, ask for per-tab grants, or perform
+  per-action confirmation.
 - **BR-22:** The default BrowserControlPolicy permits all supported operations.
   A Host may remove operations at launch; a running Agent cannot expand that
   fixed policy through the browser tool protocol.
@@ -577,9 +586,10 @@ accepted -> expired
   `unknown_outcome`. Mutating commands are never automatically replayed.
 - **BR-11:** Cancellation before dispatch prevents execution. Cancellation
   after dispatch is best-effort and must not claim rollback.
-- **BR-12:** Browser disconnect and reconnect change the BrowserInstance
+- **BR-12:** Browser disconnect and explicit reconnect change the BrowserInstance
   connection generation and invalidate sessions and observations. The generation
-  advances on successful restoration, not merely on a retry attempt.
+  advances on successful restoration, not merely on an attempt. Discovery and
+  timers never initiate a browser connection.
 
 Commands capture that generation when accepted. The Broker verifies it again
 before browser dispatch and after the executor returns. A queued stale command

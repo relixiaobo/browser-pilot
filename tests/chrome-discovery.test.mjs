@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -19,7 +20,7 @@ async function definition(root, overrides = {}) {
   };
 }
 
-test('browser discovery returns stable structured candidates for every setup state', async t => {
+test('browser discovery passively returns stable structured candidates', async t => {
   const temp = await mkdtemp(join(process.env.TMPDIR ?? '/tmp', 'browser-pilot-discovery-'));
   t.after(async () => {
     await rm(temp, { recursive: true, force: true });
@@ -34,31 +35,26 @@ test('browser discovery returns stable structured candidates for every setup sta
   await writeFile(join(ready.dataDir, 'DevToolsActivePort'), '9222\n/devtools/browser/ready\n');
   await writeFile(join(authorization.dataDir, 'DevToolsActivePort'), '9223\n/devtools/browser/auth\n');
   await writeFile(join(stale.dataDir, 'DevToolsActivePort'), '9224\n/devtools/browser/stale\n');
+  await symlink('host-102', join(ready.dataDir, 'SingletonLock'));
   await symlink('host-101', join(disabled.dataDir, 'SingletonLock'));
+  await symlink('host-103', join(authorization.dataDir, 'SingletonLock'));
 
-  const probeEndpoint = async endpoint => {
-    if (endpoint.port === 9222) return 'ready';
-    if (endpoint.port === 9223) return 'authorization_required';
-    return 'unreachable';
-  };
   const first = await discoverBrowserCandidates({
     platform: 'darwin',
     profiles: [ready, disabled, stopped, authorization, stale],
     runningCommands: [],
-    probeEndpoint,
   });
   const second = await discoverBrowserCandidates({
     platform: 'darwin',
     profiles: [ready, disabled, stopped, authorization, stale],
     runningCommands: [],
-    probeEndpoint,
   });
 
   assert.deepEqual(first.map(browser => browser.candidate.state), [
-    'ready',
+    'disconnected',
     'remote_debugging_disabled',
     'not_running',
-    'authorization_required',
+    'disconnected',
     'disconnected',
   ]);
   assert.deepEqual(
@@ -72,12 +68,17 @@ test('browser discovery returns stable structured candidates for every setup sta
     profile: ready.dataDir,
     processState: 'running',
     remoteDebuggingState: 'enabled',
-    authorizationState: 'authorized',
-    state: 'ready',
+    authorizationState: 'unknown',
+    state: 'disconnected',
+    remediation: {
+      code: 'connect_browser',
+      message: 'Run an explicit browser connect operation to request remote debugging authorization.',
+      actionRequired: true,
+    },
   });
   assert.equal(first[1].candidate.remediation.code, 'enable_remote_debugging');
   assert.equal(first[2].candidate.remediation.code, 'start_browser');
-  assert.equal(first[3].candidate.remediation.code, 'authorize_remote_debugging');
+  assert.equal(first[3].candidate.remediation.code, 'connect_browser');
   assert.equal(first[4].candidate.remediation.code, 'restart_remote_debugging');
 });
 
@@ -97,11 +98,44 @@ test('browser discovery omits products that are not installed and rejects malfor
     platform: 'darwin',
     profiles: [malformed, absent],
     runningCommands: ['Test Browser'],
-    probeEndpoint: async () => {
-      throw new Error('malformed endpoints must not be probed');
-    },
   });
   assert.equal(result.length, 1);
   assert.equal(result[0].candidate.state, 'remote_debugging_disabled');
   assert.equal(result[0].endpoint, undefined);
+});
+
+test('browser discovery opens no TCP or WebSocket connection', async t => {
+  const temp = await mkdtemp(join(process.env.TMPDIR ?? '/tmp', 'browser-pilot-discovery-'));
+  const server = http.createServer();
+  let tcpConnections = 0;
+  let upgrades = 0;
+  server.on('connection', () => { tcpConnections += 1; });
+  server.on('upgrade', (_request, socket) => {
+    upgrades += 1;
+    socket.destroy();
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    await rm(temp, { recursive: true, force: true });
+  });
+
+  const browser = await definition(temp, { key: 'passive' });
+  await symlink('host-passive', join(browser.dataDir, 'SingletonLock'));
+  await writeFile(
+    join(browser.dataDir, 'DevToolsActivePort'),
+    `${server.address().port}\n/devtools/browser/passive\n`,
+  );
+  const result = await discoverBrowserCandidates({
+    platform: 'darwin',
+    profiles: [browser],
+    runningCommands: [],
+  });
+
+  assert.equal(result[0].candidate.remoteDebuggingState, 'enabled');
+  assert.equal(tcpConnections, 0);
+  assert.equal(upgrades, 0);
 });

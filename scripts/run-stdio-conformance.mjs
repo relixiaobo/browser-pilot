@@ -21,6 +21,7 @@ const REQUIRED_CAPABILITIES = [
   'event.read',
 ];
 const REQUIRED_TOOLS = [
+  'browser.connect',
   'browser.open',
   'browser.observe',
   'browser.capture',
@@ -28,6 +29,7 @@ const REQUIRED_TOOLS = [
   'browser.tabs.close',
 ];
 const REQUIRED_TOOL_CONTEXTS = new Map([
+  ['browser.connect', 'workspace'],
   ['browser.open', 'workspace'],
   ['browser.observe', 'target'],
   ['browser.capture', 'target'],
@@ -335,6 +337,7 @@ async function runSuite(options) {
   const checks = [];
   const state = {
     initialized: false,
+    browserId: undefined,
     workspaceId: undefined,
     leaseId: undefined,
     targetId: undefined,
@@ -401,10 +404,9 @@ async function runSuite(options) {
       for (const capability of REQUIRED_CAPABILITIES) {
         assertContract(capabilities.granted.includes(capability), `Required capability was not granted: ${capability}`);
       }
-      assertContract(
-        Array.isArray(initialized.browsers) && initialized.browsers.some(browser => browser?.state === 'ready'),
-        'No ready browser was advertised',
-      );
+      assertContract(Array.isArray(initialized.browsers) && initialized.browsers.length > 0,
+        'No browser candidate was advertised');
+      state.browserId = nonEmptyString(initialized.browsers[0]?.id, 'browser candidate id');
       assertContract(
         Number.isSafeInteger(limits.maxMessageBytes) && limits.maxMessageBytes > 0 &&
         Number.isSafeInteger(limits.maxResultBytes) && limits.maxResultBytes > 0 &&
@@ -436,7 +438,9 @@ async function runSuite(options) {
 
     let eventCursor;
     await check('workspace_create', async () => {
-      const created = asRecord(await peer.call('workspaces/create', {}), 'Workspace result');
+      const created = asRecord(await peer.call('workspaces/create', {
+        browserId: state.browserId,
+      }), 'Workspace result');
       const workspace = asRecord(created.workspace, 'Workspace');
       state.workspaceId = nonEmptyString(workspace.id, 'Workspace id');
       assertContract(workspace.state === 'active', 'Created Workspace is not active');
@@ -459,6 +463,13 @@ async function runSuite(options) {
       }), 'heartbeat result');
       const renewed = asRecord(heartbeat.lease, 'renewed Lease');
       assertContract(renewed.id === state.leaseId && renewed.state === 'active', 'Heartbeat did not renew the Lease');
+    });
+
+    await check('browser_connect', async () => {
+      const connected = await tool('browser.connect', { browserId: state.browserId }, state);
+      assertContract(connected.state === 'connected', 'browser.connect did not establish the browser connection');
+      assertContract(Number.isSafeInteger(connected.connectionGeneration) && connected.connectionGeneration > 0,
+        'browser.connect returned an invalid connection generation');
     });
 
     await check('managed_target_open', async () => {

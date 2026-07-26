@@ -23,7 +23,7 @@ async function startDaemon(browser: DiscoveredBrowser | null): Promise<DaemonCli
   const invocation = internalProcessInvocation('daemon', import.meta.url);
   const child = spawn(invocation.command, [
     ...invocation.argumentsPrefix,
-    browser?.endpoint?.wsUrl ?? '',
+    '',
     browser?.candidate.product ?? '',
     browser?.dataDir ?? '',
   ], {
@@ -39,18 +39,14 @@ async function startDaemon(browser: DiscoveredBrowser | null): Promise<DaemonCli
     await new Promise(r => setTimeout(r, 200));
   }
   if (child.pid && processIsAlive(child.pid)) {
-    throw new BrowserPilotError(
-      'browser_not_authorized',
-      'Browser Pilot is still waiting for Chrome remote debugging authorization',
-      {
-        retryable: true,
-        remediation: {
-          code: 'allow_remote_debugging',
-          message: 'Approve the existing Chrome authorization prompt, then retry. Browser Pilot will reuse the same Broker.',
-          actionRequired: true,
-        },
+    throw new BrowserPilotError('browser_disconnected', 'Browser Pilot Broker did not finish starting', {
+      retryable: true,
+      remediation: {
+        code: 'inspect_broker_startup',
+        message: 'Inspect the Broker startup state; browser authorization is never requested during Broker startup.',
+        actionRequired: false,
       },
-    );
+    });
   }
   throw new BrowserPilotError('browser_disconnected', 'Browser Pilot Broker did not become reachable', {
     retryable: true,
@@ -127,18 +123,14 @@ export async function connectDaemon(browserFilter?: string): Promise<DaemonClien
       if (starting?.pid === brokerPid) {
         const started = await waitForStartingDaemon(brokerPid, browserFilter);
         if (started) return started;
-        throw new BrowserPilotError(
-          'browser_not_authorized',
-          'Browser Pilot is still waiting for Chrome remote debugging authorization',
-          {
-            retryable: true,
-            remediation: {
-              code: 'allow_remote_debugging',
-              message: 'Approve the existing Chrome authorization prompt, then retry. Browser Pilot will reuse the same Broker.',
-              actionRequired: true,
-            },
+        throw new BrowserPilotError('browser_disconnected', 'Browser Pilot Broker did not finish starting', {
+          retryable: true,
+          remediation: {
+            code: 'inspect_broker_startup',
+            message: 'Inspect the Broker startup state; browser authorization is never requested during Broker startup.',
+            actionRequired: false,
           },
-        );
+        });
       }
       throw new BrowserPilotError('browser_disconnected', 'The Browser Pilot Broker process is alive but its endpoint is unresponsive', {
         retryable: true,
@@ -169,7 +161,7 @@ export async function connectDaemon(browserFilter?: string): Promise<DaemonClien
         },
       );
     }
-    const selected = matches.find(browser => browser.candidate.state === 'ready') ?? matches[0] ?? null;
+    const selected = matches.find(browser => browser.endpoint !== undefined) ?? matches[0] ?? null;
     return await startDaemon(selected);
   } finally {
     startupLock.release();

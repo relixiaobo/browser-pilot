@@ -286,6 +286,7 @@ program.command('connect')
       console.log('If prompted, click "Allow" in Chrome\'s authorization dialog.\n');
     }
     const client = await connectCompatibility(PKG_VERSION, opts.browser);
+    await client.connectBrowser();
     await client.ensureManagedTarget();
     const browser = client.initialized.browsers.find(candidate => candidate.state === 'ready')?.product ?? 'browser';
     emit(

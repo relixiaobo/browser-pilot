@@ -10,7 +10,9 @@ npm install -g browser-pilot-cli
 
 ### 1. Enable Chrome remote debugging (one-time)
 
-Open `chrome://inspect/#remote-debugging` in Chrome (144+) and click Allow. No command-line flags, no restart needed.
+Open `chrome://inspect/#remote-debugging` in Chrome (144+) and enable remote
+debugging. No command-line flags or restart are needed. Chrome may show its
+separate Allow dialog when `bp connect` requests the actual connection.
 
 > Chrome 136 disabled the old `--remote-debugging-port` flag for security. Chrome 144 introduced this new UI toggle as the replacement — browser-pilot uses this.
 
@@ -19,6 +21,9 @@ Check every installed supported browser and its exact setup state with:
 ```bash
 bp browsers
 ```
+
+Discovery is passive: `bp browsers`, bridge startup, and `initialize` never open
+a Chrome WebSocket and never display the Allow dialog.
 
 Use `bp connect --browser <id|product|channel>` for an explicit choice. Product
 embedders can pass the same selector to `browser-pilot bridge --stdio
@@ -135,7 +140,7 @@ tabs remain open when a session ends.
 
 The `browser-pilot bridge --stdio` transport, Broker lifecycle, browser tool
 dispatch, event replay, protected Artifacts, and protocol 1.1 transport limit
-negotiation are implemented. Browser disconnect/reconnect handling, scoped
+negotiation are implemented. Browser disconnect and explicit reconnect handling, scoped
 download Artifacts, Workspace resource isolation, and typed watchdog events for
 stalled navigation, selected-frame detach, pending dialogs, and repeated
 browser-observable no-progress actions are also implemented. Bounded page
@@ -145,10 +150,11 @@ useful browser-use inspection patterns to the same scoped Broker contract. An
 internal managed-target janitor is the sole owner of the browser-level CDP
 connection, proxies daemon traffic over private IPC, and closes only
 Broker-created tabs and their managed popup descendants if the daemon exits or
-crashes. It does not persist target IDs or close user tabs. A starting Broker
-writes an owner-only process record before Chrome authorization, so a timed-out
-or retried client waits for that same process instead of opening another
-authorization request.
+crashes. It does not persist target IDs or close user tabs. Broker startup and
+browser discovery are passive. Only `bp connect` or the versioned
+`browser.connect` tool requests Chrome authorization; concurrent clients share
+one in-flight request, and a failed or dropped connection is never retried by a
+timer.
 Compatible Agent products reuse one per-user Broker through protocol
 negotiation. Protected shutdown cannot terminate live embedded clients, and an
 incompatible product must explicitly select a separate `BROWSER_PILOT_HOME`.
@@ -163,6 +169,7 @@ Agent-managed installation remains supported:
 
 ```bash
 npm install -g browser-pilot-cli
+bp connect
 bp tabs
 ```
 

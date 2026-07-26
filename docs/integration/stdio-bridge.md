@@ -48,7 +48,8 @@ artifacts themselves.
 
 The host may add `--browser <id|product|channel>` to make its initial browser
 preference explicit. Without it, Browser Pilot deterministically selects the
-first ready candidate in stable platform order. The running Broker retains that
+first candidate with a recorded debugging endpoint, then stable platform order.
+The running Broker retains that
 choice in memory; it does not write target or profile selection state to disk.
 
 Create pipes for stdin, stdout, and stderr. Stdout is protocol-only. Treat each
@@ -58,9 +59,10 @@ The executable owns Broker discovery and startup. Hosts must not read PID
 files, locator metadata, Unix socket paths, or Windows named-pipe names. Two
 products that launch concurrently serialize through the per-user startup lock,
 then both reuse the winning compatible Broker. A dead locator is recovered on
-the next launch. While Chrome authorization is pending, an owner-only starting
-record lets later launches wait for and reuse the same Broker PID instead of
-creating another authorization prompt. A ready live process with an
+the next launch. Broker startup and browser discovery are passive. Only an
+explicit `browser.connect` tool call requests Chrome authorization, and
+concurrent calls for the same browser share one in-flight WebSocket attempt. A
+ready live process with an
 unresponsive endpoint is not killed or replaced; launch returns
 `browser_disconnected` with `restart_unresponsive_broker` remediation.
 
@@ -113,8 +115,10 @@ candidate has a stable `id`, product/channel/profile identity, aggregate
 `state`, separate `processState`, `remoteDebuggingState`, and
 `authorizationState`, plus structured `remediation` when action is needed.
 Initialization succeeds when no candidate is ready, so a host can present setup
-state and poll `browser.discover`; Workspace creation waits for a ready,
-connected candidate. Branch on structured `error.data.code`; never branch on
+state and poll `browser.discover`. Discovery is passive and reports
+authorization as `unknown` until an explicit connection succeeds or fails.
+Workspace and Lease creation also remain passive; call `browser.connect` once
+before target tools. Branch on structured `error.data.code`; never branch on
 English error messages.
 
 Protocol 1.0 uses the service limits returned by `initialize`. Protocol 1.1 may
@@ -163,10 +167,13 @@ shutdown
 `workspaces/create` accepts an optional `browserId`. Protocol 1.1 clients may
 also provide `clientKey` to make active Workspace creation idempotent within
 their Principal; reusing a key for another browser fails. Without a browser ID,
-the Broker uses its first ready, connected browser binding. It returns a Workspace, its default logical
+the Broker prefers its first ready connection and otherwise uses its selected
+stable-order browser binding. It returns a Workspace, its default logical
 ManagedTabSet, and an `eventCursor`. `workspaces/get` returns the current cursor
 as a recovery baseline. Creating a Workspace does not itself create a browser
-window; the first managed navigation creates the dedicated browser window.
+connection or window. Call the Workspace-scoped `browser.connect` tool to
+request Chrome authorization; the first managed navigation then creates the
+dedicated browser window.
 
 `leases/create` accepts a `workspaceId` and optional `ttlMs`. Protocol 1.1
 clients may also provide a `clientKey`; repeating that key on the same live
@@ -399,9 +406,11 @@ action parameters never leave the Broker. Change representation and strategy
 instead of automatically repeating the same action or navigation.
 
 `connection.lost` keeps the last connection generation and causes later browser
-tools to fail with retryable `browser_disconnected`. The daemon repeatedly reads
-the originally selected profile's debugging endpoint and does not switch profiles.
-`connection.restored` carries a strictly newer generation. Existing Workspaces
+tools to fail with retryable `browser_disconnected`. The daemon passively
+refreshes the originally selected profile's endpoint metadata and does not
+switch profiles or open a WebSocket. The host calls `browser.connect` when it is
+ready to request reconnection. `connection.restored` then carries a strictly
+newer generation. Existing Workspaces
 and active Leases remain valid, but old target IDs, frame IDs, CDP sessions,
 Observations, and refs do not. Poll through the restoration event, call
 `browser.tabs.list`, and rebuild target state. Never retry a mutating command whose

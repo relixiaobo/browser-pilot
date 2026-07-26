@@ -43,7 +43,9 @@ bp connect
 ```
 
 Chrome may require the user to click Allow. Do not claim connection until the
-command succeeds.
+command succeeds. `bp browsers` is passive and never prompts. While one
+`bp connect` is waiting for Allow, do not launch another; all clients reuse the
+same pending service-side connection.
 
 ## Operate from Current State
 

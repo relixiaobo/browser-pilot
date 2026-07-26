@@ -914,7 +914,7 @@ test('Broker publishes one lost/restored pair, rejects disconnected tools, and a
   const changes = [];
   const runtime = createRuntime({
     toolExecutor: {
-      supportedTools: ['browser.connect'],
+      supportedTools: ['browser.tabs.list'],
       browserConnectionChanged(previous, current) {
         changes.push([previous.state, current.state, current.connectionGeneration]);
       },
@@ -947,8 +947,8 @@ test('Broker publishes one lost/restored pair, rejects disconnected tools, and a
   });
   await assert.rejects(
     () => runtime.call('bridge:lifecycle', 'tools/call', {
-      name: 'browser.connect',
-      arguments: { browserId: 'browser:test' },
+      name: 'browser.tabs.list',
+      arguments: {},
       workspaceId: created.workspace.id,
       leaseId: lease.id,
     }),
