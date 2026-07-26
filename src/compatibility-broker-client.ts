@@ -7,6 +7,7 @@ import { BrowserPilotError } from './protocol/errors.js';
 import {
   CAPABILITIES,
   type ArtifactDescriptor,
+  type BrowserCandidate,
   type BrowserWorkspace,
   type ControlledTargetId,
   type ControlLease,
@@ -143,6 +144,14 @@ export class CompatibilityBrokerClient {
       throw new BrowserPilotError('browser_not_found', 'No supported browser is available');
     }
     await this.callTool('browser.connect', { browserId: selected.id });
+  }
+
+  async listBrowsers(browser?: string): Promise<BrowserCandidate[]> {
+    const result = await this.callTool('browser.discover', browser ? { browser } : {});
+    if (!Array.isArray(result.browsers)) {
+      throw new BrowserPilotError('internal_error', 'browser.discover returned invalid browsers');
+    }
+    return result.browsers as unknown as BrowserCandidate[];
   }
 
   async listTabs(scope: 'all' | 'managed_only' | 'user_tabs' = 'all'): Promise<CompatibilityTarget[]> {

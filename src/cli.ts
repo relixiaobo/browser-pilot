@@ -306,10 +306,13 @@ program.command('browsers')
   .option('-b, --browser <name>', 'filter by browser ID, product, or channel')
   .action(action(async (opts) => {
     const filter = typeof opts.browser === 'string' ? opts.browser.toLowerCase() : undefined;
-    const browsers = (await discoverBrowserCandidates())
-      .map(discovered => discovered.candidate)
-      .filter(candidate => !filter || [candidate.id, candidate.product, candidate.channel]
-        .some(value => value?.toLowerCase().includes(filter)));
+    const client = await resumeCompatibility(PKG_VERSION);
+    const browsers = client
+      ? await client.listBrowsers(filter)
+      : (await discoverBrowserCandidates())
+        .map(discovered => discovered.candidate)
+        .filter(candidate => !filter || [candidate.id, candidate.product, candidate.channel]
+          .some(value => value?.toLowerCase().includes(filter)));
     if (useJson()) {
       console.log(JSON.stringify({ ok: true, browsers }));
       return;

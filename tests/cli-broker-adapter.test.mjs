@@ -54,6 +54,19 @@ async function startFakeDaemon(root) {
 
   const toolResult = async (name, args) => {
     switch (name) {
+      case 'browser.discover':
+        return {
+          browsers: [{
+            id: 'browser:fake',
+            product: 'Chrome',
+            channel: 'stable',
+            profile: '/profiles/fake',
+            processState: 'running',
+            remoteDebuggingState: 'enabled',
+            authorizationState: 'authorized',
+            state: 'ready',
+          }],
+        };
       case 'browser.connect':
         return {
           workspaceId: 'workspace:cli',
@@ -342,6 +355,10 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
   const snapshot = await runCli(root, ['snapshot', '--limit', '9']);
   assert.equal(snapshot.ok, true);
   assert.equal(snapshot.elements[0].name, 'Submit');
+
+  const browsers = await runCli(root, ['browsers']);
+  assert.equal(browsers.browsers[0].state, 'ready');
+  assert.ok(calls.some(call => call.body?.params?.name === 'browser.discover'));
 
   const connected = await runCli(root, ['connect']);
   assert.equal(connected.profileSelectionRequired, true);

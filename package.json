@@ -1,6 +1,6 @@
 {
   "name": "browser-pilot-cli",
-  "version": "0.3.0-rc.3",
+  "version": "0.3.0-rc.4",
   "description": "CLI tool to control your browser via Chrome DevTools Protocol",
   "repository": "https://github.com/relixiaobo/browser-pilot",
   "type": "module",
@@ -47,6 +47,7 @@
     "docs/releases/v0.3.0-rc.1.md",
     "docs/releases/v0.3.0-rc.2.md",
     "docs/releases/v0.3.0-rc.3.md",
+    "docs/releases/v0.3.0-rc.4.md",
     "README.md",
     "LICENSE"
   ],
