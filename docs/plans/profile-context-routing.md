@@ -1,6 +1,6 @@
 # Profile Context Routing Plan
 
-Status: **In progress**
+Status: **Complete**
 Target: Browser Pilot `v0.3.0`, protocol `1.2`
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
 
@@ -179,21 +179,21 @@ candidate targets were closed.
 - [x] P4: update stdio integration guidance, adapters, skill, and release docs.
 - [x] P5: add protocol, dual-Profile, concurrency, reconnect, cleanup, and
   compatibility tests.
-- [ ] P6: run real Chrome acceptance and publish `v0.3.0-rc.2`.
+- [x] P6: run real Chrome acceptance and publish `v0.3.0-rc.2`.
 
 ## Acceptance
 
-- All eligible user tabs across live Profile contexts appear in one inventory.
-- Existing user tabs can be controlled without selecting a Profile first.
-- No multi-context open silently selects a first Profile.
-- Explicit, active-target, Workspace, and single-context resolution follow the
+- [x] All eligible user tabs across live Profile contexts appear in one inventory.
+- [x] Existing user tabs can be controlled without selecting a Profile first.
+- [x] No multi-context open silently selects a first Profile.
+- [x] Explicit, active-target, Workspace, and single-context resolution follow the
   specified order.
-- Every managed target and popup matches its ManagedTabSet Profile context.
-- Two Workspaces may select different contexts and create targets concurrently
+- [x] Every managed target and popup matches its ManagedTabSet Profile context.
+- [x] Two Workspaces may select different contexts and create targets concurrently
   without cross-routing.
-- Reconnect invalidates old Profile IDs, target mappings, frames, and refs.
-- Passive listing creates no target and never focuses or navigates a user tab.
-- Janitor EOF/SIGKILL cleanup closes fallback-created managed windows but never
+- [x] Reconnect invalidates old Profile IDs, target mappings, frames, and refs.
+- [x] Passive listing creates no target and never focuses or navigates a user tab.
+- [x] Janitor EOF/SIGKILL cleanup closes fallback-created managed windows but never
   user tabs.
-- Protocol 1.1 clients retain existing-tab control and cannot open ambiguously.
-- Single-Profile CLI and fixture behavior remains compatible.
+- [x] Protocol 1.1 clients retain existing-tab control and cannot open ambiguously.
+- [x] Single-Profile CLI and fixture behavior remains compatible.
