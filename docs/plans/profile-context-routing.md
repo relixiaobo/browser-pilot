@@ -198,7 +198,7 @@ candidate targets were closed.
 - [x] P2: implement Profile context registry, target propagation, Workspace
   selection, multiple ManagedTabSets, and janitor adoption.
 - [x] P3: implement `bp profiles`, `bp profile`, and `bp open --profile`.
-- [x] P4: update stdio integration guidance, adapters, skill, and release docs.
+- [x] P4: update CLI integration guidance, skill, and release docs.
 - [x] P5: add protocol, dual-Profile, concurrency, reconnect, cleanup, and
   compatibility tests.
 - [x] P6: run real Chrome acceptance and publish `v0.3.0-rc.2`.

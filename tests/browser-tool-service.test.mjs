@@ -579,7 +579,6 @@ function initialize(runtime, bridge, clientId, instanceId, protocolMinor = 0) {
       'event.read',
       'developer.eval',
     ],
-    launchMode: 'embedded',
   });
 }
 
@@ -602,23 +601,110 @@ async function tool(runtime, client, name, args, targetId) {
   return outcome.result;
 }
 
-test('production tools/list exposes only fully wired Browser tools', async () => {
+test('production Browser service declares only fully wired Browser tools', () => {
   const transport = new BrowserFixtureTransport();
   const browserTools = new BrowserToolService(transport, binding);
-  const runtime = new MemoryBrokerRuntime({
-    serviceVersion: '1.0.0',
-    brokerProcessIdentity: 'broker:test',
-    browsers: [binding],
-    toolExecutor: browserTools,
-  });
-  await initialize(runtime, 'bridge:list', 'com.example.agent', 'instance:list', 3);
-
-  const manifest = await runtime.call('bridge:list', 'tools/list', {});
-  const names = manifest.tools.map(definition => definition.name);
-  assert.deepEqual(names, [...browserTools.supportedTools]);
+  const names = [...browserTools.supportedTools];
   assert.equal(names.includes('browser.capture'), false);
   assert.equal(names.includes('browser.network.requests'), true);
   assert.equal(names.includes('browser.auth.set'), true);
+});
+
+test('browser connection is dispatched while Chrome authorization is pending', async () => {
+  const transport = new BrowserFixtureTransport();
+  const connectionBinding = structuredClone(binding);
+  connectionBinding.candidate.state = 'disconnected';
+  connectionBinding.instance.state = 'disconnected';
+  connectionBinding.instance.connectionGeneration = 0;
+  connectionBinding.instance.processIdentity = '';
+  let releaseConnection;
+  let signalStarted;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const gate = new Promise(resolve => { releaseConnection = resolve; });
+  let runtime;
+  const browserTools = new BrowserToolService(transport, connectionBinding, {
+    async connectBrowser() {
+      signalStarted();
+      await gate;
+      connectionBinding.instance.state = 'connected';
+      connectionBinding.instance.connectionGeneration = 1;
+      connectionBinding.instance.processIdentity = 'process:restored';
+      runtime.updateBrowserConnection(connectionBinding.instance.id, {
+        state: 'connected',
+        connectionGeneration: 1,
+        processIdentity: connectionBinding.instance.processIdentity,
+      });
+    },
+  });
+  runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:pending-connect',
+    browsers: [connectionBinding],
+    toolExecutor: browserTools,
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:pending-connect',
+    'com.example.pending-connect',
+    'instance:pending-connect',
+  );
+
+  const pending = runtime.call(client.bridge, 'tools/call', {
+    name: 'browser.connect',
+    arguments: { browserId: connectionBinding.candidate.id },
+    workspaceId: client.workspace.id,
+    leaseId: client.lease.id,
+    commandId: 'command:pending-connect',
+  });
+  await started;
+  const active = await runtime.call(client.bridge, 'commands/get', {
+    workspaceId: client.workspace.id,
+    commandId: 'command:pending-connect',
+  });
+  assert.equal(active.command.status, 'dispatched');
+
+  releaseConnection();
+  const completed = await pending;
+  assert.equal(completed.command.status, 'completed');
+  assert.equal(completed.result.state, 'connected');
+});
+
+test('missing browser connection coordinator fails before dispatch', async () => {
+  const transport = new BrowserFixtureTransport();
+  const connectionBinding = structuredClone(binding);
+  connectionBinding.candidate.state = 'disconnected';
+  connectionBinding.instance.state = 'disconnected';
+  connectionBinding.instance.connectionGeneration = 0;
+  connectionBinding.instance.processIdentity = '';
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:missing-connect-coordinator',
+    browsers: [connectionBinding],
+    toolExecutor: new BrowserToolService(transport, connectionBinding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:missing-connect-coordinator',
+    'com.example.missing-connect-coordinator',
+    'instance:missing-connect-coordinator',
+  );
+
+  await assert.rejects(
+    runtime.call(client.bridge, 'tools/call', {
+      name: 'browser.connect',
+      arguments: { browserId: connectionBinding.candidate.id },
+      workspaceId: client.workspace.id,
+      leaseId: client.lease.id,
+      commandId: 'command:missing-connect-coordinator',
+    }),
+    error => error.code === 'browser_disconnected',
+  );
+  const outcome = await runtime.call(client.bridge, 'commands/get', {
+    workspaceId: client.workspace.id,
+    commandId: 'command:missing-connect-coordinator',
+  });
+  assert.equal(outcome.command.status, 'completed');
+  assert.equal(outcome.command.dispatchedAt, undefined);
 });
 
 test('tools/call lists user tabs, creates a managed target, and preserves user tabs on release', async () => {
@@ -2603,7 +2689,6 @@ test('tools/call enforces envelope context, schemas, and negotiated capabilities
     },
     protocol: { min: { major: 1, minor: 0 }, max: { major: 1, minor: 0 } },
     requestedCapabilities: ['workspace.manage', 'browser.control'],
-    launchMode: 'embedded',
   });
   const { workspace } = await runtime.call('bridge:limited', 'workspaces/create', {});
   const { lease } = await runtime.call('bridge:limited', 'leases/create', { workspaceId: workspace.id });

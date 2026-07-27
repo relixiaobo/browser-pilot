@@ -1,13 +1,12 @@
 {
   "name": "browser-pilot-cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "CLI tool to control your browser via Chrome DevTools Protocol",
   "repository": "https://github.com/relixiaobo/browser-pilot",
   "type": "module",
   "bin": {
     "bp": "dist/cli.js",
-    "browser-pilot": "dist/cli.js",
-    "browser-pilot-conformance": "scripts/run-stdio-conformance.mjs"
+    "browser-pilot": "dist/cli.js"
   },
   "scripts": {
     "build": "tsup",
@@ -26,8 +25,6 @@
     "test:unit": "tsup && node --test tests/*.test.mjs",
     "test:capabilities": "tsup && node --test tests/browser-capability-fixtures.test.mjs",
     "test:protocol": "tsup && node --test tests/protocol.test.mjs",
-    "test:stdio-conformance": "tsup && node scripts/run-isolated-stdio-conformance.mjs",
-    "test:host-acceptance": "tsup && node scripts/run-isolated-host-integration-acceptance.mjs",
     "test:distribution": "tsup && node scripts/verify-npm-distribution.mjs",
     "test:canary": "tsup && node scripts/run-real-site-canaries.mjs",
     "test:canary:strict": "tsup && node scripts/run-real-site-canaries.mjs --strict",
@@ -41,10 +38,7 @@
     "dist/cli.js",
     "dist/daemon.js",
     "dist/managed-target-janitor.js",
-    "scripts/run-stdio-conformance.mjs",
     "docs/architecture/browser-pilot-platform-spec.md",
-    "docs/integration/stdio-bridge.md",
-    "docs/integration/stdio-conformance.md",
     "docs/plans/browser-capability-evolution.md",
     "docs/plans/profile-context-routing.md",
     "docs/plans/v0.3.0-stabilization.md",

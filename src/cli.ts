@@ -1,22 +1,25 @@
 import { Command, CommanderError } from 'commander';
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { basename, isAbsolute, resolve as resolvePath } from 'node:path';
 import { BROWSER_PILOT_VERSION as PKG_VERSION } from './version.js';
 import { BrowserPilotError, invalidArgument } from './protocol/errors.js';
 import type {
   ArtifactDescriptor,
+  CommandDescriptor,
+  CommandOutcome,
+  CommandStatus,
   ControlledTargetId,
   JsonValue,
 } from './protocol/model.js';
-import { DaemonBridgeBackend } from './bridge/daemon-bridge-backend.js';
-import { runStdioBridge } from './bridge/stdio-bridge.js';
 import { discoverBrowserCandidates } from './chrome.js';
+import { isDaemonRunning } from './client.js';
 import {
   connectCompatibility,
   resumeCompatibility,
   shutdownCompatibility,
   withCompatibilityTarget,
   type CompatibilityBrokerClient,
+  type CompatibilityInvocationOptions,
   type CompatibilityProfile,
   type CompatibilityTarget,
 } from './compatibility-broker-client.js';
@@ -28,7 +31,9 @@ program
   .description('Control your browser from the command line')
   .version(PKG_VERSION)
   .option('--human', 'force human-readable output (default when TTY)')
-  .option('--client-key <key>', 'stable namespace for one-shot Agent state')
+  .option('--client-key <key>', 'stable namespace for Agent browser state')
+  .option('--request-id <id>', 'stable host request ID for safe retry recovery')
+  .option('--timeout <ms>', 'browser command deadline in milliseconds', '60000')
   .addHelpText('after', `
 Workflow:
   bp connect                          # one-time setup (click Allow in Chrome)
@@ -85,6 +90,17 @@ Eval (escape hatch for operations without a dedicated command):
   echo 'complex js here' | bp eval                   # stdin for complex JS
 `);
 
+const cliAbortController = new AbortController();
+let receivedSignal: NodeJS.Signals | undefined;
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    receivedSignal = signal;
+    cliAbortController.abort();
+    const fallback = setTimeout(() => process.exit(signal === 'SIGINT' ? 130 : 143), 2_000);
+    fallback.unref();
+  });
+}
+
 // ── Output ──────────────────────────────────────────
 
 function useJson(): boolean {
@@ -115,7 +131,7 @@ function fail(error: string, hint?: string, details?: BrowserPilotError): never 
     ...(stable.remediation ? { remediation: stable.remediation } : {}),
   }));
   else console.error(`\u2717 ${error}${hint ? `\n  hint: ${hint}` : ''}`);
-  process.exit(1);
+  process.exit(receivedSignal === 'SIGINT' ? 130 : receivedSignal === 'SIGTERM' ? 143 : 1);
 }
 
 interface CliObservationElement {
@@ -248,6 +264,106 @@ function cliClientKey(): string {
   return value;
 }
 
+function cliInvocationOptions(): CompatibilityInvocationOptions {
+  const requestId = program.opts().requestId ?? process.env.BROWSER_PILOT_REQUEST_ID;
+  if (
+    requestId !== undefined &&
+    (typeof requestId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId))
+  ) {
+    throw invalidArgument(
+      'Request ID must be 1-128 characters using letters, digits, dot, underscore, colon, or hyphen',
+      'requestId',
+    );
+  }
+  const rawTimeout = String(program.opts().timeout ?? '60000');
+  const deadlineMs = Number(rawTimeout);
+  if (!/^\d+$/.test(rawTimeout) || !Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 300_000) {
+    throw invalidArgument('--timeout must be an integer from 1 through 300000', 'timeout');
+  }
+  return {
+    ...(requestId ? { requestId } : {}),
+    deadlineMs,
+    signal: cliAbortController.signal,
+  };
+}
+
+function cliCommand(command: CommandDescriptor): Record<string, JsonValue> {
+  return {
+    id: command.id,
+    method: command.method,
+    mutating: command.mutating,
+    status: command.status,
+    acceptedAt: command.acceptedAt,
+    deadlineAt: command.deadlineAt,
+    ...(command.targetId ? { targetId: command.targetId } : {}),
+    ...(command.dispatchedAt !== undefined ? { dispatchedAt: command.dispatchedAt } : {}),
+    ...(command.completedAt !== undefined ? { completedAt: command.completedAt } : {}),
+    ...(command.cancellationRequested ? { cancellationRequested: true } : {}),
+  };
+}
+
+function cliCommandOutcome(outcome: CommandOutcome): Record<string, JsonValue> {
+  return {
+    command: cliCommand(outcome.command),
+    ...(outcome.result !== undefined ? { result: outcome.result } : {}),
+    ...(outcome.error !== undefined ? { error: outcome.error as unknown as JsonValue } : {}),
+  };
+}
+
+function outputPath(filename: string): string {
+  if (isAbsolute(filename)) return resolvePath(filename);
+  const configured = process.env.BROWSER_PILOT_OUTPUT_DIR;
+  if (configured !== undefined) {
+    if (!isAbsolute(configured)) {
+      throw invalidArgument('BROWSER_PILOT_OUTPUT_DIR must be an absolute path', 'outputDir');
+    }
+    mkdirSync(configured, { recursive: true, mode: 0o700 });
+    return resolvePath(configured, filename);
+  }
+  return resolvePath(filename);
+}
+
+function artifactFileResult(
+  artifact: ArtifactDescriptor,
+  file: string,
+): Record<string, JsonValue> {
+  return {
+    file,
+    mimeType: artifact.mimeType,
+    sizeBytes: artifact.byteSize,
+    ...(artifact.width !== undefined ? { width: artifact.width } : {}),
+    ...(artifact.height !== undefined ? { height: artifact.height } : {}),
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  if (cliAbortController.signal.aborted) {
+    return Promise.reject(new BrowserPilotError('command_cancelled', 'Wait was cancelled'));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      cliAbortController.signal.removeEventListener('abort', cancelled);
+      resolve();
+    }
+    function cancelled(): void {
+      clearTimeout(timer);
+      cliAbortController.signal.removeEventListener('abort', cancelled);
+      reject(new BrowserPilotError('command_cancelled', 'Wait was cancelled'));
+    }
+    cliAbortController.signal.addEventListener('abort', cancelled, { once: true });
+  });
+}
+
+function matchesUrl(url: string, pattern: string): boolean {
+  if (!pattern.includes('*')) return url.includes(pattern);
+  const source = pattern
+    .split('*')
+    .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${source}$`).test(url);
+}
+
 function requireString(value: JsonValue | undefined, label: string): string {
   if (typeof value !== 'string') throw new BrowserPilotError('internal_error', `${label} is missing`);
   return value;
@@ -276,7 +392,7 @@ async function cliElementAddress(
 }
 
 async function requireCompatibility(): Promise<CompatibilityBrokerClient> {
-  const client = await resumeCompatibility(PKG_VERSION, cliClientKey());
+  const client = await resumeCompatibility(PKG_VERSION, cliClientKey(), cliInvocationOptions());
   if (!client) {
     throw new BrowserPilotError('browser_disconnected', 'Browser Pilot is not connected', {
       retryable: true,
@@ -345,7 +461,7 @@ function cliProfile(profile: CompatibilityProfile, index: number): Record<string
 function withCliTarget<T>(
   operation: (client: CompatibilityBrokerClient, target: CompatibilityTarget) => Promise<T>,
 ): Promise<T> {
-  return withCompatibilityTarget(PKG_VERSION, operation, cliClientKey());
+  return withCompatibilityTarget(PKG_VERSION, operation, cliClientKey(), cliInvocationOptions());
 }
 
 function readStdin(): Promise<string> {
@@ -363,12 +479,254 @@ function readStdin(): Promise<string> {
 
 // ─── connect ────────────────────────────────────────
 
+program.command('status')
+  .description('Show current Broker, browser, Agent namespace, and recovery state')
+  .action(action(async () => {
+    const brokerRunning = isDaemonRunning();
+    const client = await resumeCompatibility(PKG_VERSION, cliClientKey(), cliInvocationOptions());
+    if (!client) {
+      const browsers = (await discoverBrowserCandidates()).map(discovered => discovered.candidate);
+      emit({
+        ok: true,
+        service: { state: brokerRunning ? 'unavailable' : 'stopped', version: PKG_VERSION },
+        browser: { state: 'disconnected' },
+        browsers,
+        session: { state: 'unavailable' },
+        recovery: {
+          required: true,
+          code: 'browser_disconnected',
+          action: 'bp connect',
+        },
+      }, brokerRunning
+        ? 'Browser Pilot Broker is running, but the browser session is unavailable.'
+        : 'Browser Pilot is not connected. Run bp connect.');
+      return;
+    }
+
+    const [activeCommands, uncertainCommands] = await Promise.all([
+      client.listCommands(20, ['accepted', 'dispatched']),
+      client.listCommands(20, ['unknown_outcome']),
+    ]);
+    let tabs: CompatibilityTarget[] = [];
+    let profiles: CompatibilityProfile[] = [];
+    let browserStateError: BrowserPilotError | undefined;
+    try {
+      [tabs, profiles] = await Promise.all([client.listTabs('all'), client.listProfiles()]);
+    } catch (error) {
+      browserStateError = error instanceof BrowserPilotError
+        ? error
+        : new BrowserPilotError('internal_error', error instanceof Error ? error.message : String(error));
+    }
+    const selectedTarget = tabs.find(tab => tab.selected ?? tab.active === true);
+    const selectedProfile = profiles.find(profile => profile.selected);
+    const browser = client.initialized.browsers.find(candidate => candidate.state === 'ready')
+      ?? client.initialized.browsers[0];
+    const recovery = browserStateError
+      ? {
+          required: true,
+          code: browserStateError.code,
+          action: browserStateError.remediation?.message ?? 'Inspect the browser connection before continuing.',
+        }
+      : uncertainCommands.length > 0
+        ? {
+            required: true,
+            code: 'unknown_outcome',
+            action: 'Inspect the current tab and the uncertain command before retrying.',
+          }
+        : { required: false };
+    emit({
+      ok: true,
+      service: {
+        state: 'running',
+        version: client.initialized.serviceVersion,
+      },
+      browser: browser
+        ? { id: browser.id, product: browser.product, state: browser.state }
+        : { state: 'disconnected' },
+      session: {
+        state: client.lease.state,
+        expiresAt: client.lease.expiresAt,
+        profile: selectedProfile ? cliProfile(selectedProfile, profiles.indexOf(selectedProfile)) : null,
+        target: selectedTarget ? {
+          index: tabs.indexOf(selectedTarget) + 1,
+          title: selectedTarget.title,
+          url: selectedTarget.url,
+          origin: selectedTarget.origin,
+          profileContextId: selectedTarget.profileContextId,
+        } : null,
+      },
+      commands: {
+        active: activeCommands.map(cliCommand),
+        uncertain: uncertainCommands.map(cliCommand),
+      },
+      recovery,
+    }, `Browser Pilot: ${browser?.state ?? 'disconnected'}; ${tabs.length} tab(s); ${activeCommands.length} active command(s)`);
+  }));
+
+program.command('commands')
+  .description('List recent commands for this Agent namespace')
+  .option('-l, --limit <n>', 'maximum commands to return', '20')
+  .option('--status <statuses>', 'comma-separated Command statuses')
+  .action(action(async (opts) => {
+    const limit = parseLimit(opts.limit);
+    if (limit > 100) throw invalidArgument('--limit must not exceed 100', 'limit');
+    const statuses = opts.status === undefined
+      ? undefined
+      : String(opts.status).split(',').map((status: string) => status.trim()).filter(Boolean) as CommandStatus[];
+    const validStatuses = new Set<CommandStatus>([
+      'accepted', 'dispatched', 'completed', 'unknown_outcome', 'cancelled', 'expired',
+    ]);
+    if (statuses && (statuses.length === 0 || statuses.some(status => !validStatuses.has(status)))) {
+      throw invalidArgument('--status contains an invalid Command status', 'status');
+    }
+    const commands = await (await requireCompatibility()).listCommands(limit, statuses);
+    if (useJson()) {
+      console.log(JSON.stringify({ ok: true, commands: commands.map(cliCommand) }));
+    } else if (commands.length === 0) {
+      console.log('No recent commands.');
+    } else {
+      for (const command of commands) {
+        console.log(`${command.id}  ${command.status.padEnd(15)} ${command.method}`);
+      }
+    }
+  }));
+
+program.command('command <commandId>')
+  .description('Inspect one recent command and its outcome')
+  .action(action(async (commandId) => {
+    const outcome = await (await requireCompatibility()).getCommand(commandId);
+    const result = cliCommandOutcome(outcome);
+    if (useJson()) console.log(JSON.stringify({ ok: true, ...result }));
+    else console.log(`${outcome.command.id}: ${outcome.command.status} (${outcome.command.method})`);
+  }));
+
+program.command('cancel <commandId>')
+  .description('Request cancellation of a running command')
+  .action(action(async (commandId) => {
+    const outcome = await (await requireCompatibility()).cancelCommand(commandId);
+    const result = cliCommandOutcome(outcome);
+    if (useJson()) console.log(JSON.stringify({ ok: true, ...result }));
+    else console.log(`${outcome.command.id}: ${outcome.command.status}`);
+  }));
+
+program.command('wait')
+  .description('Wait for a browser-visible condition')
+  .option('--url <pattern>', 'wait for the selected tab URL to contain a value or match a * glob')
+  .option('--text <text>', 'wait for visible page text')
+  .option('--selector <selector>', 'wait for a CSS selector')
+  .option('--dialog', 'wait for a pending JavaScript dialog')
+  .option('--download', 'wait for a completed unexported download')
+  .option('--popup', 'wait for a managed popup tab')
+  .option('--interval <ms>', 'poll interval in milliseconds', '250')
+  .action(action(async (opts) => {
+    const conditions = [
+      opts.url !== undefined,
+      opts.text !== undefined,
+      opts.selector !== undefined,
+      opts.dialog === true,
+      opts.download === true,
+      opts.popup === true,
+    ].filter(Boolean).length;
+    if (conditions !== 1) {
+      throw invalidArgument(
+        'Choose exactly one of --url, --text, --selector, --dialog, --download, or --popup',
+        'condition',
+      );
+    }
+    const intervalMs = Number(opts.interval);
+    if (!/^\d+$/.test(String(opts.interval)) || !Number.isSafeInteger(intervalMs) || intervalMs < 100 || intervalMs > 5_000) {
+      throw invalidArgument('--interval must be an integer from 100 through 5000', 'interval');
+    }
+    const waitTimeoutMs = cliInvocationOptions().deadlineMs ?? 60_000;
+    const startedAt = Date.now();
+    const deadlineAt = startedAt + waitTimeoutMs;
+    const client = await requireCompatibility();
+    const needsTarget = opts.url !== undefined || opts.text !== undefined || opts.selector !== undefined;
+    const target = needsTarget ? await client.ensureTarget() : undefined;
+    const condition = opts.url !== undefined ? 'url'
+      : opts.text !== undefined ? 'text'
+        : opts.selector !== undefined ? 'selector'
+          : opts.dialog ? 'dialog'
+            : opts.download ? 'download'
+              : 'popup';
+
+    while (Date.now() <= deadlineAt) {
+      let matched: JsonValue | undefined;
+      if (opts.url !== undefined) {
+        const tabs = await client.listTabs('all');
+        const current = tabs.find(tab => tab.targetId === target!.targetId);
+        if (current && matchesUrl(current.url, String(opts.url))) {
+          matched = {
+            title: current.title,
+            url: current.url,
+            origin: current.origin,
+            profileContextId: current.profileContextId,
+          };
+        }
+      } else if (opts.text !== undefined) {
+        const result = await client.callTool('browser.search', {
+          query: String(opts.text),
+          limit: 1,
+        }, target!.targetId);
+        const matches = Array.isArray(result.matches) ? result.matches : [];
+        if (matches.length > 0) matched = { title: result.title, url: result.url, match: matches[0] };
+      } else if (opts.selector !== undefined) {
+        const result = await client.callTool('browser.elements.find', {
+          selector: String(opts.selector),
+          limit: 1,
+        }, target!.targetId);
+        const elements = Array.isArray(result.elements) ? result.elements : [];
+        if (elements.length > 0) matched = { url: result.url, element: elements[0] };
+      } else if (opts.dialog) {
+        const result = await client.callTool('browser.dialogs.list');
+        const dialogs = Array.isArray(result.dialogs) ? result.dialogs : [];
+        if (dialogs.length > 0) matched = dialogs[0];
+      } else if (opts.download) {
+        const downloads = await client.listArtifacts(['download']);
+        if (downloads.length > 0) matched = {
+          index: 1,
+          id: downloads[0].id,
+          fileName: downloads[0].fileName ?? null,
+          mimeType: downloads[0].mimeType,
+          sizeBytes: downloads[0].byteSize,
+          createdAt: downloads[0].createdAt,
+          expiresAt: downloads[0].expiresAt,
+        };
+      } else {
+        const tabs = await client.listTabs('all');
+        const popup = tabs.find(tab => tab.origin === 'managed_popup');
+        if (popup) {
+          matched = {
+            title: popup.title,
+            url: popup.url,
+            origin: popup.origin,
+            profileContextId: popup.profileContextId,
+          };
+        }
+      }
+      if (matched !== undefined) {
+        emit({
+          ok: true,
+          condition,
+          elapsedMs: Date.now() - startedAt,
+          matched,
+        }, `Condition satisfied: ${condition}`);
+        return;
+      }
+      await delay(Math.min(intervalMs, Math.max(0, deadlineAt - Date.now())));
+    }
+    throw new BrowserPilotError('wait_timeout', `Timed out waiting for ${condition}`, {
+      retryable: true,
+      context: { condition, timeoutMs: waitTimeoutMs },
+    });
+  }));
+
 program.command('browsers')
   .description('List supported local browsers and their setup state')
   .option('-b, --browser <name>', 'filter by browser ID, product, or channel')
   .action(action(async (opts) => {
     const filter = typeof opts.browser === 'string' ? opts.browser.toLowerCase() : undefined;
-    const client = await resumeCompatibility(PKG_VERSION, cliClientKey());
+    const client = await resumeCompatibility(PKG_VERSION, cliClientKey(), cliInvocationOptions());
     const browsers = client
       ? await client.listBrowsers(filter)
       : (await discoverBrowserCandidates())
@@ -404,7 +762,7 @@ program.command('connect')
       console.log('Connecting to Chrome...');
       console.log('If prompted, click "Allow" in Chrome\'s authorization dialog.\n');
     }
-    const client = await connectCompatibility(PKG_VERSION, opts.browser, cliClientKey());
+    const client = await connectCompatibility(PKG_VERSION, opts.browser, cliClientKey(), cliInvocationOptions());
     await client.connectBrowser();
     const profiles = await client.listProfiles();
     if (profiles.length <= 1) await client.ensureManagedTarget();
@@ -422,31 +780,6 @@ program.command('connect')
       `\u2713 Connected to ${browser}\n\u2713 Pilot window ready (daemon running in background)\n\nReady! Try: bp open https://example.com`,
     );
   }));
-
-// ─── embedded stdio bridge ─────────────────────────
-
-program.command('bridge')
-  .description('Run the Agent-neutral JSON-RPC bridge')
-  .option('--stdio', 'use newline-delimited JSON-RPC over stdin/stdout')
-  .option('-b, --browser <name>', 'prefer a browser ID, product, or channel when starting the Broker')
-  .action((opts) => {
-    if (!opts.stdio) {
-      process.stderr.write('bridge currently requires --stdio\n');
-      process.exitCode = 2;
-      return;
-    }
-    void runStdioBridge({
-      input: process.stdin,
-      output: process.stdout,
-      backend: new DaemonBridgeBackend(opts.browser),
-    }).then(result => {
-      process.exitCode = result.exitCode;
-    }).catch(error => {
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`Bridge error: ${message}\n`);
-      process.exitCode = 1;
-    });
-  });
 
 // ─── disconnect ─────────────────────────────────────
 
@@ -1002,6 +1335,50 @@ program.command('upload <filepath>')
     });
   }));
 
+program.command('downloads')
+  .description('List completed downloads available to this Agent namespace')
+  .action(action(async () => {
+    const artifacts = await (await requireCompatibility()).listArtifacts(['download']);
+    const downloads = artifacts.map((artifact, index) => ({
+      index: index + 1,
+      id: artifact.id,
+      fileName: artifact.fileName,
+      mimeType: artifact.mimeType,
+      sizeBytes: artifact.byteSize,
+      createdAt: artifact.createdAt,
+      expiresAt: artifact.expiresAt,
+    }));
+    if (useJson()) {
+      console.log(JSON.stringify({ ok: true, downloads }));
+    } else if (downloads.length === 0) {
+      console.log('No completed downloads.');
+    } else {
+      for (const download of downloads) {
+        console.log(`${download.index}  ${download.fileName ?? download.id}  ${download.sizeBytes} bytes`);
+      }
+    }
+  }));
+
+program.command('download <selector> [filename]')
+  .description('Export one completed download to a local file')
+  .action(action(async (selector, filename) => {
+    const client = await requireCompatibility();
+    const artifacts = await client.listArtifacts(['download']);
+    const artifact = /^\d+$/.test(selector)
+      ? artifacts[Number(selector) - 1]
+      : artifacts.find(candidate => candidate.id === selector);
+    if (!artifact) {
+      throw new BrowserPilotError('artifact_not_found', 'Download was not found for this Agent namespace', {
+        context: { field: 'selector' },
+      });
+    }
+    const fallbackName = artifact.fileName ? basename(artifact.fileName) : `download-${artifact.createdAt}`;
+    const file = outputPath(filename ?? fallbackName);
+    await client.exportArtifact(artifact.id, file);
+    await client.releaseArtifact(artifact.id).catch(() => {});
+    emit({ ok: true, ...artifactFileResult(artifact, file) }, `\u2713 Download saved to ${file}`);
+  }));
+
 // ─── screenshot ─────────────────────────────────────
 
 program.command('screenshot [filename]')
@@ -1033,9 +1410,9 @@ program.command('screenshot [filename]')
       }, target.targetId);
       const artifact = artifactFrom(result);
       const file = filename ?? `screenshot-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.png`;
-      const outputPath = resolvePath(file);
+      const destination = outputPath(file);
       try {
-        await client.exportArtifact(artifact.id, outputPath);
+        await client.exportArtifact(artifact.id, destination);
       } finally {
         await client.releaseArtifact(artifact.id).catch(() => {});
         if (result.preview && typeof result.preview === 'object' && !Array.isArray(result.preview)) {
@@ -1045,9 +1422,9 @@ program.command('screenshot [filename]')
       }
       emit({
         ok: true,
-        file: outputPath,
+        ...artifactFileResult(artifact, destination),
         ...(typeof result.annotationCount === 'number' ? { annotationCount: result.annotationCount } : {}),
-      }, `\u2713 Screenshot saved to ${outputPath}`);
+      }, `\u2713 Screenshot saved to ${destination}`);
     });
   }));
 
@@ -1064,13 +1441,13 @@ program.command('pdf [filename]')
       }, target.targetId);
       const artifact = artifactFrom(result);
       const file = filename ?? `page-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.pdf`;
-      const outputPath = resolvePath(file);
+      const destination = outputPath(file);
       try {
-        await client.exportArtifact(artifact.id, outputPath);
+        await client.exportArtifact(artifact.id, destination);
       } finally {
         await client.releaseArtifact(artifact.id).catch(() => {});
       }
-      emit({ ok: true, file: outputPath }, `\u2713 PDF saved to ${outputPath}`);
+      emit({ ok: true, ...artifactFileResult(artifact, destination) }, `\u2713 PDF saved to ${destination}`);
     });
   }));
 
@@ -1400,12 +1777,17 @@ netCmd.command('show <id>')
           { context: { sequence: id } },
         );
       }
-      const outputPath = resolvePath(opts.save);
+      const destination = outputPath(opts.save);
       const bytes = result.bodyEncoding === 'base64'
         ? Buffer.from(responseBody, 'base64')
         : Buffer.from(responseBody, 'utf8');
-      writeFileSync(outputPath, bytes);
-      emit({ ok: true, file: outputPath }, `Saved to ${outputPath}`);
+      writeFileSync(destination, bytes, { mode: 0o600 });
+      emit({
+        ok: true,
+        file: destination,
+        mimeType: typeof request.mimeType === 'string' ? request.mimeType : 'application/octet-stream',
+        sizeBytes: bytes.byteLength,
+      }, `Saved to ${destination}`);
       return;
     }
 

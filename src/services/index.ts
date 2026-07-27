@@ -2,6 +2,7 @@ export * from './capture-service.js';
 export * from './artifact-store.js';
 export * from './download-controller.js';
 export * from './command-runtime.js';
+export * from './broker-request-timeout.js';
 export * from './event-journal.js';
 export * from './compatibility-dialog-service.js';
 export * from './observation-service.js';

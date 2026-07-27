@@ -26,8 +26,8 @@ function createRuntime(options = {}) {
   });
 }
 
-function initialize(runtime, bridgeSessionId, overrides = {}) {
-  return runtime.call(bridgeSessionId, 'initialize', {
+function initialize(runtime, clientSessionId, overrides = {}) {
+  return runtime.call(clientSessionId, 'initialize', {
     client: {
       id: 'com.example.agent',
       name: 'Example Agent',
@@ -45,13 +45,12 @@ function initialize(runtime, bridgeSessionId, overrides = {}) {
       'observation.read',
       'artifact.read',
     ],
-    launchMode: 'embedded',
     ...(overrides.limits ? { limits: overrides.limits } : {}),
   });
 }
 
-function initializeOneShot(runtime, bridgeSessionId, overrides = {}) {
-  return runtime.call(bridgeSessionId, 'initialize', {
+function initializeCli(runtime, clientSessionId, overrides = {}) {
+  return runtime.call(clientSessionId, 'initialize', {
     client: {
       id: 'org.browser-pilot.cli',
       name: 'Browser Pilot CLI',
@@ -68,12 +67,11 @@ function initializeOneShot(runtime, bridgeSessionId, overrides = {}) {
       'workspace.manage',
       'observation.read',
     ],
-    launchMode: 'one-shot',
     ...(overrides.limits ? { limits: overrides.limits } : {}),
   });
 }
 
-test('Broker initializes one connection and filters the canonical tool manifest', async () => {
+test('Broker initializes one client session with negotiated capabilities', async () => {
   const runtime = createRuntime();
   const initialized = await initialize(runtime, 'bridge:one');
 
@@ -88,15 +86,6 @@ test('Broker initializes one connection and filters the canonical tool manifest'
     'artifact.read',
   ]);
 
-  const manifest = await runtime.call('bridge:one', 'tools/list', {});
-  const observe = manifest.tools.find(tool => tool.name === 'browser.observe');
-  assert.ok(observe);
-  assert.deepEqual(
-    observe.outputSchema.properties.elements.items.properties.value['x-browser-pilot-sensitivity'],
-    ['browser_data', 'credential'],
-  );
-  assert.ok(manifest.tools.some(tool => tool.name === 'browser.capture'));
-  assert.equal(manifest.tools.some(tool => tool.name === 'browser.eval'), false);
   assert.deepEqual(runtime.stats(), {
     principals: 1,
     connections: 1,
@@ -104,8 +93,7 @@ test('Broker initializes one connection and filters the canonical tool manifest'
     activeLeases: 0,
   });
   assert.deepEqual(runtime.lifecycleSummary(), {
-    embeddedConnections: 1,
-    oneShotConnections: 0,
+    connections: 1,
     activeWorkspaces: 0,
     activeLeases: 0,
   });
@@ -248,11 +236,6 @@ test('Broker hides and rejects protocol 1.2 Profile routing on protocol 1.1', as
       max: { major: 1, minor: 1 },
     },
   });
-  const manifest = await runtime.call('bridge:profile-protocol-11', 'tools/list', {});
-  assert.equal(manifest.tools.some(tool => tool.name === 'browser.profiles.list'), false);
-  assert.equal(manifest.tools.some(tool => tool.name === 'browser.profiles.select'), false);
-  assert.equal(manifest.tools.some(tool => tool.name === 'browser.open'), true);
-
   const { workspace } = await runtime.call('bridge:profile-protocol-11', 'workspaces/create', {});
   const { lease } = await runtime.call('bridge:profile-protocol-11', 'leases/create', {
     workspaceId: workspace.id,
@@ -283,7 +266,7 @@ test('Broker hides and rejects protocol 1.2 Profile routing on protocol 1.1', as
   assert.equal(executions, 0);
 });
 
-test('Broker hides and rejects explicit Profile identity before protocol 1.3', async () => {
+test('Broker rejects explicit Profile identity before protocol 1.3', async () => {
   let executions = 0;
   const runtime = createRuntime({
     toolExecutor: {
@@ -301,9 +284,6 @@ test('Broker hides and rejects explicit Profile identity before protocol 1.3', a
       max: { major: 1, minor: 2 },
     },
   });
-  const manifest = await runtime.call('bridge:profile-protocol-12', 'tools/list', {});
-  assert.equal(manifest.tools.some(tool => tool.name === 'browser.profiles.identify'), false);
-
   const { workspace } = await runtime.call('bridge:profile-protocol-12', 'workspaces/create', {});
   const { lease } = await runtime.call('bridge:profile-protocol-12', 'leases/create', {
     workspaceId: workspace.id,
@@ -322,10 +302,10 @@ test('Broker hides and rejects explicit Profile identity before protocol 1.3', a
   assert.equal(executions, 0);
 });
 
-test('One-shot initialize reuses only the same Connection identity and contract', async () => {
+test('CLI initialize reuses only the same client identity and contract', async () => {
   const runtime = createRuntime();
-  const first = await initializeOneShot(runtime, 'bridge:cli');
-  const second = await initializeOneShot(runtime, 'bridge:cli');
+  const first = await initializeCli(runtime, 'bridge:cli');
+  const second = await initializeCli(runtime, 'bridge:cli');
   assert.equal(second.connectionId, first.connectionId);
   assert.deepEqual(runtime.stats(), {
     principals: 1,
@@ -335,25 +315,25 @@ test('One-shot initialize reuses only the same Connection identity and contract'
   });
 
   await assert.rejects(
-    () => initializeOneShot(runtime, 'bridge:cli', {
+    () => initializeCli(runtime, 'bridge:cli', {
       client: { id: 'org.other.cli' },
     }),
     error => error.code === 'invalid_argument',
   );
   await assert.rejects(
-    () => initializeOneShot(runtime, 'bridge:cli', {
+    () => initializeCli(runtime, 'bridge:cli', {
       client: { version: '0.2.0' },
     }),
     error => error.code === 'invalid_argument',
   );
   await assert.rejects(
-    () => initializeOneShot(runtime, 'bridge:cli', {
+    () => initializeCli(runtime, 'bridge:cli', {
       requestedCapabilities: ['browser.control', 'workspace.manage'],
     }),
     error => error.code === 'protocol_incompatible',
   );
   await assert.rejects(
-    () => initializeOneShot(runtime, 'bridge:cli', {
+    () => initializeCli(runtime, 'bridge:cli', {
       limits: { maxResultBytes: 256 * 1024 },
     }),
     error => error.code === 'protocol_incompatible',
@@ -367,7 +347,7 @@ test('Keyed Workspace and Lease creation is idempotent and renews the Lease', as
     minLeaseTtlMs: 1_000,
     maxLeaseTtlMs: 600_000,
   });
-  await initializeOneShot(runtime, 'bridge:cli');
+  await initializeCli(runtime, 'bridge:cli');
   const firstWorkspace = await runtime.call('bridge:cli', 'workspaces/create', {
     clientKey: 'browser-pilot-cli',
   });
@@ -447,7 +427,7 @@ test('Keyed Workspace reuse does not depend on default browser ordering', async 
       },
     ],
   });
-  await initializeOneShot(runtime, 'bridge:browser-order');
+  await initializeCli(runtime, 'bridge:browser-order');
   const first = await runtime.call('bridge:browser-order', 'workspaces/create', {
     browserId: 'browser:second',
     clientKey: 'stable-browser',
@@ -544,17 +524,13 @@ test('Lease heartbeat, expiry, and Workspace release are deterministic and idemp
   assert.deepEqual(released.at(-1), [second.lease.id, 'released']);
 });
 
-test('Broker rejects pre-initialize calls, duplicate initialize, unknown methods, and invalid TTLs', async () => {
+test('Broker rejects pre-initialize calls, unknown methods, and invalid TTLs', async () => {
   const runtime = createRuntime();
   await assert.rejects(
-    () => runtime.call('bridge:test', 'tools/list', {}),
+    () => runtime.call('bridge:test', 'tools/call', {}),
     error => error.code === 'not_initialized',
   );
   await initialize(runtime, 'bridge:test');
-  await assert.rejects(
-    () => initialize(runtime, 'bridge:test'),
-    error => error.code === 'invalid_argument',
-  );
   await assert.rejects(
     () => runtime.call('bridge:test', 'not/a-method', {}),
     error => error.rpcCode === -32601,
@@ -670,6 +646,19 @@ test('Broker commands expose outcomes, deduplicate retries, and cancel queued wo
   });
   assert.equal(queried.command.status, 'completed');
   assert.equal(queried.result.browserInstanceId, 'browser-instance:test');
+  const listed = await runtime.call('bridge:commands', 'commands/list', {
+    workspaceId: workspace.id,
+    statuses: ['completed'],
+    limit: 10,
+  });
+  assert.deepEqual(listed.commands.map(command => command.id), ['command:first']);
+  await assert.rejects(
+    () => runtime.call('bridge:commands', 'commands/list', {
+      workspaceId: workspace.id,
+      statuses: ['not-a-status'],
+    }),
+    error => error.code === 'invalid_argument' && error.context.field === 'statuses',
+  );
 });
 
 test('Broker records unknown outcomes after a dispatched browser disconnect', async () => {
@@ -1104,7 +1093,7 @@ test('Broker publishes one lost/restored pair, rejects disconnected tools, and a
   ]);
 });
 
-test('Broker replays Workspace events, pushes notifications, and enforces Principal isolation', async () => {
+test('Broker replays Workspace events and enforces Principal isolation', async () => {
   const runtime = createRuntime();
   await initialize(runtime, 'bridge:events', {
     requestedCapabilities: ['workspace.manage', 'event.read'],
@@ -1119,10 +1108,6 @@ test('Broker replays Workspace events, pushes notifications, and enforces Princi
     sensitivity: 'browser_data',
     payload: { url: 'https://example.test' },
   });
-  const notification = await runtime.nextNotification('bridge:events', { waitMs: 0 });
-  assert.equal(notification.method, 'events/event');
-  assert.equal(notification.params.event.sequence, 1);
-
   const replayed = await runtime.call('bridge:events', 'events/poll', {
     workspaceId: created.workspace.id,
     cursor: created.eventCursor,

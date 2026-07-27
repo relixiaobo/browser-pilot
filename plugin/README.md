@@ -1,8 +1,8 @@
 # browser-pilot plugin
 
 Agent-neutral skill that teaches shell-capable AI agents to control eligible
-tabs in your real Chrome browser through the `bp` CLI. It also includes a
-separate decision guide for products embedding `browser-pilot bridge --stdio`.
+tabs in your real Chrome browser through the `bp` CLI. Product-bundled and
+Agent-installed CLIs use the same skill and command workflow.
 
 ## Install browser-pilot-cli first
 
@@ -73,9 +73,11 @@ includes Browser Pilot managed tabs and eligible user-opened tabs; no extension
 or separate browser profile is required. Dialogs remain pending until the Agent
 explicitly accepts or dismisses them.
 
-When independent Agents share direct one-shot CLI access, give each one a
-stable `BROWSER_PILOT_CLIENT_KEY`. Embedded products should use
-`browser-pilot bridge --stdio`, which provides its own isolated lifecycle.
+Give each independent Agent a stable `BROWSER_PILOT_CLIENT_KEY`. Products
+should bundle the CLI, put it on the Agent command environment's `PATH`, and let
+the Agent invoke it through its existing shell tool. See the skill's
+`references/embedding.md`; no native tools, MCP server, SDK, or persistent
+adapter are needed.
 
 ## Slash commands
 

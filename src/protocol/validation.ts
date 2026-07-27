@@ -5,8 +5,11 @@ import {
   type ArtifactAccessParams,
   type ArtifactExportParams,
   type ArtifactImportParams,
+  type ArtifactListParams,
   type CapabilityNegotiation,
   type CommandAccessParams,
+  type CommandListParams,
+  type CommandStatus,
   type EventsPollParams,
   type InitializeParams,
   type LeaseCreateParams,
@@ -18,7 +21,6 @@ import {
   type JsonRpcRequest,
   type JsonRpcResponse,
   type JsonValue,
-  type LaunchMode,
   type ProtocolRange,
   type ProtocolLimits,
   type ProtocolVersion,
@@ -39,6 +41,21 @@ const TARGET_ID_PATTERN = /^target:[A-Za-z0-9._:-]+$/;
 const ARTIFACT_ID_PATTERN = /^artifact:[A-Za-z0-9._:-]+$/;
 const COMMAND_ID_PATTERN = /^command:[A-Za-z0-9._:-]+$/;
 const EVENT_CURSOR_PATTERN = /^cursor:(0|[1-9][0-9]{0,15})$/;
+const COMMAND_STATUSES = new Set<CommandStatus>([
+  'accepted',
+  'dispatched',
+  'completed',
+  'unknown_outcome',
+  'cancelled',
+  'expired',
+]);
+const ARTIFACT_KINDS = new Set<ArtifactListParams['kinds'] extends (infer T)[] | undefined ? T : never>([
+  'screenshot',
+  'screenshot_preview',
+  'pdf',
+  'download',
+  'upload_input',
+]);
 export const MIN_NEGOTIATED_TRANSPORT_BYTES = 64 * 1024;
 const MAX_DECLARED_TRANSPORT_BYTES = 1024 * 1024 * 1024;
 
@@ -201,7 +218,7 @@ function parseTransportLimitPreferences(value: unknown): TransportLimitPreferenc
 
 export function validateInitializeParams(value: unknown): InitializeParams {
   if (!isRecord(value)) throw invalidArgument('initialize params must be an object', 'params');
-  assertOnlyKeys(value, ['client', 'protocol', 'requestedCapabilities', 'launchMode', 'limits']);
+  assertOnlyKeys(value, ['client', 'protocol', 'requestedCapabilities', 'limits']);
   if (!isRecord(value.client)) throw invalidArgument('client must be an object', 'client');
   assertOnlyKeys(value.client, ['id', 'name', 'version', 'instanceId'], 'client');
 
@@ -210,10 +227,6 @@ export function validateInitializeParams(value: unknown): InitializeParams {
     throw invalidArgument('requestedCapabilities must be an array of non-empty strings', 'requestedCapabilities');
   }
 
-  const launchMode = value.launchMode;
-  if (launchMode !== 'one-shot' && launchMode !== 'embedded') {
-    throw invalidArgument('launchMode must be one-shot or embedded', 'launchMode');
-  }
 
   return {
     client: {
@@ -224,7 +237,6 @@ export function validateInitializeParams(value: unknown): InitializeParams {
     },
     protocol: parseProtocolRange(value.protocol),
     requestedCapabilities: [...new Set(requested as string[])],
-    launchMode: launchMode as LaunchMode,
     ...(value.limits !== undefined ? { limits: parseTransportLimitPreferences(value.limits) } : {}),
   };
 }
@@ -250,10 +262,6 @@ function validateOpaqueId(
   pattern: RegExp,
 ): string {
   return requireString(record, key, { pattern, maxLength: 128 });
-}
-
-export function validateToolsListParams(value: unknown): Record<string, never> {
-  return validateOptionalEmptyParams(value);
 }
 
 export function validateShutdownParams(value: unknown): Record<string, never> {
@@ -317,6 +325,33 @@ export function validateCommandAccessParams(value: unknown): CommandAccessParams
   };
 }
 
+export function validateCommandListParams(value: unknown): CommandListParams {
+  if (!isRecord(value)) throw invalidArgument('Command list params must be an object', 'params');
+  assertOnlyKeys(value, ['workspaceId', 'limit', 'statuses']);
+  if (
+    value.limit !== undefined &&
+    (!Number.isSafeInteger(value.limit) || Number(value.limit) < 1 || Number(value.limit) > 100)
+  ) {
+    throw invalidArgument('limit must be an integer from 1 through 100', 'limit');
+  }
+  if (
+    value.statuses !== undefined &&
+    (!Array.isArray(value.statuses) || value.statuses.length === 0 ||
+      value.statuses.some(status => typeof status !== 'string' || !COMMAND_STATUSES.has(status as CommandStatus)))
+  ) {
+    throw invalidArgument('statuses must contain valid Command statuses', 'statuses');
+  }
+  return {
+    workspaceId: validateOpaqueId(
+      value,
+      'workspaceId',
+      WORKSPACE_ID_PATTERN,
+    ) as CommandListParams['workspaceId'],
+    ...(value.limit !== undefined ? { limit: Number(value.limit) } : {}),
+    ...(value.statuses !== undefined ? { statuses: value.statuses as CommandStatus[] } : {}),
+  };
+}
+
 export function validateEventsPollParams(value: unknown): EventsPollParams {
   if (!isRecord(value)) throw invalidArgument('events/poll params must be an object', 'params');
   assertOnlyKeys(value, ['workspaceId', 'cursor', 'limit']);
@@ -344,6 +379,23 @@ export function validateArtifactAccessParams(value: unknown): ArtifactAccessPara
     workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as ArtifactAccessParams['workspaceId'],
     leaseId: validateOpaqueId(value, 'leaseId', LEASE_ID_PATTERN) as ArtifactAccessParams['leaseId'],
     artifactId: validateOpaqueId(value, 'artifactId', ARTIFACT_ID_PATTERN) as ArtifactAccessParams['artifactId'],
+  };
+}
+
+export function validateArtifactListParams(value: unknown): ArtifactListParams {
+  if (!isRecord(value)) throw invalidArgument('Artifact list params must be an object', 'params');
+  assertOnlyKeys(value, ['workspaceId', 'leaseId', 'kinds']);
+  if (
+    value.kinds !== undefined &&
+    (!Array.isArray(value.kinds) || value.kinds.length === 0 ||
+      value.kinds.some(kind => typeof kind !== 'string' || !ARTIFACT_KINDS.has(kind as never)))
+  ) {
+    throw invalidArgument('kinds must contain valid Artifact kinds', 'kinds');
+  }
+  return {
+    workspaceId: validateOpaqueId(value, 'workspaceId', WORKSPACE_ID_PATTERN) as ArtifactListParams['workspaceId'],
+    leaseId: validateOpaqueId(value, 'leaseId', LEASE_ID_PATTERN) as ArtifactListParams['leaseId'],
+    ...(value.kinds !== undefined ? { kinds: value.kinds as NonNullable<ArtifactListParams['kinds']> } : {}),
   };
 }
 

@@ -24,7 +24,7 @@ const DIALOG_TYPES = new Set<CompatibilityDialogType>([
   'beforeunload',
 ]);
 
-/** Keeps the one-shot CLI dialog flow separate from Broker-owned sessions. */
+/** Keeps each CLI Agent's dialog flow separate from other Broker clients. */
 export class CompatibilityDialogService {
   private readonly pending = new Map<string, PendingCompatibilityDialog>();
   private readonly pendingBySession = new Map<string, string>();

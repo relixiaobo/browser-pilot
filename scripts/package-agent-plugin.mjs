@@ -54,7 +54,9 @@ for (const required of [
   'skills/browser-pilot/compatibility.json',
   'skills/browser-pilot/agents/openai.yaml',
   'skills/browser-pilot/references/commands.md',
-  'skills/browser-pilot/references/embedded-stdio.md',
+  'skills/browser-pilot/references/async.md',
+  'skills/browser-pilot/references/embedding.md',
+  'skills/browser-pilot/references/recovery.md',
 ]) {
   assert.ok(paths.has(required), `plugin archive is missing ${required}`);
 }

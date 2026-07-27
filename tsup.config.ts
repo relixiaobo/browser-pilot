@@ -37,9 +37,4 @@ export default defineConfig([
     ...shared,
     format: ['esm'],
   },
-  {
-    entry: { bridge: 'src/bridge/index.ts' },
-    ...shared,
-    format: ['esm'],
-  },
 ]);

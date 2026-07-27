@@ -45,11 +45,6 @@ export interface ToolDefinition {
   artifactKinds: ArtifactDescriptor['kind'][];
 }
 
-export interface ToolManifest {
-  schemaVersion: 1;
-  tools: ToolDefinition[];
-}
-
 const emptyInput = objectSchema({});
 
 function sensitive(schema: JsonSchema, ...sensitivity: Sensitivity[]): JsonSchema {
@@ -1327,7 +1322,7 @@ function schemaSensitivities(schema: JsonSchema, result = new Set<Sensitivity>()
   return result;
 }
 
-export function assertToolManifest(definitions: readonly ToolDefinition[] = TOOL_DEFINITIONS): void {
+export function assertToolDefinitions(definitions: readonly ToolDefinition[] = TOOL_DEFINITIONS): void {
   const names = new Set<string>();
   const knownCapabilities = new Set<string>(CAPABILITIES);
   for (const definition of definitions) {
@@ -1395,19 +1390,4 @@ export function validateToolResult(name: string, value: unknown): JsonValue {
   return value as JsonValue;
 }
 
-export function getToolManifest(
-  capabilities?: readonly Capability[],
-  availableTools?: readonly string[],
-  protocol?: ProtocolVersion,
-): ToolManifest {
-  const granted = capabilities ? new Set<string>(capabilities) : null;
-  const available = availableTools ? new Set(availableTools) : null;
-  const tools = TOOL_DEFINITIONS.filter(definition => (
-    (!granted || definition.requiredCapabilities.every(capability => granted.has(capability))) &&
-    (!available || available.has(definition.name)) &&
-    (!protocol || isToolAvailableInProtocol(definition.name, protocol))
-  ));
-  return { schemaVersion: 1, tools };
-}
-
-assertToolManifest();
+assertToolDefinitions();

@@ -1,488 +1,355 @@
-# browser-pilot
+# Browser Pilot
 
-Give your AI agent control of your real browser — with your logins, cookies, and extensions intact. No extension needed.
+Give an AI Agent control of the user's real Chrome browser, including existing
+logins, cookies, profiles, and extensions. No browser extension is required.
 
 ```bash
 npm install -g browser-pilot-cli@latest
 bp --version
 ```
 
-Each skill/plugin release declares a supported CLI range and the exact version
-it was tested with. Newer CLI releases remain usable within that range;
-embedded products should pin the tested version for reproducible builds.
-The native release targets Apple Silicon macOS, x64 Linux, and x64 Windows;
-Intel Mac is not supported.
+Native releases support Apple Silicon macOS, x64 Linux, and x64 Windows. Intel
+Mac is not supported.
 
 ## Agent Setup
 
-### 1. Enable Chrome remote debugging (one-time)
+### 1. Enable Chrome remote debugging
 
-Open `chrome://inspect/#remote-debugging` in Chrome (144+) and enable remote
-debugging. No command-line flags or restart are needed. Chrome may show its
-separate Allow dialog when `bp connect` requests the actual connection.
+Open `chrome://inspect/#remote-debugging` in Chrome 144 or newer and enable
+remote debugging. Browser Pilot does not use command-line debugging flags or a
+Chrome extension.
 
-> Chrome 136 disabled the old `--remote-debugging-port` flag for security. Chrome 144 introduced this new UI toggle as the replacement — browser-pilot uses this.
-
-Check every installed supported browser and its exact setup state with:
+Inspect installed browsers without requesting authorization:
 
 ```bash
 bp browsers
 ```
 
-Discovery is passive: `bp browsers`, bridge startup, and `initialize` never open
-a Chrome WebSocket and never display the Allow dialog.
+Connect when browser work is needed:
 
-Use `bp connect --browser <id|product|channel>` for an explicit choice. Product
-embedders can pass the same selector to `browser-pilot bridge --stdio
---browser <selector>`; otherwise selection follows a stable platform order.
-One connection covers every live Chrome Profile on that endpoint. When several
-Profiles are open, `bp connect` lists them without creating a Pilot window. Use
-the passive `bp profiles` inventory first. Run `bp profiles --identify` only
-when account-aware names are needed; it briefly opens and closes one visible
-`chrome://version` page per unidentified Profile. Profile and tab indexes are
-one-based. Select with `bp profile <index>`, or pass `--profile` to
-`bp open --new`.
-
-### 2. Install the plugin for your agent
-
-**Claude Code:**
+```bash
+bp connect
 ```
+
+Chrome may display one Allow dialog for the browser connection. Browser
+discovery and background-service startup are passive. Concurrent clients share
+one pending connection request, so they do not create an authorization loop.
+
+### 2. Install the Agent skill
+
+Claude Code:
+
+```text
 /plugin marketplace add https://github.com/relixiaobo/browser-pilot.git
 /plugin install browser-pilot@browser-pilot-marketplace
 ```
 
-**Codex CLI:**
+Codex, Cursor, or VS Code Copilot:
+
 ```bash
 npx skills add relixiaobo/browser-pilot --skill browser-pilot
 ```
 
-**OpenClaw:**
+OpenClaw or another Agent Skills-compatible host:
+
 ```bash
 cp -r plugin/skills/browser-pilot ~/.agents/skills/
 ```
 
-**Cursor / VS Code Copilot:**
-```bash
-npx skills add relixiaobo/browser-pilot --skill browser-pilot
+### 3. Ask for the browser task
+
+- "Fill in the form I already opened."
+- "Check my GitHub notifications."
+- "Download the latest invoice and summarize it."
+- "Open this report in a new tab and save it as PDF."
+
+The Agent uses its existing shell tool to run `bp`. Browser Pilot does not add
+native Agent tools, an MCP server, an SDK, or a persistent client protocol.
+
+## Public Interface
+
+Browser Pilot has one Agent integration surface:
+
+```text
+Agent -> Browser Pilot skill -> existing shell/command runner
+      -> bp CLI -> shared background service -> Chrome
 ```
 
-### 3. Use it
+The skill provides progressive disclosure and browser-specific operating
+guidance. The CLI provides stable JSON, errors, state, files, waiting, and
+recovery. The background service is private implementation detail shared by all
+compatible CLI installations for the current OS user.
 
-Just tell your agent what you want to do:
+This same path supports both installation modes:
 
-- "Open GitHub and check my notifications"
-- "Go to Hacker News and summarize the top 5 posts"
-- "Fill out the form on this page"
+- An Agent installs `browser-pilot-cli` itself.
+- A product bundles a pinned CLI and places its directory on the Agent command
+  environment's `PATH`.
 
-The agent will use `bp` commands automatically. Your real login sessions are preserved — no need to re-authenticate.
+Tenon, OpenClaw, Codex, and other shell-capable Agents need no Browser
+Pilot-specific runtime integration. See
+[the embedding reference](plugin/skills/browser-pilot/references/embedding.md).
 
-## Why browser-pilot?
+## Browser Scope
 
-- **No extension required** — Uses Chrome 144's native remote debugging toggle, not the Extension Debugger API
-- **Real login sessions** — Operates your actual browser profile. Cookies, extensions, logins all intact
-- **Multi-Profile routing** — Lists user tabs across live Chrome Profiles, explicitly verifies account-aware Profile identity, and creates managed work only in a resolved Profile
-- **CLI-native** — Any agent with bash access can use it. No MCP protocol, no SDK integration needed
-- **Auto-snapshot** — Every action returns page state with numbered `[ref]` elements, so the agent always knows what's on screen
-- **Adaptive page views** — Bounded read, text search, DOM metadata, page geometry, and annotated screenshots let an agent choose the smallest useful representation
-- **Verified page primitives** — Scroll and dropdown tools return fresh state and typed evidence instead of requiring ad hoc JavaScript
-- **Lightweight npm install** — About 200KB as an npm tarball. No bundled Chromium (unlike Playwright's 400MB+)
-- **Rich editor support** — Works with contenteditable editors (Draft.js, ProseMirror, Quill, Slate) and Shadow DOM elements out of the box
+`bp tabs` exposes all eligible page tabs on the authorized browser endpoint:
 
-## Comparison
+- Browser Pilot-created managed tabs;
+- eligible popups from managed tabs;
+- eligible tabs the user opened in any live Chrome profile.
 
-| | browser-pilot | Playwright MCP | Chrome DevTools MCP | browser-use |
-|---|---|---|---|---|
-| **Interface** | CLI (bash) | MCP protocol | MCP protocol | Python SDK |
-| **Login session reuse** | Yes | No | Depends | Yes |
-| **Extension required** | No | No | No | No |
-| **Element refs** | Numbered (accessibility tree) | Named refs (ARIA) | CSS selectors | Numbered (DOM) |
-| **Auto-snapshot after action** | Yes | Yes | No | Yes |
-| **Network interception** | Yes (block/mock/headers) | Yes | Yes | No |
-| **Multi-browser** | Chromium-only | Chromium + Firefox + WebKit | Chromium-only | Chromium-only |
-| **Dialog handling** | Explicit | Automatic | Manual | Automatic |
-| **JSON output** | Default | MCP structured | MCP structured | Python objects |
-| **File upload** | Auto-detect input | Yes | No | Yes |
+The Agent can therefore fill a form or inspect a page the user already opened.
+Browser-internal and extension-owned pages are excluded. Existing Chrome tab
+groups do not limit tab control, whether expanded or collapsed, but Browser
+Pilot cannot inspect or manage tab groups without an extension.
+
+Browser Pilot does not implement task-intent permission prompts. Invoking the
+tool gives the Agent the full eligible browser capability surface. An Agent
+host may apply its own policy or approval UX, but that is outside the Browser
+Pilot contract.
+
+User-opened tabs remain open when Agent state is released. `bp close --all`
+closes only Browser Pilot-created tabs. `bp close` explicitly closes the
+selected tab, including a user tab.
+
+## Chrome Profiles
+
+One authorized browser connection can expose several live Chrome profiles.
+
+```bash
+bp profiles
+bp profiles --identify
+bp profile 2
+bp open https://example.com --new --profile 2
+```
+
+`bp profiles` is passive and includes representative tabs. Use
+`--identify` only when account-aware identity is needed; it briefly opens and
+closes a visible `chrome://version` page per unidentified profile and accepts
+identity only after exact profile-path verification. Browser Pilot reports
+verified profile/account names rather than forcing the Agent to speak in
+ambiguous "Profile 1" labels.
+
+Profile selection controls where new managed tabs are created. It does not
+grant or restrict access to existing eligible tabs.
+
+## Multi-Agent State
+
+Every independent Agent must use one stable key across all short-lived CLI
+processes:
+
+```bash
+export BROWSER_PILOT_CLIENT_KEY=product.install.agent-01
+bp tabs
+bp snapshot
+```
+
+Or pass `--client-key` before the command. The key preserves the Agent's
+selected profile, tab, frame, refs, auth, network rules, downloads, and command
+history. Different keys are isolated and cannot overwrite one another.
+
+Browser Pilot keeps this state in background-service memory, not global
+`state.json` or `refs.json` files. `bp disconnect` releases only the current
+key. It stops the service only when no other Agent is using it and the invoking
+executable owns that service process.
+
+Compatible global, local, and product-bundled CLIs reuse the same per-user
+service through protocol negotiation. Executable identity is required only for
+stopping the whole service. Use a distinct absolute `BROWSER_PILOT_HOME` only
+for a deliberately incompatible isolated installation.
+
+## Core Workflow
+
+```bash
+bp tabs                              # find existing user or managed tabs
+bp tab 2                             # select by current one-based index
+bp open https://example.com --new    # create independent managed work
+bp snapshot                          # get controls with numbered refs
+bp read main --limit 10000           # get bounded readable content
+bp search "invoice total"            # find text with nearby context
+bp click 3                           # act on a fresh ref
+bp type 5 "hello" --clear            # replace input and verify readback
+bp press Enter                       # press a key and return fresh state
+```
+
+Action commands return fresh page state and typed browser-visible evidence.
+Refs belong to the current tab, frame, and page state. Refresh them after
+navigation, document changes, tab/frame switches, reconnect, or `stale_ref`.
+
+Use dedicated page primitives before JavaScript:
+
+```bash
+bp find ".result" --attributes href
+bp scroll --to-text "Payment details"
+bp dropdown 4
+bp select 4 "United States"
+bp screenshot page.png --annotate 1,3,8
+```
+
+`bp eval` remains an escape hatch when no dedicated command represents the
+operation.
+
+## Async Work and Recovery
+
+Wait for browser-visible state instead of using shell sleeps:
+
+```bash
+bp --timeout 30000 wait --url "*/complete"
+bp --timeout 30000 wait --text "Payment received"
+bp --timeout 30000 wait --selector ".result"
+bp --timeout 30000 wait --dialog
+bp --timeout 120000 wait --download
+bp --timeout 30000 wait --popup
+```
+
+Inspect service and command state after a timeout, interrupted shell call, or
+lost result:
+
+```bash
+bp status
+bp commands --status accepted,dispatched,unknown_outcome
+bp command <command-id>
+bp cancel <command-id>
+```
+
+Attach a stable request identity before the first attempt when the caller may
+need to recover the same intended operation:
+
+```bash
+bp --request-id task-42-submit click 7
+```
+
+Reuse that ID only for recovery of the same intended call. Use a new ID for a
+new action. Browser Pilot deduplicates stable requests and attempts
+cancellation on CLI `SIGINT`/`SIGTERM`, but a dispatched mutation can still
+have an `unknown_outcome`. Inspect the current page before retrying.
+
+Machine errors always include stable `code` and `retryable` fields. Branch on
+`code`, not English text.
+
+## Files, Screenshots, PDFs, and Downloads
+
+Use explicit task-owned paths or set a default directory:
+
+```bash
+export BROWSER_PILOT_OUTPUT_DIR=/absolute/task/output
+bp screenshot
+bp screenshot full.png --full
+bp pdf report.pdf --landscape
+bp downloads
+bp download 1 invoice.pdf
+bp net show 12 --save response.json
+```
+
+File results return an absolute `file` path, MIME type, byte size, and image
+dimensions when available. An Agent can open that path with its normal image or
+file-reading capability. CLI output remains bounded JSON and never embeds large
+binary payloads.
+
+Browser Pilot copies uploads and completed downloads into protected temporary
+storage while processing them. It never removes the source upload or Chrome's
+original download.
+
+## Command Groups
+
+| Area | Commands |
+|------|----------|
+| Setup and state | `browsers`, `connect`, `status`, `disconnect` |
+| Profiles and tabs | `profiles`, `profile`, `tabs`, `tab`, `open`, `close` |
+| Observation | `snapshot`, `read`, `search`, `find`, `locate` |
+| Interaction | `click`, `type`, `keyboard`, `press`, `scroll`, `dropdown`, `select`, `eval` |
+| Async and recovery | `wait`, `commands`, `command`, `cancel` |
+| Page context | `frame`, `dialogs`, `dialog` |
+| Files and media | `upload`, `downloads`, `download`, `screenshot`, `pdf` |
+| Browser data | `cookies`, `auth`, `net` |
+
+Run `bp --help` or `bp <command> --help` for exact options.
 
 ## How It Works
 
+```text
+short-lived bp CLI processes
+          |
+          | private local HTTP/Unix socket
+          v
+per-user Browser Pilot service
+          |
+          | one supervised CDP WebSocket per browser endpoint
+          v
+Chrome profiles and eligible tabs
 ```
-Agent (bash tool)
-  │  bp open / bp click / bp eval ...
-  ▼
-CLI Process ──── HTTP/Unix Socket ──── Daemon Process (persistent)
-                                           │
-                                           │  WebSocket (CDP)
-                                           ▼
-                                       Chrome (your browser, your Profiles)
-                                       ├── Eligible user tabs (selectable)
-                                       └── Managed windows (Broker-owned)
-```
 
-The Broker maintains isolated state for each Agent. A private connection
-supervisor owns the Broker's single browser-level CDP WebSocket and proxies it
-to the daemon. It also owns only Browser Pilot-created tabs so it can clean them
-after a Broker crash without touching user-opened tabs. Controller identity is
-returned to the embedding Host; Browser Pilot never injects a status border or
-other control UI into the page DOM.
+The service serializes actions per physical tab while allowing independent
+tabs to progress concurrently. Each Agent receives isolated logical state and
+opaque tab/ref addresses. The same physical user tab can be controlled by only
+one Agent at a time.
 
-## Platform Evolution
+An internal connection supervisor owns Browser Pilot-created tabs so it can
+clean them up after a service crash without touching user-opened tabs. Browser
+disconnect invalidates old tab, frame, and ref identities before reconnect.
 
-Browser Pilot now routes direct `bp` commands and embedded clients through the
-same Agent-neutral, multi-client Browser Broker.
-The approved architecture and execution plans are:
+See:
 
-- [Platform specification](docs/architecture/browser-pilot-platform-spec.md)
+- [Current architecture](docs/architecture/browser-pilot-platform-spec.md)
 - [Universal Agent integration plan](docs/plans/universal-agent-integration.md)
-- [Browser capability and reliability plan](docs/plans/browser-capability-evolution.md)
-- [Stdio bridge integration contract](docs/integration/stdio-bridge.md)
-- [Stdio black-box conformance suite](docs/integration/stdio-conformance.md)
-- [Reference consumer adapters](https://github.com/relixiaobo/browser-pilot/tree/main/examples/adapters),
-  including Tenon and OpenClaw lifecycle mappings
+- [Browser capability evolution](docs/plans/browser-capability-evolution.md)
+- [Chrome profile routing](docs/plans/profile-context-routing.md)
 
-The public integration direction remains CLI-only: one-shot commands for direct
-Agent use and a persistent `bridge --stdio` mode for products that embed the
-official executable. Browser Pilot will not require an extension, Native SDK,
-or MCP server. The repository's consumer adapters are source examples built
-only on the stdio contract; they are intentionally excluded from the npm
-package and do not create a second public library API.
+## Comparison
 
-The dedicated Pilot window remains the default managed tab set for independent
-Agent work. The Broker architecture also includes all eligible user tabs in the
-Agent's inventory without a separate grant step, so an Agent can operate a page
-the user already opened. Invoking or exposing the tool is the authorization
-boundary; products may apply their own approval UX or remove operations when
-launching the bridge. Bulk cleanup remains limited to managed tabs, and user
-tabs remain open when a session ends.
+| | Browser Pilot | browser-use | Playwright MCP | Chrome DevTools MCP |
+|---|---|---|---|---|
+| Agent interface | Skill + CLI | Python library/Agent runtime | MCP tools | MCP tools |
+| User's signed-in Chrome | Yes | Yes | Usually isolated browser | Depends on launch mode |
+| Browser extension | No | No | No | No |
+| Eligible user tabs | Yes | Browser-session dependent | Browser-session dependent | Yes |
+| Progressive Agent guidance | Skill references | Library/Agent prompts | Tool descriptions | Tool descriptions |
+| Action verification | Typed evidence + fresh state | State/history checks | Fresh snapshots | Manual inspection |
+| Async recovery | Wait + command status + request IDs | Agent/controller lifecycle | Host/MCP lifecycle | Host/MCP lifecycle |
+| Local media results | Paths + metadata | Library objects/paths | MCP image/resource results | MCP results |
+| Network interception | Observe, block, mock, headers | Limited by controller | Supported | Supported |
 
-The `browser-pilot bridge --stdio` transport, Broker lifecycle, browser tool
-dispatch, event replay, protected Artifacts, protocol 1.1 transport limit
-negotiation, protocol 1.2 Chrome Profile routing, and protocol 1.3 verified
-Profile identity and unambiguous result vocabulary are implemented. Browser
-disconnect and explicit reconnect handling, scoped
-download Artifacts, Workspace resource isolation, and typed watchdog events for
-stalled navigation, selected-frame detach, pending dialogs, and repeated
-browser-observable no-progress actions are also implemented. Bounded page
-search, DOM metadata lookup, scrolling, native/ARIA dropdown operations,
-Observation page geometry, and viewport screenshot annotations adapt the most
-useful browser-use inspection patterns to the same scoped Broker contract. An
-internal managed-target janitor is the sole owner of the browser-level CDP
-connection, proxies daemon traffic over private IPC, and closes only
-Broker-created tabs and their managed popup descendants if the daemon exits or
-crashes. It does not persist target IDs or close user tabs. Broker startup and
-browser discovery are passive. Only `bp connect` or the versioned
-`browser.connect` tool requests Chrome authorization; concurrent clients share
-one in-flight request, and a failed or dropped connection is never retried by a
-timer.
-Compatible Agent products reuse one per-user Broker through protocol
-negotiation. Protected shutdown cannot terminate live embedded clients or
-another CLI Agent's active Lease, and an
-incompatible product must explicitly select a separate `BROWSER_PILOT_HOME`.
-Global npm installation, local npm/npx use, and product-bundled absolute-path
-launches are covered by distribution black-box tests. Native self-contained
-release artifacts use one executable for the public CLI and its private Broker
-and janitor roles, with no runtime download or system-Node fallback.
+Browser Pilot adopts several strong browser-use ideas without adopting its
+Python Agent runtime: adaptive DOM/accessibility observation, fresh state after
+actions, input readback, obstruction checks, stale-state invalidation,
+watchdogs, and bounded outputs. The Agent interface remains the CLI.
 
-## Installation and Embedding
+## Product Embedding
 
-Agent-managed installation remains supported:
+Bundle the native CLI or `browser-pilot-cli` plus a pinned Node runtime. Verify
+the versioned release index and checksums. Put the bundled command directory on
+the Agent's `PATH`, install the complete skill, and inject:
 
-```bash
-npm install -g browser-pilot-cli@latest
-bp --version
-bp connect
-bp tabs
+```text
+BROWSER_PILOT_CLIENT_KEY=<stable logical Agent identity>
+BROWSER_PILOT_OUTPUT_DIR=<absolute task-owned directory>
 ```
 
-A project can pin Browser Pilot locally and run the same CLI without a global
-installation:
+Do not map every CLI command into a native tool. The Agent already has a shell
+tool, the skill controls context growth, and `bp --help` provides runtime
+discovery. Agent-managed and product-bundled installations therefore exercise
+the exact same implementation and guidance.
 
-```bash
-npm install --save-exact browser-pilot-cli@latest
-npx --no-install browser-pilot tabs
-```
-
-Agent products should pin either the npm package or a native archive from the
-GitHub release. Launch an absolute path directly with `bridge --stdio`; do not
-invoke a shell, import `src/*`, or depend on Broker locator/socket files. The
-npm form launches `node_modules/browser-pilot-cli/dist/cli.js` with the
-product's pinned Node runtime. The native archive launches its single
-`browser-pilot` executable and does not require Node to be installed.
-
-Each native archive contains `manifest.json`, per-file `SHA256SUMS`, licenses,
-and an adjacent archive checksum. The manifest reports the actual signature
-kind: Developer ID or ad-hoc on macOS, Authenticode or unsigned on Windows, and
-unsigned on Linux. Release automation never labels an artifact signed when its
-signing credentials were unavailable.
-
-The same GitHub release also contains
-`browser-pilot-plugin-<version>.tgz`, its checksum, and a versioned release index
-that binds the npm version, protocol range, compatible skill/plugin range,
-tested CLI version, and the three supported native assets. Consumers should
-verify that index before bundling. No `darwin-x64` asset is produced.
-
-All three forms use the same protocol and compatible per-user Broker. Use a
-distinct absolute `BROWSER_PILOT_HOME` only when a product deliberately needs
-an incompatible isolated Broker.
-
-Products embedding `bridge --stdio` already receive isolated Connections,
-Workspaces, and Leases. When several independent Agents instead invoke the
-one-shot CLI directly, assign each integration a distinct stable namespace:
-
-```bash
-BROWSER_PILOT_CLIENT_KEY=agent.product.install-01 bp tabs
-bp --client-key agent.product.install-01 snapshot
-```
-
-Repeated commands with the same key reuse that Agent's selected target, frame,
-refs, auth, and network state. Different keys cannot overwrite one another.
-The default key remains `browser-pilot-cli` for a single interactive Agent.
-
-## Commands
-
-### Core Loop
-
-| Command | Returns | Description |
-|---------|---------|-------------|
-| `bp open <url>` | snapshot | Navigate to URL |
-| `bp open <url> --new --profile <selector>` | snapshot | Create managed work in one live Chrome Profile |
-| `bp snapshot` | snapshot | Get interactive elements |
-| `bp read [selector]` | text | Get bounded readable page/region content |
-| `bp search <text>` | matches | Find bounded visible text and nearby context |
-| `bp find <selector>` | elements | Inspect bounded DOM metadata and requested attributes |
-| `bp scroll [direction]` | snapshot | Scroll page/element/text and return fresh state |
-| `bp dropdown <target>` | options | List native or exposed ARIA dropdown options |
-| `bp select <target> <option>` | snapshot | Select and verify a dropdown option |
-| `bp click <ref>` | snapshot | Click element by ref number (`--double`, `--right`) |
-| `bp click --xy x,y` | snapshot | Click at viewport coordinates (canvas, maps) |
-| `bp locate <selector>` | coords | Get element center x,y + size (for `click --xy`) |
-| `bp type <ref> <text>` | snapshot | Type into element (`--clear`, `--submit`) |
-| `bp keyboard <text>` | snapshot | Type via keyboard events (`--click`, `--clear`) |
-| `bp press <key>` | snapshot | Press key (Enter, Escape, Control+a, Meta+c) |
-| `bp eval [js]` | value | Run JavaScript (escape hatch for anything) |
-
-### Utilities
-
-| Command | Description |
-|---------|-------------|
-| `bp screenshot [file]` | Capture screenshot (`--full`, `--selector`, `--annotate [refs]`) |
-| `bp pdf [file]` | Save page as PDF (`--landscape`) |
-| `bp cookies [domain]` | View cookies (includes HttpOnly) |
-
-### Edge Cases
-
-| Command | Description |
-|---------|-------------|
-| `bp upload <filepath>` | Upload file (auto-finds `<input type="file">`) |
-| `bp auth <user> <pass>` | Set HTTP Basic Auth credentials (`--clear`) |
-| `bp frame [index]` | List or switch iframe context (0 = top) |
-| `bp dialogs` | List pending JavaScript dialogs |
-| `bp dialog <id> --accept\|--dismiss` | Explicitly respond to a dialog (`--prompt`) |
-
-Dialogs remain pending until explicitly accepted or dismissed. One-shot CLI
-dialogs are scoped to the compatibility Workspace and isolated from embedded
-Broker clients.
-
-Run `bp tabs` to list Pilot-managed tabs, their popups, and eligible tabs the
-user opened elsewhere across all live Profiles in the same browser endpoint.
-Extension-owned and browser-internal pages are excluded. Each JSON entry
-includes its opaque `profileContextId`; `bp tab <n>` selects any listed tab for
-the current Agent Lease. Its `selected` field is not a claim about Chrome's
-foreground tab or operating-system focus.
-
-### Network
-
-| Command | Description |
-|---------|-------------|
-| `bp net` | List recent requests (`--url`, `--method`, `--status`, `--type`) |
-| `bp net show <id>` | Full request/response details (`--save <file>`) |
-| `bp net block <pattern>` | Block requests matching URL pattern |
-| `bp net mock <pattern>` | Mock responses (`--body`, `--file`) |
-| `bp net headers <pattern> <header...>` | Add/override request headers |
-| `bp net rules` | List active interception rules |
-| `bp net remove [id]` | Remove rule(s) (`--all`) |
-| `bp net clear` | Clear captured request log |
-
-### Session
-
-| Command | Description |
-|---------|-------------|
-| `bp connect` | Connect to Chrome; create a Pilot window immediately only when Profile routing is unambiguous |
-| `bp disconnect` | Release this CLI namespace; stop the daemon only when no other client or active Lease is live |
-| `bp profiles` | Passively list live Chrome Profile contexts and representative tabs |
-| `bp profiles --identify [--refresh]` | Explicitly verify Profile/account identity using temporary visible Chrome pages |
-| `bp profile <index\|id\|label\|name\|email>` | Select a Profile for subsequent managed tabs |
-| `bp tabs` | List all controllable tabs in the current browser |
-| `bp tab <n>` | Select any listed managed or user tab for the current Agent Lease |
-| `bp close` | Close the current tab (`--all` closes Pilot-managed tabs only) |
-
-## Refs
-
-Action commands return a snapshot of interactive elements, each with a `[ref]` number:
-
-```
-[1] link "Home"
-[2] textbox "Search"                ← <input>, <textarea>, or contenteditable
-[3] textbox ""                      ← unnamed input (still interactive)
-[4] combobox ""                     ← <select> dropdown
-[5] spinbutton "Quantity"           ← <input type="number">
-[6] button "Submit"
-[7] checkbox "Agree" checked
-[8] slider "Volume"                 ← <input type="range">
-```
-
-Use the number in subsequent commands: `bp click 1`, `bp type 2 "hello"`.
-
-Refs are scoped to the current page — they refresh automatically after every
-action. Elements inside Shadow DOM are included automatically. Snapshot JSON
-may also include a `page` block with viewport/document size, scroll position,
-remaining pixels, and scroll percentages.
-
-Across one-shot CLI processes, selected target, frame, and refs live only in the
-daemon's keyed compatibility Workspace and renewable Lease. They are never
-written to `state.json` or `refs.json`; after Lease expiry the Agent must
-observe again. Set a distinct stable `BROWSER_PILOT_CLIENT_KEY` for each Agent
-that directly invokes the CLI. `bp disconnect` clears only that namespace and
-stops the Broker only when no other active Lease or embedded client remains.
-
-## Output
-
-**JSON by default** when piped (for LLM/script consumption). Human-readable when run in a terminal.
-
-```json
-{"ok":true,"title":"Example","url":"https://example.com","page":{"viewportWidth":1280,"viewportHeight":720,"documentWidth":1280,"documentHeight":1800,"scrollX":0,"scrollY":0,"pixelsAbove":0,"pixelsBelow":1080,"pixelsLeft":0,"pixelsRight":0,"scrollPercentX":0,"scrollPercentY":0},"elements":[{"ref":1,"role":"link","name":"More info"}]}
-```
-
-Machine errors include stable codes and may include hints or remediation:
-```json
-{"ok":false,"error":"Ref [99] is stale.","code":"stale_ref","retryable":false,"context":{"field":"ref"},"hint":"Run 'bp snapshot' to refresh element refs."}
-```
-
-Branch on `code`, not English text. `retryable` means a later call may be valid;
-it does not make the same uncertain mutation safe to replay.
-
-Force human output: `bp --human open https://example.com`
-
-`bp screenshot [file]`, `bp pdf [file]`, and `bp net show <id> --save <file>`
-return an absolute local path. Screenshot and PDF bytes are first protected
-Artifacts, explicitly exported to that path, then released from Broker storage.
-`bp upload <file>` similarly imports a protected copy and releases it after the
-browser receives the file; the source file is never removed.
-
-After `bp snapshot`, `bp screenshot page.png --annotate` draws up to the first
-200 current refs on a viewport image; pass a comma-separated list such as
-`--annotate 1,3,8` to limit it. Annotation does not inject elements into the
-page, runs in an isolated JavaScript world, and cannot be combined with full-page
-or selector capture.
-
-## Eval
-
-`eval` is the escape hatch — anything JavaScript can do:
-
-```bash
-bp eval "history.back()"                            # go back
-bp eval "history.forward()"                         # go forward
-bp eval "location.reload()"                         # reload
-bp eval "document.querySelector('h1').textContent"   # extract text
-bp eval "document.querySelector('div').innerHTML"    # extract HTML
-bp eval "JSON.stringify(localStorage)"               # read storage
-echo 'complex js here' | bp eval                    # stdin for complex JS
-```
-
-Prefer `bp read`, `bp search`, `bp find`, `bp scroll`, `bp dropdown`, and
-`bp select` for their bounded output, scoped state, and verification. Use
-`eval` only when no dedicated command represents the operation.
-
-## File Upload
-
-`bp upload` auto-detects `<input type="file">` on the page:
-
-```bash
-bp open https://images.google.com
-bp click 5                        # click "Search by image"
-bp upload ~/Downloads/photo.jpg    # auto-finds file input, triggers upload
-```
-
-## Rich Text Editors & Shadow DOM
-
-`bp type` works with contenteditable-based editors (Draft.js, ProseMirror, Quill, Slate, Lexical). They appear as `textbox` in snapshots:
-
-```bash
-bp type 3 "new content" --clear     # replace content in a rich text editor
-```
-
-For canvas-based editors (Google Docs, Google Sheets, Figma), use `bp keyboard` which sends real keyboard events:
-
-```bash
-bp keyboard "Hello Docs!" --click ".kix-appview-editor"   # Google Docs
-bp press Meta+b                                            # toggle bold
-bp keyboard "bold text"
-bp click --xy 400,300                                    # click canvas area
-```
-
-Shadow DOM elements are traversed automatically — no special commands needed. Elements inside open shadow roots (even deeply nested) appear in snapshots and can be clicked/typed normally.
-
-For `<select>` and exposed ARIA dropdowns, inspect and select with the dedicated
-commands:
-
-```bash
-bp dropdown 4
-bp select 4 "Option 2"
-```
-
-## Network Interception
-
-Monitor, block, and mock HTTP requests:
-
-```bash
-# Monitor traffic
-bp net                                 # list recent requests
-bp net --url "*api*" --method POST     # filter by URL and method
-bp net show 3                          # full details + response body
-
-# Block requests
-bp net block "*tracking*"              # block analytics/tracking
-bp net block "*ads*"
-
-# Mock API responses
-bp net mock "*api/data*" --body '{"ok":true}'
-bp net mock "*api/users*" --file mock.json
-
-# Override request headers
-bp net headers "*api*" "Authorization:Bearer test123"
-
-# Manage rules
-bp net rules                           # list active rules
-bp net remove <id-from-bp-net-rules>   # rule IDs are opaque
-bp net remove --all                    # clear all rules
-bp net clear                           # clear captured request log
-```
+Each release ships a plugin archive, native archives, checksums, and a release
+index binding the CLI version, compatible skill range, protocol range, and
+supported assets. No `darwin-x64` artifact is produced.
 
 ## Testing
 
-Local release tests are deterministic. Real-site checks run separately as
-non-blocking canaries so a third-party outage cannot fail the release gate:
-
 ```bash
-npm test                         # unit + local core, compat, and network gates
-npm run test:capabilities        # isolated-Chrome quantitative capability gate
-npm run test:host-acceptance     # two embedded hosts + CLI + Artifacts + reconnect
-npm run test:distribution        # packed global/local/product-bundled launch modes
-npm run test:canary              # real-site drift report; non-blocking
-npm run test:canary:strict       # fail on drift or unavailability
-npm run test:integration         # compatibility alias for strict canaries
-npm run test:all                 # release gates plus non-blocking canaries
+npm run test:unit          # TypeScript build and all Node tests
+npm test                   # unit tests plus local Playwright gates
+npm run test:capabilities # isolated-Chrome quantitative capability gate
+npm run test:distribution # packed global/local/bundled CLI verification
+npm run test:canary       # non-blocking real-site drift report
+npm run test:canary:strict
 ```
 
-Automated browser gates, including Playwright and stdio conformance, start their
-own headless Chrome with a temporary profile, random debugging port, and
-isolated Broker home. Teardown stops the Broker and Chrome and removes those
-files. Tests fail closed if that isolation is absent; they never attach to the
-user's Chrome by default. A maintainer can explicitly opt into a destructive
-manual compatibility run against the user's browser by setting
-`BROWSER_PILOT_TEST_USER_CHROME=1`.
+Automated browser tests use isolated temporary Chrome profiles and Broker homes.
+They never attach to the user's Chrome unless a maintainer explicitly opts into
+a controlled manual test.
 
-Maintainers can build and verify a native artifact with an official,
-SEA-capable Node 22.17.0 runtime:
+Build and verify a native artifact with an SEA-capable Node runtime:
 
 ```bash
 BROWSER_PILOT_SEA_NODE=/absolute/path/to/node npm run build:standalone
@@ -490,35 +357,21 @@ npm run verify:standalone
 npm run package:standalone
 ```
 
-For a new release, bump only the root package version through npm. The npm
-`version` lifecycle synchronizes every active distribution manifest from that
-source of truth:
+The root `package.json` version is the release source of truth. The npm version
+lifecycle synchronizes the lockfile, plugin manifests, skill compatibility
+range, and marketplace entry:
 
 ```bash
 npm version "$BROWSER_PILOT_RELEASE_VERSION" --no-git-tag-version
 npm run release:check-version
-node scripts/verify-release-version.mjs
 ```
-
-The sync step updates the lockfile root, Agent plugin version and CLI peer
-range, Claude plugin/marketplace manifests, and skill `compatibility.json`.
-The current release becomes the skill's tested/minimum CLI version while the
-upper bound remains the next major version. Browser Pilot keeps public one-shot
-commands backward compatible within a major line, including additive `0.x`
-releases before 1.0. Historical release notes and version-specific fixtures are
-never rewritten.
-
-The canary report is written to
-`test-results/real-site-canary/report.json`. It distinguishes semantic drift,
-third-party unavailability, and runner errors. Set
-`BROWSER_PILOT_CANARY_REPORT` to use another report path.
 
 ## Requirements
 
-- Chrome 144+ / Edge / Brave (any Chromium-based browser)
-- Node.js >= 18
-- Remote debugging enabled (`chrome://inspect/#remote-debugging`)
-- Native archives: Apple Silicon macOS, x64 Linux, or x64 Windows; no Intel Mac
+- Chrome 144+, Edge, Brave, or another supported Chromium browser
+- Node.js 18 or newer for the npm distribution
+- Remote debugging enabled at `chrome://inspect/#remote-debugging`
+- Apple Silicon macOS, x64 Linux, or x64 Windows for native releases
 
 ## License
 

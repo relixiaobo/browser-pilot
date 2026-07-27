@@ -47,26 +47,6 @@ function execute(command, args, options = {}) {
   });
 }
 
-function initializeInput() {
-  return [
-    {
-      jsonrpc: '2.0', id: 'initialize', method: 'initialize',
-      params: {
-        client: {
-          id: 'org.browser-pilot.release-verifier',
-          name: 'Browser Pilot Release Verifier',
-          version: '1.0.0',
-          instanceId: 'release:standalone-verifier',
-        },
-        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
-        requestedCapabilities: ['browser.discovery'],
-        launchMode: 'embedded',
-      },
-    },
-    { jsonrpc: '2.0', id: 'shutdown', method: 'shutdown', params: {} },
-  ].map(value => JSON.stringify(value)).join('\n') + '\n';
-}
-
 async function verifyJanitor(path) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await new Promise((resolveListen, reject) => {
@@ -171,27 +151,20 @@ assert.equal(version.code, 0, version.stderr);
 assert.equal(version.stdout.trim(), packageJson.version);
 
 const home = await mkdtemp(join(tmpdir(), 'browser-pilot-standalone-verify-'));
-let verified = false;
 try {
   const env = { ...process.env, HOME: home, BROWSER_PILOT_HOME: join(home, 'state'), PATH: '' };
-  const bridge = await execute(executable, ['bridge', '--stdio'], {
-    env,
-    input: initializeInput(),
-  });
-  assert.equal(bridge.code, 0, bridge.stderr);
-  const messages = bridge.stdout.trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(messages.map(message => message.id), ['initialize', 'shutdown']);
-  assert.equal(messages[0].result.executableVersion, packageJson.version);
+  const help = await execute(executable, ['--help'], { env });
+  assert.equal(help.code, 0, help.stderr);
+  assert.doesNotMatch(help.stdout, /bridge --stdio/u);
+  assert.match(help.stdout, /status/u);
+  const status = await execute(executable, ['status'], { env });
+  assert.equal(status.code, 0, status.stderr);
+  const parsed = JSON.parse(status.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.service.version, packageJson.version);
   await verifyJanitor(executable);
-  verified = true;
 } finally {
-  const env = { ...process.env, HOME: home, BROWSER_PILOT_HOME: join(home, 'state'), PATH: '' };
-  const disconnected = await execute(executable, ['disconnect'], { env }).catch(() => null);
   await rm(home, { recursive: true, force: true });
-  if (verified) {
-    assert.ok(disconnected, 'Standalone disconnect did not complete');
-    assert.equal(disconnected.code, 0, disconnected.stderr || disconnected.stdout);
-  }
 }
 
 process.stdout.write(`${JSON.stringify({ ok: true, bundle })}\n`);

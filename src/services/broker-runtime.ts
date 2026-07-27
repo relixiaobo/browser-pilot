@@ -24,7 +24,6 @@ import {
   type ControlLease,
   type ControlLeaseId,
   type InitializeResult,
-  type JsonRpcNotification,
   type JsonValue,
   type ManagedTabSet,
   type ManagedTabSetId,
@@ -35,7 +34,6 @@ import {
 } from '../protocol/model.js';
 import {
   getToolDefinition,
-  getToolManifest,
   isToolAvailableInProtocol,
   minimumProtocolMinorForTool,
   validateToolArguments,
@@ -50,14 +48,15 @@ import {
   validateArtifactAccessParams,
   validateArtifactExportParams,
   validateArtifactImportParams,
+  validateArtifactListParams,
   validateCommandAccessParams,
+  validateCommandListParams,
   validateEventsPollParams,
   validateInitializeParams,
   validateLeaseCreateParams,
   validateLeaseHeartbeatParams,
   validateLeaseReleaseParams,
   validateShutdownParams,
-  validateToolsListParams,
   validateToolCallParams,
   validateWorkspaceCreateParams,
   validateWorkspaceGetParams,
@@ -143,6 +142,10 @@ export interface BrokerRuntimeOptions {
 }
 
 export interface BrokerArtifactStore {
+  list(
+    workspaceId: BrowserWorkspaceId,
+    kinds?: readonly ArtifactDescriptor['kind'][],
+  ): Promise<ArtifactDescriptor[]>;
   get(workspaceId: BrowserWorkspaceId, artifactId: ArtifactId): Promise<{
     descriptor: ArtifactDescriptor;
     path: string;
@@ -210,19 +213,10 @@ export interface BrowserToolExecutor {
 
 interface RuntimeConnection {
   value: ClientConnection;
-  bridgeSessionId: string;
+  clientSessionId: string;
   client: ClientIdentity;
   grantedCapabilities: Capability[];
   limits: ProtocolLimits;
-  notifications: JsonRpcNotification[];
-  notificationWaiter?: NotificationWaiter;
-}
-
-interface NotificationWaiter {
-  resolve: (notification: JsonRpcNotification | undefined) => void;
-  timer?: NodeJS.Timeout;
-  signal?: AbortSignal;
-  onAbort?: () => void;
 }
 
 interface RuntimeWorkspace {
@@ -260,7 +254,7 @@ export class MemoryBrokerRuntime {
 
   private readonly principals = new Map<ClientPrincipalId, ClientPrincipal>();
   private readonly principalIdsByKey = new Map<string, ClientPrincipalId>();
-  private readonly connectionsByBridge = new Map<string, RuntimeConnection>();
+  private readonly connectionsByClientSession = new Map<string, RuntimeConnection>();
   private readonly connectionsById = new Map<ClientConnectionId, RuntimeConnection>();
   private readonly workspaces = new Map<BrowserWorkspaceId, RuntimeWorkspace>();
   private readonly leases = new Map<ControlLeaseId, ControlLease>();
@@ -322,7 +316,6 @@ export class MemoryBrokerRuntime {
         preserveIfGenerationStale: true,
       });
     }));
-    this.listenerCleanup.push(this.events.subscribe(event => this.deliverNotification(event)));
     options.toolExecutor?.setEventPublisher?.(event => { this.publishBrowserEvent(event); });
     if (
       this.minLeaseTtlMs <= 0 ||
@@ -362,31 +355,28 @@ export class MemoryBrokerRuntime {
     }
   }
 
-  async call(bridgeSessionId: string, method: string, params?: JsonValue): Promise<JsonValue> {
-    this.assertBridgeSessionId(bridgeSessionId);
+  async call(clientSessionId: string, method: string, params?: JsonValue): Promise<JsonValue> {
+    this.assertClientSessionId(clientSessionId);
     this.sweepExpiredLeases();
-    if (method === 'initialize') return this.initialize(bridgeSessionId, params);
+    if (method === 'initialize') return this.initialize(clientSessionId, params);
 
-    const connection = this.requireConnection(bridgeSessionId);
+    const connection = this.requireConnection(clientSessionId);
     connection.value.lastSeenAt = this.now();
     switch (method) {
-      case 'tools/list':
-        validateToolsListParams(params);
-        return asJson(getToolManifest(
-          connection.grantedCapabilities,
-          this.options.toolExecutor?.supportedTools,
-          connection.value.protocol,
-        ));
       case 'tools/call':
         return this.callTool(connection, params);
       case 'commands/get':
         return this.getCommand(connection, params);
+      case 'commands/list':
+        return this.listCommands(connection, params);
       case 'commands/cancel':
         return this.cancelCommand(connection, params);
       case 'events/poll':
         return this.pollEvents(connection, params);
       case 'artifacts/get':
         return this.getArtifact(connection, params);
+      case 'artifacts/list':
+        return this.listArtifacts(connection, params);
       case 'artifacts/export':
         return this.exportArtifact(connection, params);
       case 'artifacts/import':
@@ -418,12 +408,11 @@ export class MemoryBrokerRuntime {
     }
   }
 
-  disconnect(bridgeSessionId: string): void {
-    const connection = this.connectionsByBridge.get(bridgeSessionId);
+  disconnect(clientSessionId: string): void {
+    const connection = this.connectionsByClientSession.get(clientSessionId);
     if (!connection) return;
     this.commands.releaseConnection(connection.value.id);
-    this.resolveNotificationWaiter(connection, undefined);
-    this.connectionsByBridge.delete(bridgeSessionId);
+    this.connectionsByClientSession.delete(clientSessionId);
     this.connectionsById.delete(connection.value.id);
     for (const [leaseId, lease] of this.leases) {
       if (lease.connectionId !== connection.value.id) continue;
@@ -434,47 +423,10 @@ export class MemoryBrokerRuntime {
   }
 
   close(): void {
-    for (const bridgeSessionId of [...this.connectionsByBridge.keys()]) {
-      this.disconnect(bridgeSessionId);
+    for (const clientSessionId of [...this.connectionsByClientSession.keys()]) {
+      this.disconnect(clientSessionId);
     }
     for (const cleanup of this.listenerCleanup.splice(0)) cleanup();
-  }
-
-  async nextNotification(
-    bridgeSessionId: string,
-    options: { waitMs?: number; signal?: AbortSignal } = {},
-  ): Promise<JsonRpcNotification | undefined> {
-    const connection = this.requireConnection(bridgeSessionId);
-    const waitMs = options.waitMs ?? 25_000;
-    if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 30_000) {
-      throw invalidArgument('Notification waitMs must be from 0 through 30000', 'waitMs');
-    }
-    const queued = connection.notifications.shift();
-    if (queued || waitMs === 0 || options.signal?.aborted) return queued;
-    if (connection.notificationWaiter) {
-      throw invalidArgument('Only one notification poll may be active per bridge Connection');
-    }
-    return new Promise(resolve => {
-      const waiter: NotificationWaiter = { resolve, signal: options.signal };
-      const finish = (): void => this.resolveNotificationWaiter(connection, undefined);
-      waiter.timer = setTimeout(finish, waitMs);
-      waiter.timer.unref();
-      if (options.signal) {
-        waiter.onAbort = finish;
-        options.signal.addEventListener('abort', finish, { once: true });
-      }
-      connection.notificationWaiter = waiter;
-    });
-  }
-
-  async *notifications(
-    bridgeSessionId: string,
-    signal: AbortSignal,
-  ): AsyncGenerator<JsonRpcNotification> {
-    while (!signal.aborted) {
-      const notification = await this.nextNotification(bridgeSessionId, { waitMs: 30_000, signal });
-      if (notification) yield notification;
-    }
   }
 
   publishBrowserEvent(input: BrowserEventPublication): BrowserEvent | undefined {
@@ -610,9 +562,9 @@ export class MemoryBrokerRuntime {
         expired += 1;
       }
     }
-    for (const connection of [...this.connectionsByBridge.values()]) {
+    for (const connection of [...this.connectionsByClientSession.values()]) {
       if (connection.value.lastSeenAt + this.connectionIdleTtlMs <= now) {
-        this.disconnect(connection.bridgeSessionId);
+        this.disconnect(connection.clientSessionId);
       }
     }
     const leasedWorkspaceIds = new Set<BrowserWorkspaceId>();
@@ -634,46 +586,36 @@ export class MemoryBrokerRuntime {
   stats(): { principals: number; connections: number; activeWorkspaces: number; activeLeases: number } {
     return {
       principals: this.principals.size,
-      connections: this.connectionsByBridge.size,
+      connections: this.connectionsByClientSession.size,
       activeWorkspaces: [...this.workspaces.values()].filter(record => record.value.state === 'active').length,
       activeLeases: [...this.leases.values()].filter(lease => lease.state === 'active').length,
     };
   }
 
   lifecycleSummary(): {
-    embeddedConnections: number;
-    oneShotConnections: number;
+    connections: number;
     activeWorkspaces: number;
     activeLeases: number;
   } {
-    let embeddedConnections = 0;
-    let oneShotConnections = 0;
-    for (const connection of this.connectionsByBridge.values()) {
-      if (connection.value.launchMode === 'embedded') embeddedConnections += 1;
-      else oneShotConnections += 1;
-    }
     const stats = this.stats();
     return {
-      embeddedConnections,
-      oneShotConnections,
+      connections: stats.connections,
       activeWorkspaces: stats.activeWorkspaces,
       activeLeases: stats.activeLeases,
     };
   }
 
-  private initialize(bridgeSessionId: string, value: unknown): JsonValue {
+  private initialize(clientSessionId: string, value: unknown): JsonValue {
     const params = validateInitializeParams(value);
-    const existing = this.connectionsByBridge.get(bridgeSessionId);
+    const existing = this.connectionsByClientSession.get(clientSessionId);
     if (existing) {
       if (
-        params.launchMode !== 'one-shot' ||
-        existing.value.launchMode !== 'one-shot' ||
         existing.client.id !== params.client.id ||
         existing.client.name !== params.client.name ||
         existing.client.version !== params.client.version ||
         existing.client.instanceId !== params.client.instanceId
       ) {
-        throw invalidArgument('This bridge connection is already initialized', 'method');
+        throw invalidArgument('This client session is already initialized', 'method');
       }
       const protocol = negotiateProtocol(params.protocol);
       if (params.limits && (protocol.major < 1 || (protocol.major === 1 && protocol.minor < 1))) {
@@ -693,10 +635,10 @@ export class MemoryBrokerRuntime {
         limits.maxArtifactBytes !== existing.limits.maxArtifactBytes ||
         limits.eventJournalSize !== existing.limits.eventJournalSize
       ) {
-        throw new BrowserPilotError('protocol_incompatible', 'One-shot connection cannot change its negotiated contract', {
+        throw new BrowserPilotError('protocol_incompatible', 'Client session cannot change its negotiated contract', {
           remediation: {
             code: 'restart_browser_pilot',
-            message: 'Restart Browser Pilot before using a different one-shot protocol contract.',
+            message: 'Restart Browser Pilot before using a different client protocol contract.',
             actionRequired: true,
           },
         });
@@ -716,7 +658,7 @@ export class MemoryBrokerRuntime {
         limits: { ...existing.limits },
       } satisfies InitializeResult);
     }
-    if (this.connectionsByBridge.size >= this.maxConnections) {
+    if (this.connectionsByClientSession.size >= this.maxConnections) {
       throw new BrowserPilotError('result_too_large', 'Broker connection limit reached', {
         context: { maxConnections: this.maxConnections },
       });
@@ -736,7 +678,6 @@ export class MemoryBrokerRuntime {
       id: connectionId,
       principalId: principal.id,
       clientInstanceId: params.client.instanceId,
-      launchMode: params.launchMode,
       protocol,
       connectedAt: now,
       lastSeenAt: now,
@@ -754,13 +695,12 @@ export class MemoryBrokerRuntime {
     };
     const connection: RuntimeConnection = {
       value: connectionValue,
-      bridgeSessionId,
+      clientSessionId,
       client: { ...params.client },
       grantedCapabilities: [...capabilities.granted],
       limits,
-      notifications: [],
     };
-    this.connectionsByBridge.set(bridgeSessionId, connection);
+    this.connectionsByClientSession.set(clientSessionId, connection);
     this.connectionsById.set(connectionId, connection);
     return asJson(initializeResult);
   }
@@ -980,10 +920,10 @@ export class MemoryBrokerRuntime {
     return principal;
   }
 
-  private requireConnection(bridgeSessionId: string): RuntimeConnection {
-    const connection = this.connectionsByBridge.get(bridgeSessionId);
+  private requireConnection(clientSessionId: string): RuntimeConnection {
+    const connection = this.connectionsByClientSession.get(clientSessionId);
     if (connection) return connection;
-    throw new BrowserPilotError('not_initialized', 'Bridge connection is not initialized', {
+    throw new BrowserPilotError('not_initialized', 'Client session is not initialized', {
       rpcCode: -32002,
     });
   }
@@ -1155,7 +1095,7 @@ export class MemoryBrokerRuntime {
   }
 
   private cleanupUnusedPrincipal(principalId: ClientPrincipalId): void {
-    const hasConnection = [...this.connectionsByBridge.values()].some(connection => (
+    const hasConnection = [...this.connectionsByClientSession.values()].some(connection => (
       connection.value.principalId === principalId
     ));
     const hasWorkspace = [...this.workspaces.values()].some(record => (
@@ -1408,44 +1348,6 @@ export class MemoryBrokerRuntime {
     return asJson(this.events.poll(params.workspaceId, params.cursor, params.limit));
   }
 
-  private deliverNotification(event: BrowserEvent): void {
-    const workspace = this.workspaces.get(event.workspaceId);
-    if (!workspace) return;
-    const notification: JsonRpcNotification = {
-      jsonrpc: '2.0',
-      method: 'events/event',
-      params: { event } as unknown as JsonValue,
-    };
-    for (const connection of this.connectionsByBridge.values()) {
-      if (
-        connection.value.principalId !== workspace.value.principalId ||
-        !connection.grantedCapabilities.includes('event.read')
-      ) continue;
-      if (connection.notificationWaiter) {
-        this.resolveNotificationWaiter(connection, structuredClone(notification));
-        continue;
-      }
-      connection.notifications.push(structuredClone(notification));
-      if (connection.notifications.length > connection.limits.eventJournalSize) {
-        connection.notifications.shift();
-      }
-    }
-  }
-
-  private resolveNotificationWaiter(
-    connection: RuntimeConnection,
-    notification: JsonRpcNotification | undefined,
-  ): void {
-    const waiter = connection.notificationWaiter;
-    if (!waiter) return;
-    connection.notificationWaiter = undefined;
-    if (waiter.timer) clearTimeout(waiter.timer);
-    if (waiter.signal && waiter.onAbort) {
-      waiter.signal.removeEventListener('abort', waiter.onAbort);
-    }
-    waiter.resolve(notification);
-  }
-
   private getCommand(connection: RuntimeConnection, value: unknown): JsonValue {
     const params = validateCommandAccessParams(value);
     if (params.workspaceId) this.requireWorkspace(connection, params.workspaceId, true);
@@ -1454,6 +1356,19 @@ export class MemoryBrokerRuntime {
       commandId: params.commandId,
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
     }));
+  }
+
+  private listCommands(connection: RuntimeConnection, value: unknown): JsonValue {
+    const params = validateCommandListParams(value);
+    this.requireWorkspace(connection, params.workspaceId, true);
+    return asJson({
+      commands: this.commands.list({
+        principalId: connection.value.principalId,
+        workspaceId: params.workspaceId,
+        ...(params.limit !== undefined ? { limit: params.limit } : {}),
+        ...(params.statuses ? { statuses: params.statuses } : {}),
+      }),
+    });
   }
 
   private cancelCommand(connection: RuntimeConnection, value: unknown): JsonValue {
@@ -1481,6 +1396,14 @@ export class MemoryBrokerRuntime {
     this.requireArtifactContext(connection, params.workspaceId, params.leaseId);
     const record = await this.requireArtifactStore().get(params.workspaceId, params.artifactId);
     return asJson({ artifact: record.descriptor, path: record.path });
+  }
+
+  private async listArtifacts(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
+    const params = validateArtifactListParams(value);
+    this.requireArtifactContext(connection, params.workspaceId, params.leaseId);
+    return asJson({
+      artifacts: await this.requireArtifactStore().list(params.workspaceId, params.kinds),
+    });
   }
 
   private async exportArtifact(connection: RuntimeConnection, value: unknown): Promise<JsonValue> {
@@ -1558,9 +1481,9 @@ export class MemoryBrokerRuntime {
     });
   }
 
-  private assertBridgeSessionId(value: string): void {
+  private assertClientSessionId(value: string): void {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(value)) {
-      throw invalidArgument('Invalid internal bridge session ID', 'bridgeSessionId');
+      throw invalidArgument('Invalid internal client session ID', 'clientSessionId');
     }
   }
 

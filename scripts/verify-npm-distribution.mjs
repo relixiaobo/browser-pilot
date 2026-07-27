@@ -46,26 +46,6 @@ function npm(args, options = {}) {
   return execute(npmInvocation.command, [...npmInvocation.prefix, ...args], options);
 }
 
-function bridgeInput(instanceId) {
-  return [
-    {
-      jsonrpc: '2.0', id: 'initialize', method: 'initialize',
-      params: {
-        client: {
-          id: 'org.browser-pilot.distribution-verifier',
-          name: 'Browser Pilot Distribution Verifier',
-          version: '1.0.0',
-          instanceId,
-        },
-        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
-        requestedCapabilities: ['browser.discovery'],
-        launchMode: 'embedded',
-      },
-    },
-    { jsonrpc: '2.0', id: 'shutdown', method: 'shutdown', params: {} },
-  ].map(value => JSON.stringify(value)).join('\n') + '\n';
-}
-
 function executableInvocation(path) {
   if (process.platform === 'win32') {
     return { command: path, prefix: [], shell: true };
@@ -82,29 +62,25 @@ async function verifyMode(name, invocation, env, cwd) {
   assert.equal(version.code, 0, `${name} version failed: ${version.stderr}`);
   assert.equal(version.stdout.trim(), packageJson.version);
 
-  let verified = false;
-  try {
-    const bridge = await execute(
-      invocation.command,
-      [...invocation.prefix, 'bridge', '--stdio'],
-      { cwd, env, shell: invocation.shell, input: bridgeInput(`distribution:${name}`) },
-    );
-    assert.equal(bridge.code, 0, `${name} bridge failed: ${bridge.stderr}`);
-    const messages = bridge.stdout.trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(messages.map(message => message.id), ['initialize', 'shutdown']);
-    assert.equal(messages[0].result.executableVersion, packageJson.version);
-    verified = true;
-  } finally {
-    const disconnected = await execute(
-      invocation.command,
-      [...invocation.prefix, 'disconnect'],
-      { cwd, env, shell: invocation.shell },
-    ).catch(() => null);
-    if (verified) {
-      assert.ok(disconnected, `${name} disconnect did not complete`);
-      assert.equal(disconnected.code, 0, `${name} disconnect failed: ${disconnected.stderr}`);
-    }
-  }
+  const help = await execute(
+    invocation.command,
+    [...invocation.prefix, '--help'],
+    { cwd, env, shell: invocation.shell },
+  );
+  assert.equal(help.code, 0, `${name} help failed: ${help.stderr}`);
+  assert.doesNotMatch(help.stdout, /bridge --stdio/u);
+  assert.match(help.stdout, /status/u);
+  assert.match(help.stdout, /--client-key/u);
+
+  const status = await execute(
+    invocation.command,
+    [...invocation.prefix, 'status'],
+    { cwd, env, shell: invocation.shell },
+  );
+  assert.equal(status.code, 0, `${name} status failed: ${status.stderr}`);
+  const parsed = JSON.parse(status.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.service.version, packageJson.version);
 }
 
 const temporary = await mkdtemp(join(tmpdir(), 'browser-pilot-npm-distribution-'));

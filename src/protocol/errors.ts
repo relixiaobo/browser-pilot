@@ -19,6 +19,7 @@ export const ERROR_CODES = [
   'action_not_verified',
   'command_cancelled',
   'command_expired',
+  'wait_timeout',
   'unknown_outcome',
   'artifact_not_found',
   'artifact_expired',

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BrowserPilotError } from '../dist/protocol.js';
-import { MemoryCommandRuntime } from '../dist/services.js';
+import {
+  brokerRequestTimeoutError,
+  brokerRequestTimeoutMs,
+  MemoryCommandRuntime,
+} from '../dist/services.js';
 
 function deferred() {
   let resolve;
@@ -28,6 +32,22 @@ function input(overrides = {}) {
     ...overrides,
   };
 }
+
+test('Broker HTTP timeouts cover command deadlines and preserve recovery identity', () => {
+  assert.equal(brokerRequestTimeoutMs('commands/list', {}), 60_000);
+  assert.equal(brokerRequestTimeoutMs('tools/call', { deadlineMs: 10_000 }), 60_000);
+  assert.equal(brokerRequestTimeoutMs('tools/call', { deadlineMs: 120_000 }), 125_000);
+
+  const error = brokerRequestTimeoutError('tools/call', {
+    name: 'browser.connect',
+    commandId: 'command:connect-recovery',
+  });
+  assert.equal(error.code, 'unknown_outcome');
+  assert.equal(error.retryable, true);
+  assert.equal(error.context.commandId, 'command:connect-recovery');
+  assert.equal(error.context.method, 'browser.connect');
+  assert.equal(error.remediation.code, 'inspect_command_before_retry');
+});
 
 test('Command Runtime serializes one target while allowing another target to run', async () => {
   const runtime = new MemoryCommandRuntime();
@@ -115,6 +135,34 @@ test('idempotent duplicates never redispatch and completed results are replayed'
   });
   assert.equal(explicitReplay.result.ok, true);
   assert.equal(explicitExecutions, 1);
+});
+
+test('Command Runtime lists recent descriptors by Workspace, status, and recency', async () => {
+  let now = 1_000;
+  const runtime = new MemoryCommandRuntime({ now: () => now });
+  await runtime.run(input({ commandId: 'command:first' }), async () => ({ ok: true }));
+  now = 2_000;
+  await runtime.run(input({
+    commandId: 'command:other-workspace',
+    workspaceId: 'workspace:other',
+  }), async () => ({ ok: true }));
+  now = 3_000;
+  await runtime.run(input({ commandId: 'command:latest' }), async () => ({ ok: true }));
+
+  assert.deepEqual(runtime.list({
+    principalId: 'principal:test',
+    workspaceId: 'workspace:test',
+    limit: 1,
+  }).map(command => command.id), ['command:latest']);
+  assert.deepEqual(runtime.list({
+    principalId: 'principal:test',
+    workspaceId: 'workspace:test',
+    statuses: ['completed'],
+  }).map(command => command.id), ['command:latest', 'command:first']);
+  assert.deepEqual(runtime.list({
+    principalId: 'principal:other',
+    workspaceId: 'workspace:test',
+  }), []);
 });
 
 test('cancellation before dispatch prevents queued execution', async () => {
