@@ -1514,23 +1514,27 @@ netCmd.command('clear')
     emit({ ok: true }, 'Request log cleared');
   }));
 
-try {
-  await program.parseAsync();
-} catch (error) {
-  if (error instanceof CommanderError) {
-    if (error.exitCode === 0) {
-      process.exitCode = 0;
-    } else if (useJson()) {
-      const message = error.message.replace(/^error:\s*/i, '');
-      const stable = new BrowserPilotError('invalid_argument', message, {
-        context: { parserCode: error.code },
-      });
-      fail(message, undefined, stable);
+async function main(): Promise<void> {
+  try {
+    await program.parseAsync();
+  } catch (error) {
+    if (error instanceof CommanderError) {
+      if (error.exitCode === 0) {
+        process.exitCode = 0;
+      } else if (useJson()) {
+        const message = error.message.replace(/^error:\s*/i, '');
+        const stable = new BrowserPilotError('invalid_argument', message, {
+          context: { parserCode: error.code },
+        });
+        fail(message, undefined, stable);
+      } else {
+        process.exitCode = error.exitCode;
+      }
     } else {
-      process.exitCode = error.exitCode;
+      const message = error instanceof Error ? error.message : String(error);
+      fail(message, undefined, error instanceof BrowserPilotError ? error : undefined);
     }
-  } else {
-    const message = error instanceof Error ? error.message : String(error);
-    fail(message, undefined, error instanceof BrowserPilotError ? error : undefined);
   }
 }
+
+void main();
