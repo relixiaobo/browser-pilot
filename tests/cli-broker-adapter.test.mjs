@@ -20,10 +20,11 @@ function artifact(id, kind, mimeType, fileName) {
     mimeType,
     byteSize: 12,
     fileName,
-    sensitivity: kind === 'upload_input' ? 'user_file' : 'browser_data',
+    sensitivity: kind === 'upload_input' || kind === 'download' ? 'user_file' : 'browser_data',
     createdAt: 1,
     expiresAt: 301_000,
     retained: false,
+    ...(kind === 'screenshot' ? { width: 800, height: 600 } : {}),
   };
 }
 
@@ -44,7 +45,7 @@ function observation(overrides = {}) {
   };
 }
 
-async function startFakeDaemon(root) {
+async function startFakeDaemon(root, options = {}) {
   const stateDirectory = join(root, '.browser-pilot');
   const socketPath = join(stateDirectory, 'daemon.sock');
   const calls = [];
@@ -330,6 +331,21 @@ async function startFakeDaemon(root) {
           managedTabSet: { id: 'managed-tab-set:cli' },
           eventCursor: 0,
         };
+      case 'workspaces/get':
+        return {
+          workspace: {
+            id: 'workspace:cli',
+            principalId: 'principal:cli',
+            browserInstanceId: 'browser-instance:fake',
+            clientKey: 'browser-pilot-cli',
+            createdAt: 1,
+            updatedAt: 2,
+            state: 'active',
+          },
+          managedTabSet: { id: 'managed-tab-set:cli' },
+          managedTabSets: [{ id: 'managed-tab-set:cli' }],
+          eventCursor: 'cursor:7',
+        };
       case 'leases/create':
         return {
           lease: {
@@ -351,8 +367,53 @@ async function startFakeDaemon(root) {
           result,
         };
       }
+      case 'commands/list':
+        return {
+          commands: !body.params.statuses || body.params.statuses.includes('completed')
+            ? [{
+                id: 'command:recent',
+                method: 'browser.click',
+                mutating: true,
+                status: 'completed',
+                acceptedAt: 10,
+                deadlineAt: 60_010,
+                dispatchedAt: 11,
+                completedAt: 12,
+              }]
+            : [],
+        };
+      case 'commands/get':
+        return {
+          command: {
+            id: body.params.commandId,
+            method: 'browser.click',
+            mutating: true,
+            status: 'completed',
+            acceptedAt: 10,
+            deadlineAt: 60_010,
+            dispatchedAt: 11,
+            completedAt: 12,
+          },
+          result: { url: 'https://example.test/complete' },
+        };
+      case 'commands/cancel':
+        return {
+          command: {
+            id: body.params.commandId,
+            method: 'browser.open',
+            mutating: true,
+            status: 'cancelled',
+            acceptedAt: 10,
+            deadlineAt: 60_010,
+            completedAt: 12,
+          },
+        };
       case 'artifacts/import':
         return { artifact: artifact('artifact:upload', 'upload_input', 'text/plain', 'upload.txt') };
+      case 'artifacts/list':
+        return {
+          artifacts: [artifact('artifact:download', 'download', 'text/csv', 'report.csv')],
+        };
       case 'artifacts/export':
         await writeFile(body.params.path, 'screenshot-bytes');
         return { artifact: artifact('artifact:screenshot', 'screenshot', 'image/png', 'capture.png'), path: body.params.path };
@@ -367,7 +428,7 @@ async function startFakeDaemon(root) {
         calls.push({ path: request.url });
         response.end(JSON.stringify({
           ok: true,
-          brokerProtocol: 1,
+          brokerProtocol: options.brokerProtocol ?? 2,
           browser: { product: 'Chrome', userDataRoot: '/profiles/fake', state: 'connected' },
         }));
         return;
@@ -426,7 +487,7 @@ async function runCliFailure(home, args, extraEnv = {}) {
   assert.fail(`Expected bp ${args.join(' ')} to fail`);
 }
 
-test('one-shot CLI exposes stable machine errors for parser, input, and connection failures', async t => {
+test('CLI exposes stable machine errors for parser, input, and connection failures', async t => {
   const root = await mkdtemp('/tmp/bp-cli-errors-');
   t.after(() => rm(root, { recursive: true, force: true }));
 
@@ -440,6 +501,8 @@ test('one-shot CLI exposes stable machine errors for parser, input, and connecti
     { args: ['click', 'nope'], code: 'invalid_argument', field: 'ref' },
     { args: ['click', '1', '--xy', '1,2'], code: 'invalid_argument', field: 'target' },
     { args: ['type', 'nope', 'text'], code: 'invalid_argument', field: 'ref' },
+    { args: ['--request-id', 'bad request', 'tabs'], code: 'invalid_argument', field: 'requestId' },
+    { args: ['--timeout', '0', 'tabs'], code: 'invalid_argument', field: 'timeout' },
     { args: ['tabs'], code: 'browser_disconnected', retryable: true },
   ];
 
@@ -461,7 +524,26 @@ test('one-shot CLI exposes stable machine errors for parser, input, and connecti
   assert.match(human.stderr, /missing required argument 'url'/);
 });
 
-test('one-shot CLI uses only canonical Broker and Artifact operations', async t => {
+test('CLI rejects an incompatible private Broker transport before sending RPC', async t => {
+  const root = await mkdtemp('/tmp/bp-cli-private-transport-');
+  const { server, calls } = await startFakeDaemon(root, { brokerProtocol: 1 });
+  t.after(async () => {
+    await new Promise(resolveClose => server.close(resolveClose));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const result = await runCliFailure(root, ['status'], {
+    BROWSER_PILOT_HOME: join(root, '.browser-pilot'),
+  });
+  assert.equal(result.exitCode, 1, result.stderr);
+  assert.equal(result.output.code, 'protocol_incompatible');
+  assert.equal(result.output.context.brokerRpcVersion, 1);
+  assert.equal(result.output.context.requiredBrokerRpcVersion, 2);
+  assert.equal(result.output.remediation.code, 'stop_incompatible_broker_or_isolate');
+  assert.equal(calls.some(call => call.path === '/broker/rpc'), false);
+});
+
+test('CLI uses only canonical Broker and file operations', async t => {
   const root = await mkdtemp('/tmp/bp-cli-');
   const { server, calls, resetTabs } = await startFakeDaemon(root);
   t.after(async () => {
@@ -472,6 +554,45 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
   const snapshot = await runCli(root, ['snapshot', '--limit', '9']);
   assert.equal(snapshot.ok, true);
   assert.equal(snapshot.elements[0].name, 'Submit');
+
+  const status = await runCli(root, ['status']);
+  assert.equal(status.service.state, 'running');
+  assert.equal(status.session.target.url, 'https://example.test/form');
+  assert.equal('eventCursor' in status, false);
+  assert.equal(status.recovery.required, false);
+  assert.deepEqual(
+    calls
+      .filter(call => call.body?.method === 'commands/list')
+      .map(call => call.body.params.statuses),
+    [['accepted', 'dispatched'], ['unknown_outcome']],
+  );
+
+  const commands = await runCli(root, ['commands']);
+  assert.equal(commands.commands[0].id, 'command:recent');
+  const command = await runCli(root, ['command', 'command:recent']);
+  assert.equal(command.command.status, 'completed');
+  const cancelled = await runCli(root, ['cancel', 'command:running']);
+  assert.equal(cancelled.command.status, 'cancelled');
+
+  await runCli(root, ['--request-id', 'host-call-42', 'snapshot']);
+  const requestCall = calls.find(call => call.body?.params?.idempotencyKey === 'cli-request:host-call-42:1');
+  assert.ok(requestCall);
+  assert.match(requestCall.body.params.commandId, /^command:cli-[A-Za-z0-9_-]+-1$/);
+
+  const waitedText = await runCli(root, ['--timeout', '1000', 'wait', '--text', 'Submit']);
+  assert.equal(waitedText.condition, 'text');
+  const waitedDownload = await runCli(root, ['--timeout', '1000', 'wait', '--download']);
+  assert.equal(waitedDownload.matched.fileName, 'report.csv');
+  const downloads = await runCli(root, ['downloads']);
+  assert.equal(downloads.downloads[0].mimeType, 'text/csv');
+
+  const outputDirectory = join(root, 'agent-output');
+  const downloaded = await runCli(root, ['download', '1'], {
+    BROWSER_PILOT_OUTPUT_DIR: outputDirectory,
+  });
+  assert.equal(downloaded.file, join(outputDirectory, 'report.csv'));
+  assert.equal(downloaded.mimeType, 'text/csv');
+  assert.equal(await readFile(downloaded.file, 'utf8'), 'screenshot-bytes');
 
   const browsers = await runCli(root, ['browsers']);
   assert.equal(browsers.browsers[0].state, 'ready');
@@ -565,6 +686,9 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
   const screenshotPath = join(root, 'capture.png');
   const captured = await runCli(root, ['screenshot', screenshotPath]);
   assert.equal(captured.file, screenshotPath);
+  assert.equal(captured.mimeType, 'image/png');
+  assert.equal(captured.sizeBytes, 12);
+  assert.equal(captured.width, 800);
   assert.equal(await readFile(screenshotPath, 'utf8'), 'screenshot-bytes');
   const exportCall = calls.find(call => call.body?.method === 'artifacts/export');
   assert.equal(exportCall.body.params.overwrite, true);

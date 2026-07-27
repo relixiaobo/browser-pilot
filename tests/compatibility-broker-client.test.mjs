@@ -4,13 +4,13 @@ import { CompatibilityBrokerClient, MemoryBrokerRuntime } from '../dist/services
 
 function runtimeTransport(runtime) {
   return {
-    brokerCall(bridgeSessionId, method, params) {
-      return runtime.call(bridgeSessionId, method, params);
+    brokerCall(clientSessionId, method, params) {
+      return runtime.call(clientSessionId, method, params);
     },
   };
 }
 
-test('one-shot compatibility clients reuse daemon-memory Workspace and Lease state', async () => {
+test('CLI clients reuse Broker Workspace and Lease state', async () => {
   let now = 1_000;
   const runtime = new MemoryBrokerRuntime({
     serviceVersion: '0.1.6',
@@ -94,7 +94,60 @@ test('stable CLI client keys isolate Agents while repeated calls reuse their own
   });
 });
 
-test('compatibility client rejects a daemon from another executable version', async () => {
+test('compatibility client exposes command recovery and deduplicates stable request IDs', async () => {
+  let executions = 0;
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '0.4.0',
+    executableVersion: '0.4.0',
+    brokerProcessIdentity: 'broker:request-recovery',
+    browsers: [{
+      candidate: { id: 'browser:test', product: 'Chrome', state: 'ready' },
+      instance: {
+        id: 'browser-instance:test',
+        product: 'Chrome',
+        userDataRoot: '/profiles/test',
+        processIdentity: 'process:test',
+        connectionGeneration: 1,
+        state: 'connected',
+      },
+    }],
+    toolExecutor: {
+      supportedTools: ['browser.profiles.list'],
+      async call(context) {
+        executions += 1;
+        context.markDispatched();
+        return {
+          workspaceId: context.workspace.id,
+          leaseId: context.lease.id,
+          profiles: [],
+        };
+      },
+    },
+  });
+  const transport = runtimeTransport(runtime);
+  const first = await CompatibilityBrokerClient.create(
+    transport,
+    '0.4.0',
+    'agent.recovery',
+    { requestId: 'tool-call-123' },
+  );
+  await first.callTool('browser.profiles.list');
+  const original = (await first.listCommands())[0];
+  assert.equal(original.status, 'completed');
+
+  const retried = await CompatibilityBrokerClient.create(
+    transport,
+    '0.4.0',
+    'agent.recovery',
+    { requestId: 'tool-call-123' },
+  );
+  await retried.callTool('browser.profiles.list');
+  assert.equal(executions, 1);
+  assert.equal((await retried.getCommand(original.id)).command.id, original.id);
+  assert.deepEqual((await retried.listCommands()).map(command => command.id), [original.id]);
+});
+
+test('compatible CLI versions share one Agent namespace through protocol negotiation', async () => {
   const runtime = new MemoryBrokerRuntime({
     serviceVersion: '0.1.5',
     executableVersion: '0.1.5',
@@ -111,9 +164,15 @@ test('compatibility client rejects a daemon from another executable version', as
       },
     }],
   });
-  await assert.rejects(
-    () => CompatibilityBrokerClient.create(runtimeTransport(runtime), '0.1.6'),
-    error => error.code === 'protocol_incompatible' &&
-      error.remediation?.code === 'use_matching_executable_or_isolate',
-  );
+  const oldClient = await CompatibilityBrokerClient.create(runtimeTransport(runtime), '0.1.5');
+  const newerClient = await CompatibilityBrokerClient.create(runtimeTransport(runtime), '0.1.6');
+  assert.notEqual(newerClient.initialized.connectionId, oldClient.initialized.connectionId);
+  assert.equal(newerClient.workspace.id, oldClient.workspace.id);
+  assert.notEqual(newerClient.lease.id, oldClient.lease.id);
+  assert.deepEqual(runtime.stats(), {
+    principals: 1,
+    connections: 2,
+    activeWorkspaces: 1,
+    activeLeases: 2,
+  });
 });

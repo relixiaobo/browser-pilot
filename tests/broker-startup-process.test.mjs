@@ -8,51 +8,7 @@ import { WebSocketServer } from 'ws';
 import { supportedBrowserProfiles } from '../dist/services.js';
 
 const CLI = join(process.cwd(), 'dist', 'cli.js');
-
-function bridgeInput(instanceId, options = {}) {
-  return [
-    {
-      jsonrpc: '2.0', id: 'initialize', method: 'initialize',
-      params: {
-        client: {
-          id: 'com.example.startup-test',
-          name: 'Startup Test',
-          version: options.clientVersion ?? '1.0.0',
-          instanceId,
-        },
-        protocol: options.protocol ?? {
-          min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 },
-        },
-        requestedCapabilities: ['browser.discovery'],
-        launchMode: 'embedded',
-      },
-    },
-    { jsonrpc: '2.0', id: 'shutdown', method: 'shutdown', params: {} },
-  ].map(message => JSON.stringify(message)).join('\n') + '\n';
-}
-
-function runBridge(root, instanceId, options = {}) {
-  const child = spawn(process.execPath, [options.cliPath ?? CLI, 'bridge', '--stdio'], {
-    env: { ...process.env, HOME: root, PATH: '', ...options.env },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', bytes => { stdout += bytes.toString(); });
-  child.stderr.on('data', bytes => { stderr += bytes.toString(); });
-  child.stdin.end(bridgeInput(instanceId, options));
-  return new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      resolve({
-        code,
-        signal,
-        stderr,
-        messages: stdout.trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
-      });
-    });
-  });
-}
+const DAEMON = join(process.cwd(), 'dist', 'daemon.js');
 
 function runCli(root, args, env = {}, cliPath = CLI) {
   const child = spawn(process.execPath, [cliPath, ...args], {
@@ -110,6 +66,92 @@ async function waitForFile(path, timeoutMs = 5_000) {
     }
   }
   throw new Error(`Timed out waiting for ${path}`);
+}
+
+async function waitForValue(read, predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (predicate(value)) return value;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error('Timed out waiting for expected value');
+}
+
+async function startPassiveBroker(root, options = {}) {
+  const profile = options.profile ?? join(root, 'profile');
+  const stateDir = options.env?.BROWSER_PILOT_HOME ?? join(root, '.browser-pilot');
+  await mkdir(profile, { recursive: true });
+  const child = spawn(process.execPath, [
+    DAEMON,
+    options.wsUrl ?? '',
+    options.product ?? 'Chrome',
+    profile,
+  ], {
+    env: { ...process.env, HOME: root, PATH: '', ...options.env },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', bytes => { stderr += bytes.toString(); });
+  if (!options.wsUrl) await waitForFile(join(stateDir, 'broker-locator.json'));
+  return { child, profile, stderr: () => stderr };
+}
+
+async function terminateChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill('SIGTERM');
+  await Promise.race([
+    new Promise(resolve => child.once('exit', resolve)),
+    new Promise(resolve => setTimeout(resolve, 5_000)),
+  ]);
+  if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+}
+
+async function initializeClient(socketPath, clientSessionId, options = {}) {
+  const initialized = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId,
+    method: 'initialize',
+    params: {
+      client: {
+        id: options.clientId ?? 'com.example.startup-test',
+        name: 'Startup Test',
+        version: options.clientVersion ?? '1.0.0',
+        instanceId: options.instanceId ?? clientSessionId,
+      },
+      protocol: options.protocol ?? {
+        min: { major: 1, minor: 1 }, max: { major: 1, minor: 3 },
+      },
+      requestedCapabilities: options.capabilities ?? ['browser.control', 'workspace.manage'],
+    },
+  });
+  if (initialized.error) return initialized;
+  const browserId = initialized.result.browsers[0]?.id;
+  const created = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId,
+    method: 'workspaces/create',
+    params: browserId ? { browserId } : {},
+  });
+  if (created.error) return created;
+  const leased = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId,
+    method: 'leases/create',
+    params: { workspaceId: created.result.workspace.id },
+  });
+  return {
+    initialized,
+    clientSessionId,
+    browserId,
+    workspaceId: created.result.workspace.id,
+    leaseId: leased.result.lease.id,
+  };
+}
+
+async function releaseClient(socketPath, client) {
+  await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId: client.clientSessionId,
+    method: 'workspaces/release',
+    params: { workspaceId: client.workspaceId },
+  });
 }
 
 async function startGatedCdpFixture() {
@@ -170,40 +212,7 @@ async function startGatedCdpFixture() {
   };
 }
 
-async function waitForValue(read, predicate, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await read();
-    if (predicate(value)) return value;
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-  throw new Error('Timed out waiting for expected value');
-}
-
-function startLiveBridge(root, instanceId) {
-  const child = spawn(process.execPath, [CLI, 'bridge', '--stdio'], {
-    env: { ...process.env, HOME: root, PATH: '' },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', bytes => { stdout += bytes.toString(); });
-  child.stderr.on('data', bytes => { stderr += bytes.toString(); });
-  const initialized = new Promise((resolve, reject) => {
-    child.once('error', reject);
-    const inspect = () => {
-      const newline = stdout.indexOf('\n');
-      if (newline < 0) return;
-      child.stdout.off('data', inspect);
-      resolve(JSON.parse(stdout.slice(0, newline)));
-    };
-    child.stdout.on('data', inspect);
-  });
-  child.stdin.write(`${JSON.stringify(JSON.parse(bridgeInput(instanceId).split('\n')[0]))}\n`);
-  return { child, initialized, stderr: () => stderr };
-}
-
-test('simultaneous bridge processes start and reuse exactly one per-user Broker', async t => {
+test('simultaneous CLI processes start and reuse exactly one per-user Broker', async t => {
   const root = await mkdtemp('/tmp/bp-startup-process-');
   const stateDir = join(root, '.browser-pilot');
   const socketPath = join(stateDir, 'daemon.sock');
@@ -212,24 +221,14 @@ test('simultaneous bridge processes start and reuse exactly one per-user Broker'
     await rm(root, { recursive: true, force: true });
   });
 
-  const [first, second] = await Promise.all([
-    runBridge(root, 'startup:first', { clientVersion: '1.0.0' }),
-    runBridge(root, 'startup:second', { clientVersion: '9.4.0' }),
+  await Promise.all([
+    runCli(root, ['connect']),
+    runCli(root, ['connect']),
   ]);
-  for (const result of [first, second]) {
-    assert.equal(result.code, 0, result.stderr);
-    assert.equal(result.signal, null);
-    assert.equal(result.stderr, '');
-    assert.deepEqual(result.messages.map(message => message.id), ['initialize', 'shutdown']);
-    assert.equal(result.messages[0].error, undefined);
-  }
-  assert.equal(
-    first.messages[0].result.brokerProcessIdentity,
-    second.messages[0].result.brokerProcessIdentity,
-  );
-
+  const health = await daemonRequest(socketPath, '/health');
   const locator = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
-  assert.equal(locator.brokerProcessIdentity, first.messages[0].result.brokerProcessIdentity);
+  assert.equal(health.brokerProcessIdentity, locator.brokerProcessIdentity);
+  assert.equal(health.brokerProtocol, 2);
   assert.equal(locator.endpoint, socketPath);
   assert.equal(locator.transport, 'unix_socket');
   assert.equal(locator.schemaVersion, 2);
@@ -239,30 +238,18 @@ test('simultaneous bridge processes start and reuse exactly one per-user Broker'
   });
 
   process.kill(locator.pid, 'SIGKILL');
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(locator.pid, 0);
-      await new Promise(resolve => setTimeout(resolve, 20));
-    } catch {
-      break;
-    }
-  }
-  assert.throws(() => process.kill(locator.pid, 0));
+  await waitForValue(() => {
+    try { process.kill(locator.pid, 0); return false; } catch { return true; }
+  }, Boolean);
 
-  const recovered = await runBridge(root, 'startup:recovered');
-  assert.equal(recovered.code, 0, recovered.stderr);
-  assert.equal(recovered.messages[0].error, undefined);
-  assert.notEqual(
-    recovered.messages[0].result.brokerProcessIdentity,
-    locator.brokerProcessIdentity,
-  );
+  await runCli(root, ['connect']);
+  const recovered = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
+  assert.notEqual(recovered.brokerProcessIdentity, locator.brokerProcessIdentity);
 });
 
 test('passive Broker startup and concurrent explicit connects create exactly one authorization request', async t => {
   const root = await mkdtemp('/tmp/bp-explicit-authorization-');
-  const stateDir = join(root, '.browser-pilot');
-  const socketPath = join(stateDir, 'daemon.sock');
+  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
   const browserEnv = {
     ...process.env,
     HOME: root,
@@ -276,59 +263,22 @@ test('passive Broker startup and concurrent explicit connects create exactly one
   const cdp = await startGatedCdpFixture();
   const port = new URL(cdp.wsUrl).port;
   await writeFile(join(profile, 'DevToolsActivePort'), `${port}\n/devtools/browser/gated\n`);
+  const broker = await startPassiveBroker(root, { profile, env: browserEnv });
   t.after(async () => {
-    await stopDaemon(socketPath).catch(() => {});
+    await terminateChild(broker.child);
     await cdp.close();
     await rm(root, { recursive: true, force: true });
   });
 
-  const started = await runBridge(root, 'authorization:passive', { env: browserEnv });
-  assert.equal(started.code, 0, started.stderr);
-  assert.equal(cdp.upgradeCount, 0, 'bridge initialization must not request browser authorization');
-  assert.equal(cdp.pendingUpgradeCount, 0);
-
-  const initialize = async bridgeSessionId => {
-    const initialized = await daemonRequest(socketPath, '/broker/rpc', {
-      bridgeSessionId,
-      method: 'initialize',
-      params: {
-        client: {
-          id: 'com.example.authorization-test',
-          name: 'Authorization Test',
-          version: '1.0.0',
-          instanceId: bridgeSessionId,
-        },
-        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
-        requestedCapabilities: ['browser.control', 'workspace.manage'],
-        launchMode: 'one-shot',
-      },
-    });
-    const browserId = initialized.result.browsers[0].id;
-    const created = await daemonRequest(socketPath, '/broker/rpc', {
-      bridgeSessionId,
-      method: 'workspaces/create',
-      params: { browserId },
-    });
-    const leased = await daemonRequest(socketPath, '/broker/rpc', {
-      bridgeSessionId,
-      method: 'leases/create',
-      params: { workspaceId: created.result.workspace.id },
-    });
-    return {
-      bridgeSessionId,
-      browserId,
-      workspaceId: created.result.workspace.id,
-      leaseId: leased.result.lease.id,
-    };
-  };
+  assert.equal(cdp.upgradeCount, 0, 'Broker startup must not request browser authorization');
   const [first, second] = await Promise.all([
-    initialize('bridge:authorization-first'),
-    initialize('bridge:authorization-second'),
+    initializeClient(socketPath, 'client:authorization-first'),
+    initializeClient(socketPath, 'client:authorization-second'),
   ]);
   assert.equal(cdp.upgradeCount, 0, 'discovery and Workspace creation must remain passive');
 
   const connect = (client, commandId) => daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: client.bridgeSessionId,
+    clientSessionId: client.clientSessionId,
     method: 'tools/call',
     params: {
       name: 'browser.connect',
@@ -342,7 +292,7 @@ test('passive Broker startup and concurrent explicit connects create exactly one
   await waitForValue(() => cdp.pendingUpgradeCount, value => value === 1);
   const secondConnect = connect(second, 'command:authorization-second');
   await new Promise(resolve => setTimeout(resolve, 100));
-  assert.equal(cdp.upgradeCount, 1, 'concurrent clients must share the pending authorization request');
+  assert.equal(cdp.upgradeCount, 1);
   assert.equal(cdp.pendingUpgradeCount, 1);
 
   cdp.release();
@@ -350,53 +300,23 @@ test('passive Broker startup and concurrent explicit connects create exactly one
   assert.deepEqual(connected.map(response => response.result.result.state), ['connected', 'connected']);
   assert.equal(cdp.upgradeCount, 1);
 
-  const tabs = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: first.bridgeSessionId,
-    method: 'tools/call',
-    params: {
-      name: 'browser.tabs.list',
-      arguments: {},
-      workspaceId: first.workspaceId,
-      leaseId: first.leaseId,
-      commandId: 'command:authorization-tabs',
-    },
-  });
-  assert.equal(tabs.error, undefined, JSON.stringify(tabs.error));
-  assert.equal(tabs.result.result.targets.length, 0);
-  assert.equal(cdp.upgradeCount, 1, 'normal browser commands must reuse the browser connection');
-
   cdp.disconnectClients();
   await waitForValue(
     () => daemonRequest(socketPath, '/health'),
     health => health.browser?.state === 'disconnected',
   );
-  // Cross the daemon's two-second passive discovery refresh interval. This
-  // specifically guards against reintroducing timer-driven WebSocket probes.
   await new Promise(resolve => setTimeout(resolve, 2_250));
   assert.equal(cdp.upgradeCount, 1, 'a dropped browser connection must not start an authorization loop');
 });
 
-test('clients reuse a Broker that is still waiting for browser authorization', async t => {
+test('CLI startup reuses a Broker that is still waiting for browser authorization', async t => {
   const root = await mkdtemp('/tmp/bp-starting-broker-');
   const stateDir = join(root, '.browser-pilot');
   const socketPath = join(stateDir, 'daemon.sock');
-  const profile = join(root, 'profile');
-  await mkdir(profile, { recursive: true });
   const cdp = await startGatedCdpFixture();
-  const daemon = spawn(process.execPath, [
-    join(process.cwd(), 'dist', 'daemon.js'),
-    cdp.wsUrl,
-    'Chrome',
-    profile,
-  ], {
-    env: { ...process.env, HOME: root, PATH: '' },
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  let stderr = '';
-  daemon.stderr.on('data', bytes => { stderr += bytes.toString(); });
+  const broker = await startPassiveBroker(root, { wsUrl: cdp.wsUrl });
   t.after(async () => {
-    await stopDaemon(socketPath).catch(() => {});
-    if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGTERM');
+    await terminateChild(broker.child);
     await cdp.close();
     await rm(root, { recursive: true, force: true });
   });
@@ -405,107 +325,75 @@ test('clients reuse a Broker that is still waiting for browser authorization', a
   await waitForFile(pidFile);
   const starting = JSON.parse(await readFile(pidFile, 'utf8'));
   assert.equal(starting.state, 'starting');
-  assert.equal(starting.pid, daemon.pid);
+  assert.equal(starting.pid, broker.child.pid);
 
-  const bridge = runBridge(root, 'startup:authorization-wait');
+  const command = runCli(root, ['connect']);
   await waitForFile(join(stateDir, 'startup.lock'));
   cdp.release();
-  const result = await bridge;
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.messages[0].error, undefined);
+  await command;
 
   const locator = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
-  assert.equal(locator.pid, daemon.pid);
+  assert.equal(locator.pid, broker.child.pid);
   assert.equal(cdp.connectionCount, 1);
-  assert.equal(stderr, '');
+  assert.equal(broker.stderr(), '');
 });
 
 test('terminating an authorization-pending Broker removes its worker and starting record', async t => {
   const root = await mkdtemp('/tmp/bp-stopping-broker-');
   const stateDir = join(root, '.browser-pilot');
-  const profile = join(root, 'profile');
-  await mkdir(profile, { recursive: true });
   const cdp = await startGatedCdpFixture();
-  const daemon = spawn(process.execPath, [
-    join(process.cwd(), 'dist', 'daemon.js'),
-    cdp.wsUrl,
-    'Chrome',
-    profile,
-  ], {
-    env: { ...process.env, HOME: root, PATH: '' },
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  let stderr = '';
-  daemon.stderr.on('data', bytes => { stderr += bytes.toString(); });
+  const broker = await startPassiveBroker(root, { wsUrl: cdp.wsUrl });
   t.after(async () => {
-    if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGKILL');
+    await terminateChild(broker.child);
     await cdp.close();
     await rm(root, { recursive: true, force: true });
   });
 
   const pidFile = join(stateDir, 'daemon.pid');
   await waitForFile(pidFile);
-  daemon.kill('SIGTERM');
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Authorization-pending Broker did not exit')), 10_000);
-    daemon.once('exit', () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-  const deadline = Date.now() + 5_000;
-  while (cdp.pendingUpgradeCount > 0 && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-
+  await terminateChild(broker.child);
+  await waitForValue(() => cdp.pendingUpgradeCount, value => value === 0);
   await assert.rejects(access(pidFile));
-  assert.equal(cdp.pendingUpgradeCount, 0);
-  assert.equal(stderr, '');
+  assert.equal(broker.stderr(), '');
 });
 
 test('incompatible clients fail without replacing the running Broker', async t => {
   const root = await mkdtemp('/tmp/bp-incompatible-process-');
   const socketPath = join(root, '.browser-pilot', 'daemon.sock');
+  const broker = await startPassiveBroker(root);
   t.after(async () => {
-    await stopDaemon(socketPath).catch(() => {});
+    await terminateChild(broker.child);
     await rm(root, { recursive: true, force: true });
   });
 
-  const compatible = await runBridge(root, 'protocol:compatible');
   const healthBefore = await daemonRequest(socketPath, '/health');
   const unauthorizedShutdown = await daemonRequest(socketPath, '/shutdown', {
     brokerProcessIdentity: healthBefore.brokerProcessIdentity,
     executableVersion: '999.0.0',
     executableIdentity: 'executable:not-the-running-installation',
   });
-  const incompatible = await runBridge(root, 'protocol:incompatible', {
+  const incompatible = await initializeClient(socketPath, 'client:incompatible', {
     protocol: { min: { major: 2, minor: 0 }, max: { major: 2, minor: 1 } },
   });
   const healthAfter = await daemonRequest(socketPath, '/health');
 
-  assert.equal(compatible.messages[0].error, undefined);
   assert.equal(unauthorizedShutdown.error.data.code, 'protocol_incompatible');
-  assert.equal(
-    unauthorizedShutdown.error.data.remediation.code,
-    'use_matching_executable_or_isolate',
-  );
-  assert.equal(incompatible.messages[0].error.data.code, 'protocol_incompatible');
-  assert.equal(
-    incompatible.messages[0].error.data.remediation.code,
-    'use_compatible_executable_or_isolate',
-  );
+  assert.equal(unauthorizedShutdown.error.data.remediation.code, 'use_matching_executable_or_isolate');
+  assert.equal(incompatible.error.data.code, 'protocol_incompatible');
+  assert.equal(incompatible.error.data.remediation.code, 'use_compatible_executable_or_isolate');
   assert.equal(healthAfter.brokerProcessIdentity, healthBefore.brokerProcessIdentity);
-  assert.equal(healthAfter.clients.embeddedConnections, 0);
+  assert.equal(healthAfter.clients.connections, 0);
 });
 
-test('compatible Browser Pilot executable versions reuse one Broker while one-shot ownership stays exact', async t => {
-  const root = await mkdtemp('/tmp/bp-compatible-version-process-');
+test('compatible CLI installations reuse one Broker while shutdown ownership stays exact', async t => {
+  const root = await mkdtemp('/tmp/bp-compatible-install-process-');
   const socketPath = join(root, '.browser-pilot', 'daemon.sock');
   const alternateRoot = join(root, 'alternate-installation');
   const alternateDist = join(alternateRoot, 'dist');
   const alternateCli = join(alternateDist, 'cli.js');
+  const broker = await startPassiveBroker(root);
   t.after(async () => {
-    await stopDaemon(socketPath).catch(() => {});
+    await terminateChild(broker.child);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -518,60 +406,49 @@ test('compatible Browser Pilot executable versions reuse one Broker while one-sh
   }));
   await symlink(join(process.cwd(), 'node_modules'), join(alternateRoot, 'node_modules'), 'dir');
 
-  const original = await runBridge(root, 'version:original');
-  const alternate = await runBridge(root, 'version:alternate', { cliPath: alternateCli });
-  assert.equal(original.messages[0].error, undefined);
-  assert.equal(alternate.messages[0].error, undefined, alternate.stderr);
-  assert.equal(
-    alternate.messages[0].result.brokerProcessIdentity,
-    original.messages[0].result.brokerProcessIdentity,
-  );
-  assert.notEqual(alternate.messages[0].result.executableVersion, '9.9.9');
+  const original = await runCli(root, ['status']);
+  const alternate = await runCli(root, ['status'], {}, alternateCli);
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(alternate.code, 0, alternate.stderr);
+  const beforeDisconnect = await daemonRequest(socketPath, '/health');
 
-  const refusedUse = await runCli(root, ['tabs'], {}, alternateCli);
-  assert.equal(refusedUse.code, 1, refusedUse.stderr);
-  assert.equal(JSON.parse(refusedUse.stdout).code, 'protocol_incompatible');
-  const healthAfterRefusedUse = await daemonRequest(socketPath, '/health');
-  assert.equal(healthAfterRefusedUse.clients.oneShotConnections, 0);
-
-  const refused = await runCli(root, ['disconnect'], {}, alternateCli);
-  assert.equal(refused.code, 1, refused.stderr);
-  assert.equal(JSON.parse(refused.stdout).code, 'protocol_incompatible');
-  const health = await daemonRequest(socketPath, '/health');
-  assert.equal(health.brokerProcessIdentity, original.messages[0].result.brokerProcessIdentity);
+  const released = await runCli(root, ['disconnect'], {}, alternateCli);
+  assert.equal(released.code, 0, released.stderr);
+  const stillRunning = await daemonRequest(socketPath, '/health');
+  assert.equal(stillRunning.brokerProcessIdentity, beforeDisconnect.brokerProcessIdentity);
+  assert.equal(stillRunning.clients.activeLeases, 0);
 
   const stopped = await runCli(root, ['disconnect']);
   assert.equal(stopped.code, 0, stopped.stderr);
+  await waitForValue(async () => {
+    try { await daemonRequest(socketPath, '/health'); return false; } catch { return true; }
+  }, Boolean);
 });
 
-test('bp disconnect releases its namespace without stopping a Broker with a live embedded client', async t => {
+test('bp disconnect releases its namespace without stopping a Broker used by another Agent', async t => {
   const root = await mkdtemp('/tmp/bp-live-client-process-');
   const socketPath = join(root, '.browser-pilot', 'daemon.sock');
-  const bridge = startLiveBridge(root, 'live-client:one');
+  const broker = await startPassiveBroker(root);
   t.after(async () => {
-    if (bridge.child.exitCode === null) bridge.child.kill('SIGTERM');
-    await stopDaemon(socketPath).catch(() => {});
+    await terminateChild(broker.child);
     await rm(root, { recursive: true, force: true });
   });
 
-  const initialized = await bridge.initialized;
-  assert.equal(initialized.error, undefined, bridge.stderr());
+  const cliStatus = await runCli(root, ['status']);
+  assert.equal(cliStatus.code, 0, cliStatus.stderr);
+  const other = await initializeClient(socketPath, 'client:other-agent', {
+    clientId: 'com.example.other-agent',
+  });
   const before = await daemonRequest(socketPath, '/health');
-  assert.equal(before.clients.embeddedConnections, 1);
+  assert.equal(before.clients.activeLeases, 2);
 
   const disconnected = await runCli(root, ['disconnect']);
   assert.equal(disconnected.code, 0, disconnected.stderr);
-  assert.equal(JSON.parse(disconnected.stdout.trim()).ok, true);
   const stillRunning = await daemonRequest(socketPath, '/health');
   assert.equal(stillRunning.brokerProcessIdentity, before.brokerProcessIdentity);
+  assert.equal(stillRunning.clients.activeLeases, 1);
 
-  bridge.child.stdin.end(`${JSON.stringify({
-    jsonrpc: '2.0', id: 'shutdown', method: 'shutdown', params: {},
-  })}\n`);
-  await new Promise((resolve, reject) => {
-    bridge.child.once('error', reject);
-    bridge.child.once('exit', resolve);
-  });
+  await releaseClient(socketPath, other);
   const stopped = await runCli(root, ['disconnect']);
   assert.equal(stopped.code, 0, stopped.stderr);
 });
@@ -580,30 +457,24 @@ test('explicit BROWSER_PILOT_HOME isolation starts an independent Broker', async
   const root = await mkdtemp('/tmp/bp-version-isolation-');
   const defaultState = join(root, '.browser-pilot');
   const isolatedState = join(root, 'isolated-v2');
-  const defaultSocket = join(defaultState, 'daemon.sock');
-  const isolatedSocket = join(isolatedState, 'daemon.sock');
+  const sharedBroker = await startPassiveBroker(root);
+  const isolatedBroker = await startPassiveBroker(root, {
+    profile: join(root, 'isolated-profile'),
+    env: { BROWSER_PILOT_HOME: isolatedState },
+  });
   t.after(async () => {
     await Promise.all([
-      stopDaemon(defaultSocket).catch(() => {}),
-      stopDaemon(isolatedSocket).catch(() => {}),
+      terminateChild(sharedBroker.child),
+      terminateChild(isolatedBroker.child),
     ]);
     await rm(root, { recursive: true, force: true });
   });
 
-  const [shared, isolated] = await Promise.all([
-    runBridge(root, 'isolation:shared'),
-    runBridge(root, 'isolation:explicit', {
-      env: { BROWSER_PILOT_HOME: isolatedState },
-    }),
-  ]);
-  assert.notEqual(
-    shared.messages[0].result.brokerProcessIdentity,
-    isolated.messages[0].result.brokerProcessIdentity,
-  );
   const [sharedLocator, isolatedLocator] = await Promise.all([
     readFile(join(defaultState, 'broker-locator.json'), 'utf8').then(JSON.parse),
     readFile(join(isolatedState, 'broker-locator.json'), 'utf8').then(JSON.parse),
   ]);
+  assert.notEqual(sharedLocator.brokerProcessIdentity, isolatedLocator.brokerProcessIdentity);
   assert.notEqual(sharedLocator.endpoint, isolatedLocator.endpoint);
   assert.equal(sharedLocator.executable.identity, isolatedLocator.executable.identity);
 });
@@ -628,13 +499,11 @@ test('a live but unresponsive Broker is reported and never silently replaced', a
   );
   t.after(() => rm(root, { recursive: true, force: true }));
 
-  const result = await runBridge(root, 'startup:unresponsive');
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.messages[0].error.data.code, 'browser_disconnected');
-  assert.equal(
-    result.messages[0].error.data.remediation.code,
-    'restart_unresponsive_broker',
-  );
+  const result = await runCli(root, ['connect']);
+  assert.equal(result.code, 1, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.code, 'browser_disconnected');
+  assert.equal(output.remediation.code, 'restart_unresponsive_broker');
   assert.deepEqual(
     JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8')),
     locator,

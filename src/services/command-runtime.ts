@@ -43,6 +43,13 @@ export interface CommandAccessContext {
   workspaceId?: BrowserWorkspaceId;
 }
 
+export interface CommandListContext {
+  principalId: ClientPrincipalId;
+  workspaceId: BrowserWorkspaceId;
+  limit?: number;
+  statuses?: readonly CommandStatus[];
+}
+
 export interface MemoryCommandRuntimeOptions {
   defaultDeadlineMs?: number;
   maxDeadlineMs?: number;
@@ -236,6 +243,20 @@ export class MemoryCommandRuntime {
   get(context: CommandAccessContext): CommandOutcome {
     this.sweep();
     return this.outcome(this.requireOwned(context));
+  }
+
+  list(context: CommandListContext): CommandDescriptor[] {
+    this.sweep();
+    const statuses = context.statuses ? new Set(context.statuses) : undefined;
+    return [...this.records.values()]
+      .filter(record => (
+        record.principalId === context.principalId &&
+        record.workspaceId === context.workspaceId &&
+        (!statuses || statuses.has(record.status))
+      ))
+      .sort((left, right) => right.acceptedAt - left.acceptedAt)
+      .slice(0, context.limit ?? 20)
+      .map(descriptor);
   }
 
   cancel(context: CommandAccessContext): CommandOutcome {

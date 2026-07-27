@@ -192,9 +192,10 @@ try {
   await writeFile(join(directory, 'README.txt'), [
     `Browser Pilot ${packageJson.version} (${runtime.platform}-${runtime.arch})`,
     '',
-    `Run: .${process.platform === 'win32' ? '\\' : '/'}browser-pilot bridge --stdio`,
+    `Run: .${process.platform === 'win32' ? '\\' : '/'}browser-pilot --help`,
+    `Then: .${process.platform === 'win32' ? '\\' : '/'}browser-pilot connect`,
     'The Broker and managed-target janitor run as private roles of this executable.',
-    'Do not invoke --browser-pilot-internal options from an Agent adapter.',
+    'Do not invoke --browser-pilot-internal options directly.',
     '',
   ].join('\n'));
 

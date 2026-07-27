@@ -4,8 +4,8 @@ import {
   BrowserPilotError,
   DEFAULT_CAPABILITIES,
   TOOL_DEFINITIONS,
-  assertToolManifest,
-  getToolManifest,
+  assertToolDefinitions,
+  isToolAvailableInProtocol,
   negotiateCapabilities,
   negotiateProtocolLimits,
   negotiateProtocol,
@@ -30,7 +30,6 @@ const initializeParams = {
     max: { major: 1, minor: 1 },
   },
   requestedCapabilities: ['browser.control', 'developer.eval', 'future.capability'],
-  launchMode: 'embedded',
   limits: {
     maxMessageBytes: 128 * 1024,
     maxResultBytes: 512 * 1024,
@@ -134,32 +133,21 @@ test('rejects malformed JSON-RPC and oversized messages', () => {
   );
 });
 
-test('canonical tool manifest is internally consistent and capability-filtered', () => {
-  assert.doesNotThrow(() => assertToolManifest());
+test('canonical tool definitions are internally consistent', () => {
+  assert.doesNotThrow(() => assertToolDefinitions());
   assert.ok(TOOL_DEFINITIONS.length >= 20);
   assert.equal(new Set(TOOL_DEFINITIONS.map(tool => tool.name)).size, TOOL_DEFINITIONS.length);
-
-  const manifest = getToolManifest(['artifact.read']);
-  assert.deepEqual(manifest.tools.map(tool => tool.name), ['browser.capture', 'browser.pdf']);
   assert.equal(TOOL_DEFINITIONS.some(tool => tool.name.startsWith('browser.access.')), false);
 });
 
 test('protocol 1.3 adds explicit Profile identity while 1.2 routing remains compatible', () => {
-  const capabilities = ['browser.control', 'observation.read'];
-  const protocol11 = getToolManifest(capabilities, undefined, { major: 1, minor: 1 });
-  const protocol12 = getToolManifest(capabilities, undefined, { major: 1, minor: 2 });
-  const protocol13 = getToolManifest(capabilities, undefined, { major: 1, minor: 3 });
-  const names11 = protocol11.tools.map(tool => tool.name);
-  const names12 = protocol12.tools.map(tool => tool.name);
-  const names13 = protocol13.tools.map(tool => tool.name);
-
-  assert.equal(names11.includes('browser.profiles.list'), false);
-  assert.equal(names11.includes('browser.profiles.select'), false);
-  assert.equal(names11.includes('browser.open'), true);
-  assert.equal(names12.includes('browser.profiles.list'), true);
-  assert.equal(names12.includes('browser.profiles.select'), true);
-  assert.equal(names12.includes('browser.profiles.identify'), false);
-  assert.equal(names13.includes('browser.profiles.identify'), true);
+  assert.equal(isToolAvailableInProtocol('browser.profiles.list', { major: 1, minor: 1 }), false);
+  assert.equal(isToolAvailableInProtocol('browser.profiles.select', { major: 1, minor: 1 }), false);
+  assert.equal(isToolAvailableInProtocol('browser.open', { major: 1, minor: 1 }), true);
+  assert.equal(isToolAvailableInProtocol('browser.profiles.list', { major: 1, minor: 2 }), true);
+  assert.equal(isToolAvailableInProtocol('browser.profiles.select', { major: 1, minor: 2 }), true);
+  assert.equal(isToolAvailableInProtocol('browser.profiles.identify', { major: 1, minor: 2 }), false);
+  assert.equal(isToolAvailableInProtocol('browser.profiles.identify', { major: 1, minor: 3 }), true);
 
   assert.deepEqual(validateToolArguments('browser.profiles.select', {
     profileContextId: 'profile-context:current',
@@ -311,10 +299,10 @@ test('canonical schemas propagate field-level sensitivity without changing value
   );
 });
 
-test('tool manifest rejects invalid or undeclared schema sensitivity', () => {
+test('tool definitions reject invalid or undeclared schema sensitivity', () => {
   const discover = TOOL_DEFINITIONS.find(tool => tool.name === 'browser.discover');
   assert.throws(
-    () => assertToolManifest([{
+    () => assertToolDefinitions([{
       ...discover,
       inputSchema: {
         ...discover.inputSchema,
@@ -326,7 +314,7 @@ test('tool manifest rejects invalid or undeclared schema sensitivity', () => {
 
   const observe = TOOL_DEFINITIONS.find(tool => tool.name === 'browser.observe');
   assert.throws(
-    () => assertToolManifest([{
+    () => assertToolDefinitions([{
       ...observe,
       sensitivity: { ...observe.sensitivity, output: ['browser_data'] },
     }]),
@@ -334,7 +322,7 @@ test('tool manifest rejects invalid or undeclared schema sensitivity', () => {
   );
 });
 
-test('tool arguments are validated from the same schemas returned by the manifest', () => {
+test('tool arguments are validated from canonical schemas', () => {
   assert.deepEqual(
     validateToolArguments('browser.capture', { fullPage: true, includeOriginal: true }),
     { fullPage: true, includeOriginal: true },
@@ -391,7 +379,7 @@ test('tool arguments are validated from the same schemas returned by the manifes
   );
 });
 
-test('new page primitives expose bounded schemas through the canonical manifest', () => {
+test('new page primitives expose bounded canonical schemas', () => {
   const tool = name => TOOL_DEFINITIONS.find(definition => definition.name === name);
   assert.equal(tool('browser.search').outputSchema.properties.matches.maxItems, 200);
   assert.equal(tool('browser.elements.find').outputSchema.properties.elements.maxItems, 200);

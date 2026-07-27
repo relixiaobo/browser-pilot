@@ -35,6 +35,7 @@ import {
 import { ManagedTargetJanitorClient } from './managed-target-janitor-client.js';
 import { publicExecutablePath } from './runtime-layout.js';
 import { BROWSER_PILOT_VERSION as PKG_VERSION } from './version.js';
+import { BROKER_RPC_VERSION } from './client.js';
 
 const CLI_EXECUTABLE_PATH = publicExecutablePath(import.meta.url);
 const PROTOCOL_RANGE = {
@@ -587,7 +588,7 @@ async function main() {
         res.writeHead(200); res.end(JSON.stringify({
           ok: true,
           wsUrl: currentWsUrl,
-          brokerProtocol: 1,
+          brokerProtocol: BROKER_RPC_VERSION,
           brokerProcessIdentity,
           serviceVersion: PKG_VERSION,
           executableVersion: executable.version,
@@ -614,61 +615,20 @@ async function main() {
           }
           const body: unknown = JSON.parse(await readBody(req, DEFAULT_PROTOCOL_LIMITS.maxMessageBytes + 4096));
           if (!isRecord(body)) throw invalidArgument('Broker RPC body must be an object', 'body');
-          if (typeof body.bridgeSessionId !== 'string') {
-            throw invalidArgument('bridgeSessionId is required', 'bridgeSessionId');
+          if (typeof body.clientSessionId !== 'string') {
+            throw invalidArgument('clientSessionId is required', 'clientSessionId');
           }
           if (typeof body.method !== 'string' || body.method.length === 0 || body.method.length > 256) {
             throw invalidArgument('method is required', 'method');
           }
           const result = await broker.call(
-            body.bridgeSessionId,
+            body.clientSessionId,
             body.method,
             body.params as JsonValue | undefined,
           );
           res.writeHead(200); res.end(JSON.stringify({ result })); return;
         } catch (error) {
           res.writeHead(200); res.end(JSON.stringify({ error: asBrowserPilotError(error).toJsonRpcError() })); return;
-        }
-      }
-      if (req.method === 'POST' && url.pathname === '/broker/disconnect') {
-        try {
-          const body: unknown = JSON.parse(await readBody(req, 4096));
-          if (!isRecord(body) || typeof body.bridgeSessionId !== 'string') {
-            throw invalidArgument('bridgeSessionId is required', 'bridgeSessionId');
-          }
-          broker.disconnect(body.bridgeSessionId);
-          res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
-        } catch (error) {
-          res.writeHead(200); res.end(JSON.stringify({ error: asBrowserPilotError(error).toJsonRpcError() })); return;
-        }
-      }
-      if (req.method === 'POST' && url.pathname === '/broker/events/next') {
-        const abort = new AbortController();
-        res.once('close', () => abort.abort());
-        try {
-          const body: unknown = JSON.parse(await readBody(req, 4096));
-          if (
-            !isRecord(body) ||
-            typeof body.bridgeSessionId !== 'string' ||
-            !Number.isSafeInteger(body.waitMs)
-          ) {
-            throw invalidArgument('bridgeSessionId and integer waitMs are required');
-          }
-          const notification = await broker.nextNotification(body.bridgeSessionId, {
-            waitMs: Number(body.waitMs),
-            signal: abort.signal,
-          });
-          if (!res.destroyed) {
-            res.writeHead(200);
-            res.end(JSON.stringify({ notification }));
-          }
-          return;
-        } catch (error) {
-          if (!res.destroyed) {
-            res.writeHead(200);
-            res.end(JSON.stringify({ error: asBrowserPilotError(error).toJsonRpcError() }));
-          }
-          return;
         }
       }
       if (req.method === 'POST' && url.pathname === '/cdp') {
@@ -754,7 +714,7 @@ async function main() {
             });
           }
           const clients = broker.lifecycleSummary();
-          if (clients.embeddedConnections > 0 || clients.activeLeases > 0) {
+          if (clients.activeLeases > 0) {
             throw new BrowserPilotError('broker_in_use', 'Browser Pilot has other live clients and cannot be stopped', {
               retryable: true,
               context: clients,

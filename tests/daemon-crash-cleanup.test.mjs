@@ -128,9 +128,9 @@ test('daemon SIGKILL reclaims managed targets without closing user tabs', async 
     () => daemonRequest(socketPath, '/health'),
     value => value.browser?.state === 'connected',
   );
-  const bridgeSessionId = 'bridge:crash-cleanup';
+  const clientSessionId = 'bridge:crash-cleanup';
   const initialized = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId,
+    clientSessionId,
     method: 'initialize',
     params: {
       client: {
@@ -141,22 +141,21 @@ test('daemon SIGKILL reclaims managed targets without closing user tabs', async 
       },
       protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
       requestedCapabilities: ['browser.control', 'workspace.manage', 'observation.read'],
-      launchMode: 'embedded',
     },
   });
   const created = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId,
+    clientSessionId,
     method: 'workspaces/create',
     params: {},
   });
   const leased = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId,
+    clientSessionId,
     method: 'leases/create',
     params: { workspaceId: created.result.workspace.id },
   });
 
   await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId,
+    clientSessionId,
     method: 'tools/call',
     params: {
       name: 'browser.open',

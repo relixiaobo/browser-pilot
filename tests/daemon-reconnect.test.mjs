@@ -49,9 +49,9 @@ function daemonRequest(socketPath, path, body) {
   });
 }
 
-async function stopDaemon(socketPath, bridgeSessionId) {
-  if (bridgeSessionId) {
-    await daemonRequest(socketPath, '/broker/disconnect', { bridgeSessionId }).catch(() => {});
+async function stopDaemon(socketPath, clientSessionId) {
+  if (clientSessionId) {
+    await daemonRequest(socketPath, '/broker/disconnect', { clientSessionId }).catch(() => {});
   }
   const health = await daemonRequest(socketPath, '/health');
   return daemonRequest(socketPath, '/shutdown', {
@@ -110,7 +110,7 @@ test('daemon rediscovers the selected profile and publishes one restored generat
   assert.equal(initial.browser.connectionGeneration, 1);
 
   const initialize = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:daemon-test',
+    clientSessionId: 'bridge:daemon-test',
     method: 'initialize',
     params: {
       client: {
@@ -121,17 +121,16 @@ test('daemon rediscovers the selected profile and publishes one restored generat
       },
       protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
       requestedCapabilities: ['browser.control', 'workspace.manage', 'event.read'],
-      launchMode: 'embedded',
     },
   });
   assert.equal(initialize.result.browsers[0].state, 'ready');
   const created = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:daemon-test',
+    clientSessionId: 'bridge:daemon-test',
     method: 'workspaces/create',
     params: {},
   });
   const leased = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:daemon-test',
+    clientSessionId: 'bridge:daemon-test',
     method: 'leases/create',
     params: { workspaceId: created.result.workspace.id },
   });
@@ -150,7 +149,7 @@ test('daemon rediscovers the selected profile and publishes one restored generat
     `${second.port}\n/devtools/browser/second\n`,
   );
   const connected = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:daemon-test',
+    clientSessionId: 'bridge:daemon-test',
     method: 'tools/call',
     params: {
       name: 'browser.connect',
@@ -169,7 +168,7 @@ test('daemon rediscovers the selected profile and publishes one restored generat
   assert.equal(restored.wsUrl, `ws://127.0.0.1:${second.port}/devtools/browser/second`);
 
   const replayed = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:daemon-test',
+    clientSessionId: 'bridge:daemon-test',
     method: 'events/poll',
     params: {
       workspaceId: created.result.workspace.id,
@@ -216,7 +215,7 @@ test('daemon initializes with structured remediation before remote debugging is 
   assert.equal(health.browser.state, 'disconnected');
 
   const initialized = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:discovery-test',
+    clientSessionId: 'bridge:discovery-test',
     method: 'initialize',
     params: {
       client: {
@@ -227,7 +226,6 @@ test('daemon initializes with structured remediation before remote debugging is 
       },
       protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
       requestedCapabilities: ['browser.discovery', 'browser.control', 'workspace.manage'],
-      launchMode: 'embedded',
     },
   });
   const selected = initialized.result.browsers.find(browser => browser.profile === profile);
@@ -236,7 +234,7 @@ test('daemon initializes with structured remediation before remote debugging is 
   assert.equal(selected.remediation.code, 'start_browser');
 
   const discovered = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:discovery-test',
+    clientSessionId: 'bridge:discovery-test',
     method: 'tools/call',
     params: { name: 'browser.discover', arguments: {} },
   });
@@ -246,12 +244,12 @@ test('daemon initializes with structured remediation before remote debugging is 
   assert.equal(discoveredSelected.remoteDebuggingState, 'disabled');
 
   const created = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:discovery-test',
+    clientSessionId: 'bridge:discovery-test',
     method: 'workspaces/create',
     params: { browserId: selected.id },
   });
   const leased = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:discovery-test',
+    clientSessionId: 'bridge:discovery-test',
     method: 'leases/create',
     params: { workspaceId: created.result.workspace.id },
   });
@@ -262,7 +260,7 @@ test('daemon initializes with structured remediation before remote debugging is 
     `${cdp.port}\n/devtools/browser/enabled\n`,
   );
   const connected = await daemonRequest(socketPath, '/broker/rpc', {
-    bridgeSessionId: 'bridge:discovery-test',
+    clientSessionId: 'bridge:discovery-test',
     method: 'tools/call',
     params: {
       name: 'browser.connect',

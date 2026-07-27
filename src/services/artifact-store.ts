@@ -180,6 +180,23 @@ export class ArtifactStore {
     return this.withLock(async () => clone(await this.requireRecordUnlocked(workspaceId, artifactId)));
   }
 
+  async list(
+    workspaceId: BrowserWorkspaceId,
+    kinds?: readonly ArtifactDescriptor['kind'][],
+  ): Promise<ArtifactDescriptor[]> {
+    return this.withLock(async () => {
+      await this.sweepUnlocked();
+      const selectedKinds = kinds ? new Set(kinds) : undefined;
+      return [...this.records.values()]
+        .filter(record => (
+          record.descriptor.workspaceId === workspaceId &&
+          (!selectedKinds || selectedKinds.has(record.descriptor.kind))
+        ))
+        .sort((left, right) => right.descriptor.createdAt - left.descriptor.createdAt)
+        .map(record => ({ ...record.descriptor }));
+    });
+  }
+
   async export(
     workspaceId: BrowserWorkspaceId,
     artifactId: ArtifactId,

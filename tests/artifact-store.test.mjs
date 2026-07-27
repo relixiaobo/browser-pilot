@@ -74,6 +74,10 @@ test('Artifact Store copies a completed user download and never removes the sour
   assert.deepEqual(await readFile(record.path), Buffer.from('download contents'));
   assert.deepEqual(await readFile(staging), Buffer.from('download contents'));
 
+  const listed = await store.list(workspaceA, ['download']);
+  assert.deepEqual(listed.map(artifact => artifact.id), [record.descriptor.id]);
+  assert.deepEqual(await store.list(workspaceB, ['download']), []);
+
   await store.release(workspaceA, record.descriptor.id);
   assert.deepEqual(await readFile(staging), Buffer.from('download contents'));
   await store.releaseWorkspace(workspaceA);
@@ -246,7 +250,6 @@ test('Broker Artifact methods require an owning Workspace and active Lease', asy
     client: { id: clientId, name: clientId, version: '1.0.0', instanceId: 'instance:test' },
     protocol: { min: { major: 1, minor: 0 }, max: { major: 1, minor: 0 } },
     requestedCapabilities: ['workspace.manage', 'artifact.read'],
-    launchMode: 'embedded',
   });
   await initialize('bridge:owner', 'com.example.owner');
   const { workspace } = await runtime.call('bridge:owner', 'workspaces/create', {});
@@ -269,6 +272,12 @@ test('Broker Artifact methods require an owning Workspace and active Lease', asy
     artifactId: record.descriptor.id,
   });
   assert.equal(accessed.path, record.path);
+  const listed = await runtime.call('bridge:owner', 'artifacts/list', {
+    workspaceId: workspace.id,
+    leaseId: lease.id,
+    kinds: ['screenshot'],
+  });
+  assert.deepEqual(listed.artifacts.map(artifact => artifact.id), [record.descriptor.id]);
 
   await initialize('bridge:other', 'com.example.other');
   const { workspace: otherWorkspace } = await runtime.call('bridge:other', 'workspaces/create', {});

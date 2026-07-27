@@ -721,7 +721,10 @@ export class BrowserToolService implements BrowserToolExecutor {
           context: { workspaceId: workspace.id },
         });
       }
+      this.markDispatched(context);
       await this.connectBrowser();
+    } else {
+      this.markDispatched(context);
     }
     if (this.binding.instance.state !== 'connected') {
       throw new BrowserPilotError('browser_disconnected', 'Browser connection did not become ready', {
@@ -729,7 +732,6 @@ export class BrowserToolService implements BrowserToolExecutor {
         context: { workspaceId: workspace.id },
       });
     }
-    this.markDispatched(context);
     return asJson({
       workspaceId: workspace.id,
       leaseId: lease.id,

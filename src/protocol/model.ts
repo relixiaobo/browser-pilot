@@ -64,8 +64,6 @@ export interface ClientIdentity {
   instanceId: string;
 }
 
-export type LaunchMode = 'one-shot' | 'embedded';
-
 export interface TransportLimitPreferences {
   maxMessageBytes?: number;
   maxResultBytes?: number;
@@ -75,7 +73,6 @@ export interface InitializeParams {
   client: ClientIdentity;
   protocol: ProtocolRange;
   requestedCapabilities: string[];
-  launchMode: LaunchMode;
   limits?: TransportLimitPreferences;
 }
 
@@ -197,6 +194,12 @@ export interface CommandAccessParams {
   workspaceId?: BrowserWorkspaceId;
 }
 
+export interface CommandListParams {
+  workspaceId: BrowserWorkspaceId;
+  limit?: number;
+  statuses?: CommandStatus[];
+}
+
 export interface EventsPollParams {
   workspaceId: BrowserWorkspaceId;
   cursor: EventCursor;
@@ -207,6 +210,12 @@ export interface ArtifactAccessParams {
   workspaceId: BrowserWorkspaceId;
   leaseId: ControlLeaseId;
   artifactId: ArtifactId;
+}
+
+export interface ArtifactListParams {
+  workspaceId: BrowserWorkspaceId;
+  leaseId: ControlLeaseId;
+  kinds?: ArtifactDescriptor['kind'][];
 }
 
 export interface ArtifactExportParams extends ArtifactAccessParams {
@@ -267,7 +276,6 @@ export interface ClientConnection {
   id: ClientConnectionId;
   principalId: ClientPrincipalId;
   clientInstanceId: string;
-  launchMode: LaunchMode;
   protocol: ProtocolVersion;
   connectedAt: number;
   lastSeenAt: number;

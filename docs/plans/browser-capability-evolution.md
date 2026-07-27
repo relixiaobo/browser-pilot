@@ -299,11 +299,11 @@ Preserve Browser Pilot advantages:
 - [x] **B5.4** Update the universal skill with decision guidance grounded in
   actual tool errors and state, not framework-specific prompts.
   - Covers: FR-1, FR-8.
-  - Complete: the Agent-neutral skill now separates direct one-shot CLI use
-    from embedded stdio integration, starts from current tab/page state, uses
+  - Complete: the Agent-neutral skill now uses the same CLI workflow for
+    Agent-installed and product-bundled use, starts from current tab/page state, uses
     fresh refs, verifies action results, and gives explicit recovery decisions
-    for structured evidence, hints, stable errors, events, reconnects, dialogs,
-    and Artifacts. Command guidance now reflects all-tab inventory, explicit
+    for structured evidence, hints, stable errors, reconnects, dialogs, and
+    local file results. Command guidance now reflects all-tab inventory, explicit
     dialog handling, managed-only bulk cleanup, and actual local capture output.
     It names no Agent framework in its runtime decisions and adds no adapter or
     prompt-specific production behavior.
@@ -383,8 +383,8 @@ Preserve Browser Pilot advantages:
     `stagnant_page`; action parameters, typed values, page text, and hashes are
     not exposed.
 - [x] **B7.6** Keep the additions Agent-neutral and backward compatible.
-  - Complete: one-shot CLI commands and Broker `tools/list` share the canonical
-    implementations. The tools reuse existing capabilities and are additive
+  - Complete: all CLI commands use the Broker's canonical internal
+    implementations and schemas. The commands reuse existing capabilities and are additive
     for protocol 1.0/1.1. Multi-action queues, LLM extraction, planning, and
     memory remain Host-Agent responsibilities.
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "Browser Pilot"
-  short_description: "Control signed-in Chrome tabs and embed browser tools"
+  short_description: "Control signed-in Chrome tabs through the bp CLI"
   default_prompt: "Use $browser-pilot to inspect the relevant Chrome tab and complete the browser task safely."

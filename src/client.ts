@@ -4,11 +4,15 @@ import { readBrokerLocatorSync, processIsAlive } from './broker-locator.js';
 import { BROWSER_PILOT_PATHS } from './paths.js';
 import type { Transport } from './transport.js';
 import { BrowserPilotError, browserPilotErrorFromJsonRpc } from './protocol/errors.js';
-import type { JsonRpcErrorObject, JsonRpcNotification, JsonValue } from './protocol/model.js';
+import type { JsonRpcErrorObject, JsonValue } from './protocol/model.js';
+import {
+  brokerRequestTimeoutError,
+  brokerRequestTimeoutMs,
+  MIN_BROKER_REQUEST_TIMEOUT_MS,
+} from './services/broker-request-timeout.js';
 
 export interface BrokerClientSummary {
-  embeddedConnections: number;
-  oneShotConnections: number;
+  connections: number;
   activeWorkspaces: number;
   activeLeases: number;
 }
@@ -20,6 +24,7 @@ export interface DaemonShutdownExpectation {
 }
 
 const BROKER_SHUTDOWN_TIMEOUT_MS = 15_000;
+export const BROKER_RPC_VERSION = 2;
 
 export function isDaemonRunning(): boolean {
   const locator = readBrokerLocatorSync();
@@ -46,7 +51,12 @@ export class DaemonClient implements Transport {
     this.endpoint = readBrokerLocatorSync()?.endpoint ?? BROWSER_PILOT_PATHS.endpoint;
   }
 
-  private request(path: string, body?: any, signal?: AbortSignal): Promise<any> {
+  private request(
+    path: string,
+    body?: any,
+    signal?: AbortSignal,
+    timeoutMs = MIN_BROKER_REQUEST_TIMEOUT_MS,
+  ): Promise<any> {
     return new Promise((resolve, reject) => {
       const req = http.request(
         {
@@ -54,7 +64,7 @@ export class DaemonClient implements Transport {
           path,
           method: body !== undefined ? 'POST' : 'GET',
           headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-          timeout: 60_000,
+          timeout: timeoutMs,
           signal,
         },
         (res) => {
@@ -77,7 +87,18 @@ export class DaemonClient implements Transport {
       req.on('error', (err) => {
         reject(new Error(`Cannot reach daemon: ${err.message}. Run 'bp connect' first.`));
       });
-      req.on('timeout', () => { req.destroy(); reject(new Error('Daemon request timeout')); });
+      req.on('timeout', () => {
+        req.destroy();
+        reject(
+          path === '/broker/rpc' && body && typeof body.method === 'string'
+            ? brokerRequestTimeoutError(body.method, body.params as JsonValue | undefined)
+            : new BrowserPilotError(
+                'browser_disconnected',
+                'Timed out waiting for the Browser Pilot Broker',
+                { retryable: true },
+              ),
+        );
+      });
       if (body !== undefined) req.write(JSON.stringify(body));
       req.end();
     });
@@ -145,31 +166,15 @@ export class DaemonClient implements Transport {
   }
 
   async brokerCall(
-    bridgeSessionId: string,
+    clientSessionId: string,
     method: string,
     params?: JsonValue,
   ): Promise<JsonValue> {
     return this.request('/broker/rpc', {
-      bridgeSessionId,
+      clientSessionId,
       method,
       ...(params !== undefined ? { params } : {}),
-    });
-  }
-
-  async brokerDisconnect(bridgeSessionId: string): Promise<void> {
-    await this.request('/broker/disconnect', { bridgeSessionId });
-  }
-
-  async brokerNextNotification(
-    bridgeSessionId: string,
-    waitMs: number,
-    signal?: AbortSignal,
-  ): Promise<JsonRpcNotification | undefined> {
-    const result = await this.request('/broker/events/next', {
-      bridgeSessionId,
-      waitMs,
-    }, signal);
-    return result.notification as JsonRpcNotification | undefined;
+    }, undefined, brokerRequestTimeoutMs(method, params));
   }
 
   async discoveredTargets(): Promise<Array<{ targetId: string; url: string; openerTargetId?: string }>> {
