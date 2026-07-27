@@ -1164,9 +1164,6 @@ program.command('close')
           context: { failedTargetIds: failed },
         });
       }
-      if (remainingTabs.length > 0 && !remainingTabs.some(tab => tab.active)) {
-        await client.callTool('browser.tabs.switch', { targetId: remainingTabs[0].targetId });
-      }
       emit(
         { ok: true, closed, remaining: remainingTabs.length },
         `\u2713 Closed ${closed} Pilot tab(s)`,
@@ -1177,8 +1174,8 @@ program.command('close')
       const remainingTabs = await client.listTabs('all');
       if (remainingTabs.length > 0) {
         if (!remainingTabs.some(tab => tab.active)) {
-          const fallback = remainingTabs.find(tab => tab.origin !== 'user_tab') ?? remainingTabs[0];
-          await client.callTool('browser.tabs.switch', { targetId: fallback.targetId });
+          const fallback = remainingTabs.find(tab => tab.origin !== 'user_tab');
+          if (fallback) await client.callTool('browser.tabs.switch', { targetId: fallback.targetId });
         }
         emit({ ok: true, remaining: remainingTabs.length }, '\u2713 Tab closed');
       } else {

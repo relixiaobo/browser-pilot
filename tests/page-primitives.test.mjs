@@ -101,6 +101,36 @@ test('scroll operates on the page, containers, boundaries, and visible text', as
   assert.equal(text.target, 'text');
   assert.equal(text.matchedText, 'Payment details');
   assert.ok(text.afterY > 500);
+
+  await scroll.page({ mode: 'position', position: 'start' });
+  await page.evaluate(() => {
+    document.querySelector('#target').scrollIntoView = () => {};
+  });
+  const fallback = await scroll.text('Payment details');
+  assert.equal(fallback.status, 'verified');
+  assert.equal(fallback.moved, true);
+  assert.ok(fallback.afterY > 500);
+
+  await scroll.page({ mode: 'position', position: 'start' });
+  await page.setContent(`
+    <main id="long" style="white-space:pre-line">${'prefix '.repeat(2000)}\n${'spacer\n'.repeat(200)}Rule   of\nthumb${' suffix'.repeat(2000)}</main>
+  `);
+  await page.evaluate(() => {
+    document.querySelector('#long').scrollIntoView = () => {};
+  });
+  const precise = await scroll.text('Rule of thumb');
+  assert.equal(precise.status, 'verified');
+  assert.equal(precise.moved, true);
+  const matchedViewport = await page.evaluate(() => {
+    const node = document.querySelector('#long').firstChild;
+    const start = node.nodeValue.indexOf('Rule');
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, start + 'Rule   of\nthumb'.length);
+    return { rect: range.getBoundingClientRect().toJSON(), viewportHeight: window.innerHeight };
+  });
+  assert.ok(matchedViewport.rect.bottom > 0);
+  assert.ok(matchedViewport.rect.top < matchedViewport.viewportHeight);
 });
 
 test('dropdown service enumerates native and ARIA options and verifies native selection', async () => {
@@ -172,7 +202,10 @@ test('dropdown service enumerates native and ARIA options and verifies native se
 });
 
 test('screenshot annotations render numbered boxes without mutating the page DOM', async () => {
-  await page.setContent('<button id="save" style="margin:80px;width:120px;height:50px">Save</button>');
+  await page.setContent(`
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; img-src 'none'; style-src 'unsafe-inline'">
+    <button id="save" style="margin:80px;width:120px;height:50px">Save</button>
+  `);
   const beforeHtml = await page.content();
   const capture = await new CaptureService(transport, 'root-session').screenshot();
   const annotated = await new ScreenshotAnnotationService(transport, 'root-session').annotate(

@@ -49,6 +49,7 @@ async function startFakeDaemon(root) {
   const socketPath = join(stateDirectory, 'daemon.sock');
   const calls = [];
   let selectedProfileContextId;
+  let managedClosed = false;
   await mkdir(stateDirectory, { recursive: true });
   await writeFile(join(stateDirectory, 'daemon.pid'), String(process.pid));
 
@@ -124,20 +125,40 @@ async function startFakeDaemon(root) {
           url: args.url,
           observationId: 'observation:after-open',
         });
-      case 'browser.tabs.list':
+      case 'browser.tabs.list': {
+        const managedTarget = {
+          targetId: 'target:managed',
+          profileContextId: 'profile-context:work',
+          title: 'Example Form',
+          url: 'https://example.test/form',
+          active: true,
+          origin: 'managed',
+          managedTabSetId: 'managed-tab-set:cli',
+          controlState: 'controlled',
+        };
+        const userTarget = {
+          targetId: 'target:user',
+          profileContextId: 'profile-context:work',
+          title: 'User Page',
+          url: 'https://example.test/user',
+          active: false,
+          origin: 'user_tab',
+          controlState: 'available',
+        };
         return {
           workspaceId: 'workspace:cli',
           leaseId: 'lease:cli',
-          targets: [{
-            targetId: 'target:managed',
-            profileContextId: 'profile-context:work',
-            title: 'Example Form',
-            url: 'https://example.test/form',
-            active: true,
-            origin: 'managed',
-            managedTabSetId: 'managed-tab-set:cli',
-            controlState: 'controlled',
-          }],
+          targets: args.scope === 'managed_only'
+            ? (managedClosed ? [] : [managedTarget])
+            : (managedClosed ? [userTarget] : [managedTarget]),
+        };
+      }
+      case 'browser.tabs.close':
+        managedClosed = true;
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          closedTargetId: 'target:managed',
         };
       case 'browser.observe': return observation();
       case 'browser.observation.latest':
@@ -333,7 +354,11 @@ async function startFakeDaemon(root) {
     server.once('error', rejectListen);
     server.listen(socketPath, resolveListen);
   });
-  return { server, calls };
+  return {
+    server,
+    calls,
+    resetTabs() { managedClosed = false; },
+  };
 }
 
 async function runCli(home, args) {
@@ -346,7 +371,7 @@ async function runCli(home, args) {
 
 test('one-shot CLI uses only canonical Broker and Artifact operations', async t => {
   const root = await mkdtemp('/tmp/bp-cli-');
-  const { server, calls } = await startFakeDaemon(root);
+  const { server, calls, resetTabs } = await startFakeDaemon(root);
   t.after(async () => {
     await new Promise(resolveClose => server.close(resolveClose));
     await rm(root, { recursive: true, force: true });
@@ -473,6 +498,27 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
     call.body?.method === 'workspaces/create' &&
     call.body.params.clientKey === 'browser-pilot-cli'
   )));
+
+  const switchCount = calls.filter(call => call.body?.params?.name === 'browser.tabs.switch').length;
+  const closed = await runCli(root, ['close', '--all']);
+  assert.equal(closed.closed, 1);
+  assert.equal(closed.remaining, 1);
+  assert.equal(
+    calls.filter(call => call.body?.params?.name === 'browser.tabs.switch').length,
+    switchCount,
+    'managed-only cleanup must not switch control to a user tab',
+  );
+  resetTabs();
+  const closedCurrent = await runCli(root, ['close']);
+  assert.equal(closedCurrent.remaining, 1);
+  assert.equal(
+    calls.filter(call => call.body?.params?.name === 'browser.tabs.switch').length,
+    switchCount,
+    'closing the current managed tab must not switch control to a user tab',
+  );
+  const remaining = await runCli(root, ['tabs']);
+  assert.equal(remaining.tabs[0].origin, 'user_tab');
+  assert.equal(remaining.tabs[0].controlState, 'available');
   assert.ok(calls.some(call => (
     call.body?.method === 'leases/create' &&
     call.body.params.clientKey === 'browser-pilot-cli' &&

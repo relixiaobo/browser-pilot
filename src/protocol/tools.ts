@@ -195,7 +195,7 @@ const scrollEvidenceSchema = objectSchema({
   afterX: numberSchema({ minimum: 0 }),
   afterY: numberSchema({ minimum: 0 }),
   matchedText: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
-  reason: stringSchema({ enum: ['at_boundary', 'text_not_found'] }),
+  reason: stringSchema({ enum: ['at_boundary', 'text_not_found', 'text_not_revealed'] }),
 }, [
   'action', 'status', 'mode', 'target', 'moved', 'deltaX', 'deltaY',
   'beforeX', 'beforeY', 'afterX', 'afterY',

@@ -23,11 +23,13 @@ function annotationScript(
   viewport: ScreenshotViewport,
 ): string {
   return `(async() => {
-    const source=${JSON.stringify(`data:image/png;base64,${data}`)};
+    const base64=${JSON.stringify(data)};
     const annotations=${JSON.stringify(annotations)};
     const viewport=${JSON.stringify(viewport)};
-    const response=await fetch(source);
-    const bitmap=await createImageBitmap(await response.blob());
+    const binary=atob(base64);
+    const bytes=new Uint8Array(binary.length);
+    for(let index=0;index<binary.length;index+=1)bytes[index]=binary.charCodeAt(index);
+    const bitmap=await createImageBitmap(new Blob([bytes],{type:'image/png'}));
     const canvas=document.createElement('canvas');
     canvas.width=bitmap.width;canvas.height=bitmap.height;
     const context=canvas.getContext('2d');

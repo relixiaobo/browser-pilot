@@ -19,7 +19,7 @@ export interface ScrollEvidence {
   afterX: number;
   afterY: number;
   matchedText?: string;
-  reason?: 'at_boundary' | 'text_not_found';
+  reason?: 'at_boundary' | 'text_not_found' | 'text_not_revealed';
 }
 
 export interface RelativeScrollInput {
@@ -143,6 +143,10 @@ export class ScrollService {
       const exact=${exact};
       const normalize=value=>String(value||'').replace(/\\s+/g,' ').trim();
       const needle=normalize(query).toLocaleLowerCase();
+      const slash=String.fromCharCode(92);
+      const regexSpecials='^$.*+?()[]{}|'+slash;
+      const escapeRegex=value=>Array.from(value,char=>regexSpecials.includes(char)?slash+char:char).join('');
+      const queryPattern=exact?null:new RegExp(normalize(query).split(' ').map(escapeRegex).join(slash+'s+'),'iu');
       const roots=[document];
       let visited=0;
       while(roots.length&&visited<20000){
@@ -160,21 +164,50 @@ export class ScrollService {
           if(!element)continue;
           const tag=String(element.tagName||'').toLowerCase();
           if(['script','style','noscript','template'].includes(tag))continue;
-          const content=normalize(node.nodeValue);
+          const raw=String(node.nodeValue||'');
+          const content=normalize(raw);
           const normalized=content.toLocaleLowerCase();
           if(!(exact?normalized===needle:normalized.includes(needle)))continue;
+          let matchStart=0;
+          let matchEnd=raw.length;
+          if(exact){
+            matchStart=Math.max(0,raw.search(/\\S/u));
+            matchEnd=Math.max(matchStart,raw.length-((raw.match(/\\s*$/u)||[''])[0].length));
+          }else{
+            const match=queryPattern.exec(raw);
+            if(!match)continue;
+            matchStart=match.index;
+            matchEnd=match.index+match[0].length;
+          }
           const style=getComputedStyle(element);
           if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||element.getClientRects().length===0)continue;
+          const viewportWidth=Math.max(0,window.innerWidth||document.documentElement.clientWidth||0);
+          const viewportHeight=Math.max(0,window.innerHeight||document.documentElement.clientHeight||0);
+          const range=document.createRange();
+          range.setStart(node,matchStart);
+          range.setEnd(node,matchEnd);
+          const rangeRect=()=>range.getBoundingClientRect();
+          const intersectsViewport=rect=>rect.width>0&&rect.height>0&&rect.bottom>0&&rect.right>0&&rect.top<viewportHeight&&rect.left<viewportWidth;
           const beforeX=Math.max(0,window.scrollX||document.documentElement.scrollLeft||0);
           const beforeY=Math.max(0,window.scrollY||document.documentElement.scrollTop||0);
           element.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
-          const afterX=Math.max(0,window.scrollX||document.documentElement.scrollLeft||0);
-          const afterY=Math.max(0,window.scrollY||document.documentElement.scrollTop||0);
+          let afterX=Math.max(0,window.scrollX||document.documentElement.scrollLeft||0);
+          let afterY=Math.max(0,window.scrollY||document.documentElement.scrollTop||0);
+          let rect=rangeRect();
+          if(!intersectsViewport(rect)){
+            const left=Math.max(0,afterX+rect.left-Math.max(0,(viewportWidth-rect.width)/2));
+            const top=Math.max(0,afterY+rect.top-Math.max(0,(viewportHeight-rect.height)/2));
+            window.scrollTo({left,top,behavior:'instant'});
+            afterX=Math.max(0,window.scrollX||document.documentElement.scrollLeft||0);
+            afterY=Math.max(0,window.scrollY||document.documentElement.scrollTop||0);
+            rect=rangeRect();
+          }
           const round=value=>Math.round(Number(value)||0);
           const moved=Math.abs(afterX-beforeX)>=1||Math.abs(afterY-beforeY)>=1;
-          return{ok:true,action:'scroll',status:'verified',mode:'text',target:'text',moved,
+          const revealed=intersectsViewport(rect);
+          return{ok:true,action:'scroll',status:revealed?'verified':'mismatch',mode:'text',target:'text',moved,
             deltaX:round(afterX-beforeX),deltaY:round(afterY-beforeY),beforeX:round(beforeX),beforeY:round(beforeY),
-            afterX:round(afterX),afterY:round(afterY),matchedText:content.slice(0,4096)};
+            afterX:round(afterX),afterY:round(afterY),matchedText:content.slice(0,4096),...(revealed?{}:{reason:'text_not_revealed'})};
         }
       }
       return{ok:true,action:'scroll',status:'mismatch',mode:'text',target:'text',moved:false,
