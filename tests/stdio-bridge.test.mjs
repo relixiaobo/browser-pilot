@@ -13,7 +13,7 @@ function createRuntime() {
       instance: {
         id: 'browser-instance:test',
         product: 'Chrome',
-        profilePath: '/test',
+        userDataRoot: '/test',
         processIdentity: 'process:test',
         connectionGeneration: 1,
         state: 'connected',

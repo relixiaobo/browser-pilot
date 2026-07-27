@@ -29,6 +29,7 @@ export * from './controlled-target-registry.js';
 export * from './target-inventory-service.js';
 export * from './browser-target-catalog.js';
 export * from './profile-context-registry.js';
+export * from './chrome-profile-identity.js';
 export * from './browser-watchdog-service.js';
 export * from './managed-target-lifecycle.js';
 export * from './browser-tool-service.js';

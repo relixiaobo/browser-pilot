@@ -1,8 +1,8 @@
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { BROWSER_PILOT_VERSION as PKG_VERSION } from './version.js';
-import { BrowserPilotError } from './protocol/errors.js';
+import { BrowserPilotError, invalidArgument } from './protocol/errors.js';
 import type {
   ArtifactDescriptor,
   ControlledTargetId,
@@ -22,11 +22,13 @@ import {
 } from './compatibility-broker-client.js';
 
 const program = new Command();
+program.exitOverride();
 program
   .name('bp')
   .description('Control your browser from the command line')
   .version(PKG_VERSION)
   .option('--human', 'force human-readable output (default when TTY)')
+  .option('--client-key <key>', 'stable namespace for one-shot Agent state')
   .addHelpText('after', `
 Workflow:
   bp connect                          # one-time setup (click Allow in Chrome)
@@ -57,7 +59,7 @@ Output:
   JSON by default when piped (for LLM/script use).
   Human-readable when run in a terminal (TTY). Force with --human.
   Actions return: {"ok":true, "title":"...", "url":"...", "elements":[...]}
-  Errors return:  {"ok":false, "error":"...", "hint":"..."}
+  Errors return:  {"ok":false, "error":"...", "code":"...", "retryable":false}
 
 Canvas editors (Google Docs, Sheets, Figma):
   bp keyboard "text" --click ".editor"               # click to focus, then type
@@ -86,9 +88,15 @@ Eval (escape hatch for operations without a dedicated command):
 // ── Output ──────────────────────────────────────────
 
 function useJson(): boolean {
-  if (program.opts().human) return false;
+  if (process.argv.slice(2).includes('--human') || program.opts().human) return false;
   return !process.stdout.isTTY;  // JSON by default for pipes/LLMs, human for TTY
 }
+
+program.configureOutput({
+  writeErr: value => {
+    if (!useJson()) process.stderr.write(value);
+  },
+});
 
 function emit(data: Record<string, any>, human?: string): void {
   if (useJson()) console.log(JSON.stringify(data));
@@ -96,11 +104,15 @@ function emit(data: Record<string, any>, human?: string): void {
 }
 
 function fail(error: string, hint?: string, details?: BrowserPilotError): never {
+  const stable = details ?? new BrowserPilotError('internal_error', error);
   if (useJson()) console.log(JSON.stringify({
     ok: false,
     error,
+    code: stable.code,
+    retryable: stable.retryable,
     ...(hint ? { hint } : {}),
-    ...(details ? details.toData() : {}),
+    ...(stable.context ? { context: stable.context } : {}),
+    ...(stable.remediation ? { remediation: stable.remediation } : {}),
   }));
   else console.error(`\u2717 ${error}${hint ? `\n  hint: ${hint}` : ''}`);
   process.exit(1);
@@ -174,14 +186,19 @@ function emitObservation(result: Record<string, JsonValue>): void {
 function action(fn: (...args: any[]) => Promise<void>) {
   return (...args: any[]) => fn(...args).catch((err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
-    // Add hints for common errors
-    if (err instanceof BrowserPilotError && err.code === 'stale_ref') {
-      fail(msg, "Run 'bp snapshot' to refresh element refs.", err);
+    const stable = err instanceof BrowserPilotError
+      ? err
+      : new BrowserPilotError('internal_error', msg, { cause: err });
+    if (stable.code === 'stale_ref') {
+      fail(msg, "Run 'bp snapshot' to refresh element refs.", stable);
     }
-    if (msg.includes('not found') && msg.includes('Ref')) fail(msg, "Run 'bp snapshot' to refresh element refs.", err instanceof BrowserPilotError ? err : undefined);
-    if (msg.includes('Not connected')) fail(msg, "Run 'bp connect' first.", err instanceof BrowserPilotError ? err : undefined);
-    if (msg.includes('Page load timeout')) fail(msg, "Page may still be loading. Retry the command after a moment.", err instanceof BrowserPilotError ? err : undefined);
-    fail(msg, undefined, err instanceof BrowserPilotError ? err : undefined);
+    if (stable.code === 'browser_disconnected') {
+      fail(msg, "Run 'bp connect' first.", stable);
+    }
+    if (stable.code === 'unknown_outcome') {
+      fail(msg, 'Inspect the current tab state before deciding whether to retry.', stable);
+    }
+    fail(msg, undefined, stable);
   });
 }
 
@@ -191,17 +208,44 @@ function normalizeUrl(url: string): string {
 }
 
 function parseLimit(raw: string): number {
-  const n = parseInt(raw, 10);
-  if (isNaN(n) || n < 1) throw new Error('--limit must be a positive number');
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < 1) {
+    throw invalidArgument('--limit must be a positive integer', 'limit');
+  }
   return n;
 }
 
 function parseRef(raw: string): number {
   const ref = Number(raw);
-  if (!Number.isSafeInteger(ref) || ref < 1) {
-    throw new Error('Ref must be a positive integer');
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(ref) || ref < 1) {
+    throw invalidArgument('Ref must be a positive integer', 'ref');
   }
   return ref;
+}
+
+function parseCoordinates(raw: string): { x: number; y: number } {
+  const parts = raw.split(',');
+  if (parts.length !== 2 || parts.some(part => part.trim() === '')) {
+    throw invalidArgument('--xy must be x,y (e.g. --xy 400,300)', 'xy');
+  }
+  const [x, y] = parts.map(part => Number(part.trim()));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw invalidArgument('--xy must be x,y (e.g. --xy 400,300)', 'xy');
+  }
+  return { x, y };
+}
+
+function cliClientKey(): string {
+  const value = program.opts().clientKey ?? process.env.BROWSER_PILOT_CLIENT_KEY;
+  if (value === undefined) return 'browser-pilot-cli';
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(value)) {
+    throw new BrowserPilotError(
+      'invalid_argument',
+      'Client key must be 3-128 characters using letters, digits, dot, underscore, colon, or hyphen',
+      { context: { field: 'clientKey' } },
+    );
+  }
+  return value;
 }
 
 function requireString(value: JsonValue | undefined, label: string): string {
@@ -227,13 +271,22 @@ async function cliElementAddress(
       ref: parseRef(raw),
     };
   }
-  if (!raw.trim()) throw new Error('Element target must not be empty');
+  if (!raw.trim()) throw invalidArgument('Element target must not be empty', 'target');
   return { selector: raw };
 }
 
 async function requireCompatibility(): Promise<CompatibilityBrokerClient> {
-  const client = await resumeCompatibility(PKG_VERSION);
-  if (!client) throw new Error('Not connected');
+  const client = await resumeCompatibility(PKG_VERSION, cliClientKey());
+  if (!client) {
+    throw new BrowserPilotError('browser_disconnected', 'Browser Pilot is not connected', {
+      retryable: true,
+      remediation: {
+        code: 'connect_browser',
+        message: "Run 'bp connect', complete Chrome authorization if prompted, then retry.",
+        actionRequired: true,
+      },
+    });
+  }
   return client;
 }
 
@@ -246,13 +299,16 @@ async function resolveCliProfile(
   if (exactId) return exactId;
   if (/^\d+$/.test(selector)) {
     const index = Number(selector);
-    if (Number.isSafeInteger(index) && profiles[index]) return profiles[index];
-    throw invalidCliProfile(`Profile index out of range (0-${Math.max(0, profiles.length - 1)})`, selector);
+    if (Number.isSafeInteger(index) && index >= 1 && profiles[index - 1]) return profiles[index - 1];
+    throw invalidCliProfile(`Profile index out of range (1-${profiles.length})`, selector);
   }
   const normalized = selector.trim().toLocaleLowerCase();
   const matches = profiles.filter(profile => (
     profile.label.toLocaleLowerCase() === normalized ||
-    profile.displayName?.toLocaleLowerCase() === normalized
+    profile.displayName?.toLocaleLowerCase() === normalized ||
+    profile.profileName?.toLocaleLowerCase() === normalized ||
+    profile.accountName?.toLocaleLowerCase() === normalized ||
+    profile.accountEmail?.toLocaleLowerCase() === normalized
   ));
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
@@ -269,10 +325,16 @@ function invalidCliProfile(message: string, selector: string): BrowserPilotError
 
 function cliProfile(profile: CompatibilityProfile, index: number): Record<string, JsonValue> {
   return {
-    index,
+    index: index + 1,
     profileContextId: profile.profileContextId,
     label: profile.label,
     ...(profile.displayName ? { displayName: profile.displayName } : {}),
+    ...(profile.identityStatus ? { identityStatus: profile.identityStatus } : {}),
+    ...(profile.profileName ? { profileName: profile.profileName } : {}),
+    ...(profile.accountName ? { accountName: profile.accountName } : {}),
+    ...(profile.accountEmail ? { accountEmail: profile.accountEmail } : {}),
+    ...(profile.profileDirectory ? { profileDirectory: profile.profileDirectory } : {}),
+    ...(profile.identityErrorCode ? { identityErrorCode: profile.identityErrorCode } : {}),
     tabCount: profile.tabCount,
     eligibleTabCount: profile.eligibleTabCount,
     selected: profile.selected,
@@ -283,7 +345,7 @@ function cliProfile(profile: CompatibilityProfile, index: number): Record<string
 function withCliTarget<T>(
   operation: (client: CompatibilityBrokerClient, target: CompatibilityTarget) => Promise<T>,
 ): Promise<T> {
-  return withCompatibilityTarget(PKG_VERSION, operation);
+  return withCompatibilityTarget(PKG_VERSION, operation, cliClientKey());
 }
 
 function readStdin(): Promise<string> {
@@ -306,7 +368,7 @@ program.command('browsers')
   .option('-b, --browser <name>', 'filter by browser ID, product, or channel')
   .action(action(async (opts) => {
     const filter = typeof opts.browser === 'string' ? opts.browser.toLowerCase() : undefined;
-    const client = await resumeCompatibility(PKG_VERSION);
+    const client = await resumeCompatibility(PKG_VERSION, cliClientKey());
     const browsers = client
       ? await client.listBrowsers(filter)
       : (await discoverBrowserCandidates())
@@ -342,7 +404,7 @@ program.command('connect')
       console.log('Connecting to Chrome...');
       console.log('If prompted, click "Allow" in Chrome\'s authorization dialog.\n');
     }
-    const client = await connectCompatibility(PKG_VERSION, opts.browser);
+    const client = await connectCompatibility(PKG_VERSION, opts.browser, cliClientKey());
     await client.connectBrowser();
     const profiles = await client.listProfiles();
     if (profiles.length <= 1) await client.ensureManagedTarget();
@@ -351,7 +413,7 @@ program.command('connect')
       const listed = profiles.map(cliProfile);
       emit(
         { ok: true, browser, profileSelectionRequired: true, profiles: listed },
-        `\u2713 Connected to ${browser}\nMultiple Chrome Profiles are open. Run 'bp profiles', then 'bp profile <index>'.`,
+        `\u2713 Connected to ${browser}\nMultiple Chrome Profiles are open. Run 'bp profiles --identify', then 'bp profile <index>'.`,
       );
       return;
     }
@@ -391,7 +453,7 @@ program.command('bridge')
 program.command('disconnect')
   .description('Release CLI browser state and stop an otherwise unused daemon')
   .action(action(async () => {
-    await shutdownCompatibility(PKG_VERSION);
+    await shutdownCompatibility(PKG_VERSION, cliClientKey());
     emit({ ok: true }, '\u2713 Disconnected');
   }));
 
@@ -399,8 +461,14 @@ program.command('disconnect')
 
 program.command('profiles')
   .description('List live Chrome Profile contexts')
-  .action(action(async () => {
-    const profiles = (await (await requireCompatibility()).listProfiles()).map(cliProfile);
+  .option('--identify', 'explicitly identify Profiles using temporary visible Chrome pages')
+  .option('--refresh', 'repeat Profile identification instead of using cached results')
+  .action(action(async (opts) => {
+    const client = await requireCompatibility();
+    const identified = opts.identify || opts.refresh
+      ? await client.identifyProfiles(undefined, opts.refresh === true)
+      : await client.listProfiles();
+    const profiles = identified.map(cliProfile);
     if (useJson()) {
       console.log(JSON.stringify({ ok: true, profiles }));
       return;
@@ -410,8 +478,12 @@ program.command('profiles')
       return;
     }
     for (const profile of profiles) {
-      const name = profile.displayName ? ` (${profile.displayName})` : '';
-      console.log(`${profile.selected ? '*' : ' '} ${profile.index}  ${profile.label}${name}  ${profile.tabCount} tab(s)`);
+      const name = profile.profileName ?? profile.displayName;
+      const account = profile.accountEmail ?? profile.accountName;
+      const identity = name
+        ? `  ${name}${account ? ` (${account})` : ''}  [${profile.label}]`
+        : `  ${profile.label}${profile.identityStatus === 'unavailable' ? ' (identity unavailable)' : ''}`;
+      console.log(`${profile.selected ? '*' : ' '} ${profile.index}${identity}  ${profile.tabCount} tab(s)`);
     }
   }));
 
@@ -427,21 +499,27 @@ program.command('profile <selector>')
         profileContextId: selected.profileContextId,
         label: selected.label,
         ...(selected.displayName ? { displayName: selected.displayName } : {}),
+        ...(selected.identityStatus ? { identityStatus: selected.identityStatus } : {}),
+        ...(selected.profileName ? { profileName: selected.profileName } : {}),
+        ...(selected.accountName ? { accountName: selected.accountName } : {}),
+        ...(selected.accountEmail ? { accountEmail: selected.accountEmail } : {}),
+        ...(selected.profileDirectory ? { profileDirectory: selected.profileDirectory } : {}),
+        ...(selected.identityErrorCode ? { identityErrorCode: selected.identityErrorCode } : {}),
       },
-      `\u2713 Selected ${selected.displayName ?? selected.label}`,
+      `\u2713 Selected ${selected.profileName ?? selected.displayName ?? selected.label}`,
     );
   }));
 
 program.command('open <url>')
   .description('Navigate to URL and return page snapshot')
   .option('-n, --new', 'open in new tab')
-  .option('--profile <selector>', 'Profile index, ID, label, or verified display name (requires --new)')
+  .option('--profile <selector>', 'Profile index, ID, label, verified name, or email (requires --new)')
   .option('-l, --limit <n>', 'max elements in snapshot', '50')
   .addHelpText('after', '\nExamples:\n  bp open https://github.com\n  bp open github.com --new\n  bp open https://example.com --new --profile 1\n  bp open https://example.com --limit 20')
   .action(action(async (url, opts) => {
     url = normalizeUrl(url);
     const limit = parseLimit(opts.limit);
-    if (opts.profile && !opts.new) throw new Error('--profile requires --new');
+    if (opts.profile && !opts.new) throw invalidArgument('--profile requires --new', 'profile');
     if (opts.new) {
       const client = await requireCompatibility();
       const profile = opts.profile
@@ -494,20 +572,22 @@ Examples:
   bp click --xy 400,300 --right    # right-click (context menu)
   bp click 3 --right          # right-click element [3]`)
   .action(action(async (ref, opts) => {
-    if (opts.double && opts.right) throw new Error('--double and --right are mutually exclusive');
-    if (!ref && !opts.xy) throw new Error('Provide a ref number or --xy coordinates');
+    if (opts.double && opts.right) {
+      throw invalidArgument('--double and --right are mutually exclusive', 'button');
+    }
+    if (!ref && !opts.xy) throw invalidArgument('Provide a ref number or --xy coordinates', 'target');
+    if (ref && opts.xy) throw invalidArgument('Provide either a ref number or --xy, not both', 'target');
     const limit = parseLimit(opts.limit);
+    const coordinates = opts.xy ? parseCoordinates(opts.xy) : undefined;
+    const parsedRef = ref ? parseRef(ref) : undefined;
     await withCliTarget(async (client, controlledTarget) => {
       let target: Record<string, JsonValue>;
-      if (opts.xy) {
-        const [xStr, yStr] = opts.xy.split(',');
-        const x = parseFloat(xStr), y = parseFloat(yStr);
-        if (isNaN(x) || isNaN(y)) throw new Error('--xy must be x,y (e.g. --xy 400,300)');
-        target = { x, y };
+      if (coordinates) {
+        target = coordinates;
       } else {
         target = {
           observationId: await client.latestObservation(controlledTarget.targetId),
-          ref: parseRef(ref),
+          ref: parsedRef!,
         };
       }
       const result = await client.callTool('browser.click', {
@@ -561,10 +641,11 @@ program.command('type <ref> <text>')
   .addHelpText('after', '\nExamples:\n  bp type 2 "hello world"\n  bp type 5 "query" --submit\n  bp type 3 "new value" --clear')
   .action(action(async (ref, text, opts) => {
     const limit = parseLimit(opts.limit);
+    const parsedRef = parseRef(ref);
     await withCliTarget(async (client, target) => {
       const result = await client.callTool('browser.type', {
         observationId: await client.latestObservation(target.targetId),
-        ref: parseRef(ref),
+        ref: parsedRef,
         text,
         ...(opts.clear ? { clear: true } : {}),
         ...(opts.submit ? { submit: true } : {}),
@@ -600,8 +681,10 @@ Examples:
     const limit = parseLimit(opts.limit);
     let delay = 0;
     if (opts.delay) {
-      delay = parseInt(opts.delay, 10);
-      if (isNaN(delay) || delay < 0) throw new Error('--delay must be a non-negative number');
+      delay = Number(opts.delay);
+      if (!/^\d+$/.test(opts.delay) || !Number.isSafeInteger(delay) || delay < 0) {
+        throw invalidArgument('--delay must be a non-negative integer', 'delay');
+      }
     }
     await withCliTarget(async (client, target) => {
       const result = await client.callTool('browser.keyboard', {
@@ -653,7 +736,9 @@ program.command('eval [expression]')
   .action(action(async (expression) => {
     if (!expression) {
       expression = await readStdin();
-      if (!expression) throw new Error('No expression. Pass as argument or pipe via stdin.');
+      if (!expression) {
+        throw invalidArgument('No expression. Pass as argument or pipe via stdin.', 'expression');
+      }
     }
     await withCliTarget(async (client, target) => {
       const result = await client.callTool('browser.eval', {
@@ -692,8 +777,10 @@ When to use which command:
   bp read       → page text content (search results, articles)
   bp eval       → custom extraction (structured data, attributes)`)
   .action(action(async (selector, opts) => {
-    const limit = parseInt(opts.limit, 10);
-    if (isNaN(limit) || limit < 1) throw new Error('--limit must be a positive integer');
+    const limit = Number(opts.limit);
+    if (!/^\d+$/.test(opts.limit) || !Number.isSafeInteger(limit) || limit < 1) {
+      throw invalidArgument('--limit must be a positive integer', 'limit');
+    }
     await withCliTarget(async (client, target) => {
       let data: Record<string, JsonValue>;
       try {
@@ -802,15 +889,25 @@ Examples:
   bp scroll --ref 8 --to end
   bp scroll --to-text "Payment details"`)
   .action(action(async (direction, opts) => {
-    if (opts.selector && opts.ref) throw new Error('--selector and --ref are mutually exclusive');
+    if (opts.selector && opts.ref) {
+      throw invalidArgument('--selector and --ref are mutually exclusive', 'target');
+    }
     const modes = [direction !== undefined, opts.to !== undefined, opts.toText !== undefined].filter(Boolean).length;
-    if (modes > 1) throw new Error('Use only one of direction, --to, or --to-text');
+    if (modes > 1) throw invalidArgument('Use only one of direction, --to, or --to-text', 'mode');
     const validDirections = new Set(['up', 'down', 'left', 'right']);
-    if (direction !== undefined && !validDirections.has(direction)) throw new Error('direction must be up, down, left, or right');
-    if (opts.to !== undefined && !['start', 'end'].includes(opts.to)) throw new Error('--to must be start or end');
-    if (!['pixels', 'viewport'].includes(opts.unit)) throw new Error('--unit must be pixels or viewport');
+    if (direction !== undefined && !validDirections.has(direction)) {
+      throw invalidArgument('direction must be up, down, left, or right', 'direction');
+    }
+    if (opts.to !== undefined && !['start', 'end'].includes(opts.to)) {
+      throw invalidArgument('--to must be start or end', 'to');
+    }
+    if (!['pixels', 'viewport'].includes(opts.unit)) {
+      throw invalidArgument('--unit must be pixels or viewport', 'unit');
+    }
     const amount = opts.amount === undefined ? undefined : Number(opts.amount);
-    if (amount !== undefined && (!Number.isFinite(amount) || amount <= 0)) throw new Error('--amount must be a positive number');
+    if (amount !== undefined && (!Number.isFinite(amount) || amount <= 0)) {
+      throw invalidArgument('--amount must be a positive number', 'amount');
+    }
     const limit = parseLimit(opts.limit);
     await withCliTarget(async (client, target) => {
       const rawTarget = opts.selector ?? opts.ref;
@@ -860,7 +957,9 @@ program.command('select <target> <option>')
   .option('-l, --limit <n>', 'max elements in returned snapshot', '50')
   .addHelpText('after', '\nExamples:\n  bp select 4 "United States"\n  bp select 4 us --by value\n  bp select 4 3 --by index')
   .action(action(async (rawTarget, rawOption, opts) => {
-    if (!['label', 'value', 'index'].includes(opts.by)) throw new Error('--by must be label, value, or index');
+    if (!['label', 'value', 'index'].includes(opts.by)) {
+      throw invalidArgument('--by must be label, value, or index', 'by');
+    }
     const choice: Record<string, JsonValue> = opts.by === 'index'
       ? { by: 'index', index: parseRef(rawOption) }
       : { by: opts.by, [opts.by]: rawOption, exact: opts.contains !== true };
@@ -883,9 +982,11 @@ program.command('upload <filepath>')
   .addHelpText('after', '\nAuto-detects file inputs on the page. No ref needed.\n\nExamples:\n  bp upload ./photo.jpg\n  bp upload /tmp/resume.pdf\n  bp upload ./doc.pdf --nth 2    # if multiple file inputs')
   .action(action(async (filepath, opts) => {
     const absPath = resolvePath(filepath);
-    if (!existsSync(absPath)) throw new Error(`File not found: ${absPath}`);
-    const inputIndex = parseInt(opts.nth, 10);
-    if (isNaN(inputIndex) || inputIndex < 1) throw new Error('--nth must be a positive integer');
+    if (!existsSync(absPath)) throw invalidArgument(`File not found: ${absPath}`, 'filepath');
+    const inputIndex = Number(opts.nth);
+    if (!/^\d+$/.test(opts.nth) || !Number.isSafeInteger(inputIndex) || inputIndex < 1) {
+      throw invalidArgument('--nth must be a positive integer', 'nth');
+    }
     await withCliTarget(async (client, target) => {
       const artifact = await client.importArtifact(absPath);
       try {
@@ -911,7 +1012,7 @@ program.command('screenshot [filename]')
   .addHelpText('after', '\nExamples:\n  bp screenshot\n  bp screenshot page.png\n  bp screenshot --full\n  bp screenshot --selector ".chart"\n  bp screenshot page.png --annotate\n  bp screenshot page.png --annotate 1,3,8')
   .action(action(async (filename, opts) => {
     if (opts.annotate !== undefined && (opts.full || opts.selector)) {
-      throw new Error('--annotate cannot be combined with --full or --selector');
+      throw invalidArgument('--annotate cannot be combined with --full or --selector', 'annotate');
     }
     await withCliTarget(async (client, target) => {
       let annotations: Record<string, JsonValue> | undefined;
@@ -1019,9 +1120,12 @@ program.command('frame [target]')
           }
         }
       } else {
-        const idx = parseInt(target, 10);
+        const idx = Number(target);
         if (!Number.isSafeInteger(idx) || idx < 0 || idx >= frames.length) {
-          throw new Error(`Frame index out of range (0-${Math.max(0, frames.length - 1)})`);
+          throw invalidArgument(
+            `Frame index out of range (0-${Math.max(0, frames.length - 1)})`,
+            'target',
+          );
         }
         const frame = frames[idx];
         await client.callTool('browser.frames.switch', idx === 0
@@ -1048,7 +1152,7 @@ program.command('auth [username] [password]')
       emit({ ok: true }, '\u2713 Auth credentials cleared');
       return;
     }
-    if (!password) throw new Error('Usage: bp auth <username> <password>');
+    if (!password) throw invalidArgument('Usage: bp auth <username> <password>', 'password');
     await client.callTool('browser.auth.set', { username, password });
     emit({ ok: true }, '\u2713 Auth credentials set (scoped to HTTP 401 challenges)');
   }));
@@ -1080,7 +1184,7 @@ program.command('dialog <dialogId>')
   .option('--prompt <text>', 'text to submit to a prompt dialog')
   .action(action(async (dialogId, opts) => {
     if (Boolean(opts.accept) === Boolean(opts.dismiss)) {
-      throw new Error('Choose exactly one of --accept or --dismiss');
+      throw invalidArgument('Choose exactly one of --accept or --dismiss', 'action');
     }
     const client = await requireCompatibility();
     const listed = await client.callTool('browser.dialogs.list');
@@ -1108,9 +1212,10 @@ program.command('tabs')
   .description('List all controllable browser tabs')
   .action(action(async () => {
     const targets = await (await requireCompatibility()).listTabs('all');
-    const tabs = targets.map(({ targetId: _targetId, managedTabSetId: _managedTabSetId, controlState, ...tab }, index) => ({
-      index,
+    const tabs = targets.map(({ targetId: _targetId, managedTabSetId: _managedTabSetId, controlState, active, selected, ...tab }, index) => ({
+      index: index + 1,
       ...tab,
+      selected: selected ?? active === true,
       controlState,
     }));
 
@@ -1119,30 +1224,30 @@ program.command('tabs')
     } else if (tabs.length === 0) {
       console.log('No controllable tabs open.');
     } else {
-      for (const t of tabs) console.log(`${t.active ? '*' : ' '} ${t.index}  ${t.url}  ${t.title}`);
+      for (const t of tabs) console.log(`${t.selected ? '*' : ' '} ${t.index}  ${t.url}  ${t.title}`);
     }
   }));
 
 // ─── tab ────────────────────────────────────────────
 
 program.command('tab <index>')
-  .description('Switch to tab by index')
+  .description('Select a tab by one-based index')
   .action(action(async (indexStr) => {
     const client = await requireCompatibility();
-    const index = parseInt(indexStr, 10);
+    const index = Number(indexStr);
     const targets = await client.listTabs('all');
-    if (!Number.isSafeInteger(index) || index < 0 || index >= targets.length) {
-      throw new Error(`Tab index out of range (0-${Math.max(0, targets.length - 1)})`);
+    if (!Number.isSafeInteger(index) || index < 1 || index > targets.length) {
+      throw invalidArgument(`Tab index out of range (1-${targets.length})`, 'index');
     }
-    await client.callTool('browser.tabs.switch', { targetId: targets[index].targetId });
-    emit({ ok: true, index }, `\u2713 Switched to tab ${index}`);
+    await client.callTool('browser.tabs.switch', { targetId: targets[index - 1].targetId });
+    emit({ ok: true, index }, `\u2713 Selected tab ${index}`);
   }));
 
 // ─── close ──────────────────────────────────────────
 
 program.command('close')
   .description('Close current browser tab')
-  .option('-a, --all', 'close all tabs in the current Pilot window')
+  .option('-a, --all', 'close all managed tabs in this Agent Workspace')
   .action(action(async (opts) => {
     const client = await requireCompatibility();
     if (opts.all) {
@@ -1173,7 +1278,7 @@ program.command('close')
       await client.callTool('browser.tabs.close', {}, target.targetId);
       const remainingTabs = await client.listTabs('all');
       if (remainingTabs.length > 0) {
-        if (!remainingTabs.some(tab => tab.active)) {
+        if (!remainingTabs.some(tab => tab.selected ?? tab.active === true)) {
           const fallback = remainingTabs.find(tab => tab.origin !== 'user_tab');
           if (fallback) await client.callTool('browser.tabs.switch', { targetId: fallback.targetId });
         }
@@ -1210,7 +1315,7 @@ async function findNetworkRequest(
   sequence: number,
 ): Promise<Record<string, JsonValue>> {
   if (!Number.isSafeInteger(sequence) || sequence < 1) {
-    throw new Error('Request ID must be a positive integer');
+    throw invalidArgument('Request ID must be a positive integer', 'id');
   }
   const listed = await client.callTool('browser.network.requests', {
     after: sequence - 1,
@@ -1236,14 +1341,18 @@ const netCmd = program.command('net')
   .addHelpText('after', '\nExamples:\n  bp net                              # list recent requests\n  bp net --url "*api*" --method POST  # filter\n  bp net show 3                       # full details + body\n  bp net block "*tracking*"           # block URLs\n  bp net mock "*api/data*" --body \'{"ok":true}\'\n  bp net rules                        # list active rules\n  bp net remove --all                 # clear rules')
   .action(action(async (opts) => {
     const client = await requireCompatibility();
-    const limit = opts.limit ? parseInt(opts.limit, 10) : 20;
+    const limit = parseLimit(opts.limit ?? '20');
+    const after = opts.after === undefined ? undefined : Number(opts.after);
+    if (after !== undefined && (!/^\d+$/.test(opts.after) || !Number.isSafeInteger(after))) {
+      throw invalidArgument('--after must be a non-negative integer', 'after');
+    }
     const result = await client.callTool('browser.network.requests', {
       limit,
       ...(opts.url ? { url: opts.url } : {}),
       ...(opts.method ? { method: opts.method } : {}),
       ...(opts.status ? { status: opts.status } : {}),
       ...(opts.type ? { type: String(opts.type).split(',').map(value => value.trim()).filter(Boolean) } : {}),
-      ...(opts.after ? { after: parseInt(opts.after, 10) } : {}),
+      ...(after !== undefined ? { after } : {}),
     });
     const requests = networkRequests(result).map(cliNetworkRequest);
 
@@ -1272,7 +1381,7 @@ netCmd.command('show <id>')
   .option('--save <file>', 'save response body to file')
   .action(action(async (idStr, opts) => {
     const client = await requireCompatibility();
-    const id = parseInt(idStr, 10);
+    const id = Number(idStr);
     const summary = await findNetworkRequest(client, id);
     const result = await client.callTool('browser.network.request', {
       requestId: requireString(summary.requestId, 'requestId'),
@@ -1284,7 +1393,13 @@ netCmd.command('show <id>')
     const responseBody = typeof result.body === 'string' ? result.body : undefined;
 
     if (opts.save) {
-      if (responseBody === undefined) throw new Error(`Response body for request #${id} is unavailable`);
+      if (responseBody === undefined) {
+        throw new BrowserPilotError(
+          'action_not_verified',
+          `Response body for request #${id} is unavailable`,
+          { context: { sequence: id } },
+        );
+      }
       const outputPath = resolvePath(opts.save);
       const bytes = result.bodyEncoding === 'base64'
         ? Buffer.from(responseBody, 'base64')
@@ -1320,7 +1435,7 @@ netCmd.command('block <pattern>')
 
 netCmd.command('mock <pattern>')
   .description('Mock responses for matching URLs')
-  .option('--body <json>', 'response body')
+  .option('--body <text>', 'response body text')
   .option('--file <path>', 'read body from file')
   .option('--status <code>', 'HTTP status', '200')
   .action(action(async (pattern, opts) => {
@@ -1328,10 +1443,13 @@ netCmd.command('mock <pattern>')
     let body = opts.body || '';
     if (opts.file) {
       const filePath = resolvePath(opts.file);
-      if (!existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
+      if (!existsSync(filePath)) throw invalidArgument(`File not found: ${filePath}`, 'file');
       body = readFileSync(filePath, 'utf-8');
     }
-    const status = parseInt(opts.status, 10);
+    const status = Number(opts.status);
+    if (!/^\d+$/.test(opts.status) || !Number.isSafeInteger(status) || status < 100 || status > 599) {
+      throw invalidArgument('--status must be an HTTP status from 100 through 599', 'status');
+    }
     const result = await client.callTool('browser.network.rules.add', {
       type: 'mock',
       pattern,
@@ -1386,7 +1504,7 @@ netCmd.command('remove [ruleId]')
       await client.callTool('browser.network.rules.remove', { ruleId });
       emit({ ok: true }, `Rule #${ruleId} removed`);
     }
-    else throw new Error('Specify a rule ID or use --all');
+    else throw invalidArgument('Specify a rule ID or use --all', 'ruleId');
   }));
 
 netCmd.command('clear')
@@ -1396,4 +1514,23 @@ netCmd.command('clear')
     emit({ ok: true }, 'Request log cleared');
   }));
 
-program.parse();
+try {
+  await program.parseAsync();
+} catch (error) {
+  if (error instanceof CommanderError) {
+    if (error.exitCode === 0) {
+      process.exitCode = 0;
+    } else if (useJson()) {
+      const message = error.message.replace(/^error:\s*/i, '');
+      const stable = new BrowserPilotError('invalid_argument', message, {
+        context: { parserCode: error.code },
+      });
+      fail(message, undefined, stable);
+    } else {
+      process.exitCode = error.exitCode;
+    }
+  } else {
+    const message = error instanceof Error ? error.message : String(error);
+    fail(message, undefined, error instanceof BrowserPilotError ? error : undefined);
+  }
+}

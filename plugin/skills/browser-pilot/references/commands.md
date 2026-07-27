@@ -4,32 +4,74 @@ Use these commands when an Agent has shell access and needs to operate the
 browser directly. Machine-oriented output is JSON when stdout is not a TTY;
 `bp --human ...` forces human-readable output.
 
+## Contents
+
+- [Connection](#connection)
+- [Tabs and Navigation](#tabs-and-navigation)
+- [Observation](#observation)
+- [Interaction](#interaction)
+- [Frames and Dialogs](#frames-and-dialogs)
+- [Files and Capture](#files-and-capture)
+- [Page Evaluation](#page-evaluation)
+- [Cookies and HTTP Authentication](#cookies-and-http-authentication)
+- [Network](#network)
+- [JSON Results and Failures](#json-results-and-failures)
+
 ## Connection
 
-### `bp connect [--browser <name>]`
+### `bp --version`
 
-Connect to an authorized local Chromium browser. Supported compatibility names
-are `chrome`, `chromium`, `edge`, and `brave`. Chrome may ask the user to click
-Allow. With one live Profile, Browser Pilot also creates the managed Pilot
-window. With several Profiles, it lists them and waits for explicit routing;
-do not run `connect` again.
+Print the resolved CLI version. Confirm that it satisfies
+`browserPilotCli.supportedVersionRange` in the skill's bundled
+`compatibility.json` before the first Browser Pilot operation.
 
-### `bp profiles`
+### `bp browsers [--browser <selector>]`
+
+Passively list installed supported browser candidates and their process,
+remote-debugging, authorization, and aggregate readiness states. This command
+never opens a browser WebSocket or triggers Chrome's Allow dialog. Use the
+returned ID, product, or channel as a `connect --browser` selector.
+
+### `bp connect [--browser <selector>]`
+
+Connect to an authorized local Chromium browser. Run passive `bp browsers`
+first when the intended browser is ambiguous; pass a returned browser ID,
+product, or channel such as stable, beta, or canary rather than relying on a
+hard-coded browser list. Chrome may ask the user to click Allow. With one live
+Profile, Browser Pilot also creates the managed Pilot window. With several
+Profiles, it lists them and waits for explicit routing; do not run `connect`
+again.
+
+### `bp profiles [--identify] [--refresh]`
 
 Passively list live Chrome Profile contexts, tab counts, bounded representative
-tabs, and the current Workspace selection. IDs last only for the current
-browser connection.
+tabs, and the current Workspace selection. With `--identify`, explicitly open
+and close temporary visible `chrome://version` pages and return a Profile name,
+account name/email, and directory only after exact Profile-path verification.
+`--refresh` repeats that probe instead of using the connection-generation
+cache. IDs and verified identity last only for the current browser connection.
 
-### `bp profile <index|id|label|verified-name>`
+### `bp profile <index|id|label|verified-name|verified-email>`
 
 Select one freshly listed Profile for subsequent managed tabs. Selection is
-routing, not a permission grant, and does not focus or close a user tab.
+routing, not a permission grant, and does not focus or close a user tab. The
+index is one-based; verified Profile/account names and email addresses are also
+valid selectors when they resolve exactly one current context.
 
 ### `bp disconnect`
 
-Close Browser Pilot managed targets and stop the compatibility daemon. Do not
-use this as routine per-task cleanup when other clients may still need Browser
+Release only the current CLI namespace and its managed targets. The Broker
+stops only when no other active Lease or embedded client remains. Do not use
+this as routine per-task cleanup when other clients may still need Browser
 Pilot.
+
+### `--client-key <stable-key>` / `BROWSER_PILOT_CLIENT_KEY`
+
+Give each independent Agent that directly invokes one-shot commands a distinct,
+stable key. Reuse the same key for every command from that Agent; never generate
+one per tool call. The key isolates its Workspace, Lease, selected target,
+frame, refs, auth, and network state from other CLI Agents. Embedded stdio hosts
+already use separate Connection identities and do not need this option.
 
 ## Tabs and Navigation
 
@@ -38,19 +80,23 @@ Pilot.
 List all controllable page tabs in the connected browser. Results include
 Browser Pilot managed tabs, their eligible popups, and eligible user-opened
 tabs across all live Profiles. Each JSON tab has `index`, `url`, `title`,
-`active`, `origin`, and an opaque `profileContextId`.
+`selected`, `origin`, and an opaque `profileContextId`. Extension-owned and
+browser-internal pages are excluded. `selected` is the current Agent Lease's
+logical target, not Chrome's foreground tab or operating-system focus.
+Tabs remain controllable when they belong to an expanded or collapsed Chrome
+tab group, but Browser Pilot does not expose or manage the groups themselves.
 
 ### `bp tab <index>`
 
 Select any tab returned by the latest `bp tabs`. Tab indexes are inventory
-positions and may change; list again after tabs open or close.
+positions, are one-based, and may change; list again after tabs open or close.
 
 ### `bp open <url> [--new] [--profile <selector>] [--limit <n>]`
 
 Navigate the current tab and return a snapshot. `--new` creates a new managed
 tab instead of replacing the selected tab. A URL without a scheme defaults to
 HTTPS. `--profile` requires `--new` and resolves a fresh Profile index, opaque
-ID, neutral label, or verified display name.
+ID, neutral label, or verified Profile/account name or email.
 
 ### `bp close [--all]`
 
@@ -250,9 +296,12 @@ Successful snapshots contain `title`, `url`, `elements`, and may include `page`,
 `hints`, and typed action `evidence`; content reads also include `text`,
 `length`, and `truncated`. Capture commands return a local `file` path and
 annotated captures include `annotationCount`. Failed one-shot commands return
-`ok: false`, an English `error`, and sometimes a recovery `hint`, then exit
-nonzero.
+`ok: false`, an English `error`, stable `code`, and `retryable`, plus optional
+`context`, `remediation`, and recovery `hint`, then exit nonzero. Parser and
+user-input failures use `invalid_argument`; Broker failures retain the same
+stable code used by the stdio protocol.
 
-The one-shot error shape is intentionally smaller than the embedded bridge
-contract. Do not infer that a partially completed mutation was rolled back from
-an English error message. Inspect current tab/page state before retrying.
+Branch on `code`, not English text. `retryable: true` means a later call may be
+valid, not that the same mutation is safe to replay. Do not infer that a
+partially completed mutation was rolled back; inspect current tab/page state
+before retrying.

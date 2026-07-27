@@ -21,7 +21,6 @@ import {
   type ProfileContextId,
 } from '../protocol/model.js';
 import type { ToolDefinition } from '../protocol/tools.js';
-import { INJECT_BORDER } from '../page-scripts.js';
 import { MemoryRefStore, type RefStore, type SnapshotResult } from '../snapshot.js';
 import type { Transport } from '../transport.js';
 import { PageLoadTimeoutError, waitForLoad } from '../session.js';
@@ -94,6 +93,10 @@ import {
   MemoryProfileContextRegistry,
   type ProfileContextRecord,
 } from './profile-context-registry.js';
+import {
+  ProfileIdentityError,
+  readVerifiedChromeProfileIdentity,
+} from './chrome-profile-identity.js';
 import { UploadService, type UploadVerificationEvidence } from './upload-service.js';
 import {
   WorkspaceNetworkController,
@@ -110,6 +113,7 @@ export const BASE_BROWSER_TOOL_NAMES = [
   'browser.discover',
   'browser.connect',
   'browser.profiles.list',
+  'browser.profiles.identify',
   'browser.profiles.select',
   'browser.open',
   'browser.observe',
@@ -336,6 +340,7 @@ export interface BrowserToolServiceOptions {
   noProgressThreshold?: number;
   loadWaiter?: typeof waitForLoad;
   connectBrowser?: () => Promise<void>;
+  readProfileIdentity?: typeof readVerifiedChromeProfileIdentity;
 }
 
 export class BrowserToolService implements BrowserToolExecutor {
@@ -369,6 +374,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly navigationTimeoutMs: number;
   private readonly loadWaiter: typeof waitForLoad;
   private readonly connectBrowser?: () => Promise<void>;
+  private readonly readProfileIdentity: typeof readVerifiedChromeProfileIdentity;
   private eventPublisher?: (event: BrowserEventPublication) => void;
 
   constructor(
@@ -385,6 +391,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
     this.loadWaiter = options.loadWaiter ?? waitForLoad;
     this.connectBrowser = options.connectBrowser;
+    this.readProfileIdentity = options.readProfileIdentity ?? readVerifiedChromeProfileIdentity;
     this.watchdogs = new BrowserWatchdogService(event => this.publishEvent(event), {
       dialogTimeoutMs: options.dialogTimeoutMs,
       noProgressThreshold: options.noProgressThreshold,
@@ -405,7 +412,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       transport,
       binding.instance.id,
       () => ({
-        profileIdentity: binding.instance.profilePath,
+        profileIdentity: binding.instance.userDataRoot,
         connectionGeneration: binding.instance.connectionGeneration,
       }),
       {
@@ -546,9 +553,10 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): Promise<JsonValue> {
     const args = asRecord(argsValue);
     switch (definition.name) {
-      case 'browser.discover': return this.discover();
+      case 'browser.discover': return this.discover(context);
       case 'browser.connect': return this.connect(context, args);
       case 'browser.profiles.list': return this.listProfiles(context);
+      case 'browser.profiles.identify': return this.identifyProfiles(context, args);
       case 'browser.profiles.select': return this.selectProfile(context, args);
       case 'browser.tabs.list': return this.listTabs(context, args);
       case 'browser.tabs.switch': return this.switchTab(context, args);
@@ -595,6 +603,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     argsValue: JsonValue,
   ): string {
     const browserId = context.browser.instance.id;
+    if (definition.name === 'browser.profiles.identify') {
+      return `${browserId}\u0000profile-identify`;
+    }
     if (definition.name.startsWith('browser.dialogs.')) {
       return `${browserId}\u0000dialogs\u0000${context.workspace?.id ?? context.connection.id}`;
     }
@@ -668,14 +679,19 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.deleteDialogs(dialog => dialog.workspaceId === workspace.id);
   }
 
-  private discover(): JsonValue {
+  private discover(context: BrokerToolCallContext): JsonValue {
     const candidate = this.binding.candidate;
+    const userDataRoot = candidate.userDataRoot ?? candidate.profile;
     return asJson({
       browsers: [{
         id: candidate.id,
         product: candidate.product,
         ...(candidate.channel !== undefined ? { channel: candidate.channel } : {}),
-        ...(candidate.profile !== undefined ? { profile: candidate.profile } : {}),
+        ...(userDataRoot
+          ? context.connection.protocol.minor >= 3
+            ? { userDataRoot }
+            : { profile: userDataRoot }
+          : {}),
         processState: candidate.processState ?? (candidate.state === 'ready' ? 'running' : 'unknown'),
         remoteDebuggingState: candidate.remoteDebuggingState ?? (
           candidate.state === 'ready' ? 'enabled' : candidate.state === 'disconnected' ? 'stale' : 'disabled'
@@ -730,7 +746,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     return asJson({
       workspaceId: inventoryContext.workspaceId,
       leaseId: inventoryContext.leaseId,
-      targets,
+      targets: context.connection.protocol.minor >= 3
+        ? targets.map(({ active, ...target }) => ({ ...target, selected: active }))
+        : targets,
     });
   }
 
@@ -741,23 +759,89 @@ export class BrowserToolService implements BrowserToolExecutor {
     return asJson({
       workspaceId: inventoryContext.workspaceId,
       leaseId: inventoryContext.leaseId,
-      profiles: profiles.map(profile => ({
-        profileContextId: profile.id,
-        label: profile.label,
-        ...(profile.displayName ? { displayName: profile.displayName } : {}),
-        tabCount: profile.tabCount,
-        eligibleTabCount: profile.eligibleTabCount,
-        selected: context.workspace?.selectedProfileContextId === profile.id,
-        representativeTabs: targets
-          .filter(target => target.profileContextId === profile.id)
-          .slice(0, 3)
-          .map(target => ({
-            targetId: target.targetId,
-            title: target.title,
-            url: target.url,
-          })),
-      })),
+      profiles: profiles.map(profile => this.profileResult(context, profile, targets)),
     });
+  }
+
+  private async identifyProfiles(
+    context: BrokerToolCallContext,
+    args: Record<string, JsonValue>,
+  ): Promise<JsonValue> {
+    const inventoryContext = this.inventoryContext(context);
+    const targets = await this.inventory.list(inventoryContext, 'all');
+    const requestedId = args.profileContextId as ProfileContextId | undefined;
+    const profiles = requestedId
+      ? [this.profileContexts.resolve(requestedId, inventoryContext.browserConnectionGeneration)]
+      : this.profileContexts.list(inventoryContext.browserConnectionGeneration);
+    const refresh = args.refresh === true;
+
+    for (const profile of profiles) {
+      if (!refresh && profile.identityStatus !== 'unidentified') continue;
+      this.markDispatched(context);
+      try {
+        const identity = await this.probeProfileIdentity(profile);
+        this.profileContexts.setVerifiedIdentity(
+          profile.id,
+          inventoryContext.browserConnectionGeneration,
+          identity,
+        );
+      } catch (error) {
+        if (!(error instanceof ProfileIdentityError)) throw error;
+        this.profileContexts.setIdentityUnavailable(
+          profile.id,
+          inventoryContext.browserConnectionGeneration,
+          error.code,
+        );
+      }
+    }
+
+    const current = this.profileContexts.list(inventoryContext.browserConnectionGeneration);
+    return asJson({
+      workspaceId: inventoryContext.workspaceId,
+      leaseId: inventoryContext.leaseId,
+      profiles: current
+        .filter(profile => !requestedId || profile.id === requestedId)
+        .map(profile => this.profileResult(context, profile, targets)),
+    });
+  }
+
+  private profileResult(
+    context: BrokerToolCallContext,
+    profile: ProfileContextRecord,
+    targets: ReadonlyArray<{
+      targetId: ControlledTargetId;
+      profileContextId: ProfileContextId;
+      title: string;
+      url: string;
+    }>,
+  ): Record<string, JsonValue> {
+    const identity: Record<string, JsonValue> = {};
+    if (context.connection.protocol.minor >= 3) {
+      identity.identityStatus = profile.identityStatus;
+      if (profile.profileName) identity.profileName = profile.profileName;
+      if (profile.accountName) identity.accountName = profile.accountName;
+      if (profile.accountEmail) identity.accountEmail = profile.accountEmail;
+      if (profile.profileDirectory) identity.profileDirectory = profile.profileDirectory;
+      if (profile.identityErrorCode) identity.identityErrorCode = profile.identityErrorCode;
+    } else if (profile.displayName) {
+      identity.displayName = profile.displayName;
+    }
+    return {
+      profileContextId: profile.id,
+      label: profile.label,
+      ...identity,
+      tabCount: profile.tabCount,
+      eligibleTabCount: profile.eligibleTabCount,
+      selected: context.workspace?.selectedProfileContextId === profile.id,
+      representativeTabs: targets
+        .filter(target => target.profileContextId === profile.id)
+        .slice(0, 3)
+        .map(target => ({
+          targetId: target.targetId,
+          title: target.title,
+          url: target.url,
+        })),
+    };
   }
 
   private async selectProfile(
@@ -778,7 +862,16 @@ export class BrowserToolService implements BrowserToolExecutor {
       leaseId: inventoryContext.leaseId,
       profileContextId: profile.id,
       label: profile.label,
-      ...(profile.displayName ? { displayName: profile.displayName } : {}),
+      ...(context.connection.protocol.minor >= 3
+        ? {
+            identityStatus: profile.identityStatus,
+            ...(profile.profileName ? { profileName: profile.profileName } : {}),
+            ...(profile.accountName ? { accountName: profile.accountName } : {}),
+            ...(profile.accountEmail ? { accountEmail: profile.accountEmail } : {}),
+            ...(profile.profileDirectory ? { profileDirectory: profile.profileDirectory } : {}),
+            ...(profile.identityErrorCode ? { identityErrorCode: profile.identityErrorCode } : {}),
+          }
+        : profile.displayName ? { displayName: profile.displayName } : {}),
     });
   }
 
@@ -1811,6 +1904,94 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
   }
 
+  private async probeProfileIdentity(
+    profile: ProfileContextRecord,
+  ): Promise<Awaited<ReturnType<typeof readVerifiedChromeProfileIdentity>>> {
+    let targetId: string | undefined;
+    let sessionId: string | undefined;
+    let failure: unknown;
+    try {
+      try {
+        targetId = await this.tryCreateManagedTarget({
+          url: 'about:blank',
+          newWindow: true,
+          ...(profile.cdpBrowserContextId
+            ? { browserContextId: profile.cdpBrowserContextId }
+            : {}),
+        }, profile);
+      } catch (error) {
+        if (!(error instanceof ManagedTargetCreationRejectedError)) throw error;
+      }
+      if (!targetId) targetId = await this.createManagedProfileWindow(profile);
+
+      const attached = await this.transport.send('Target.attachToTarget', {
+        targetId,
+        flatten: true,
+      });
+      if (typeof attached?.sessionId !== 'string') {
+        throw new ProfileIdentityError(
+          'profile_path_unavailable',
+          'Chrome could not attach to the temporary Profile identity target',
+        );
+      }
+      const activeSessionId = attached.sessionId;
+      sessionId = activeSessionId;
+      await this.transport.send('Page.enable', {}, activeSessionId);
+      const navigation = await this.transport.send('Page.navigate', {
+        url: 'chrome://version/',
+      }, activeSessionId);
+      if (navigation?.errorText) {
+        throw new ProfileIdentityError(
+          'profile_path_unavailable',
+          'Chrome could not open its version page for Profile identification',
+        );
+      }
+      await this.loadWaiter(this.transport, activeSessionId, this.navigationTimeoutMs);
+      const evaluated = await this.transport.send('Runtime.evaluate', {
+        expression: `(() => {
+          /* browser-pilot.profile-path.v1 */
+          const value = document.querySelector('#profile_path')?.textContent;
+          return typeof value === 'string' ? value.trim() : '';
+        })()`,
+        returnByValue: true,
+      }, activeSessionId);
+      const reportedProfilePath = evaluated?.result?.value;
+      if (typeof reportedProfilePath !== 'string' || !reportedProfilePath.trim()) {
+        throw new ProfileIdentityError(
+          'profile_path_unavailable',
+          'Chrome did not expose a Profile path on its version page',
+        );
+      }
+      return await this.readProfileIdentity(
+        this.binding.instance.userDataRoot,
+        reportedProfilePath,
+      );
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      if (sessionId) {
+        await this.transport.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      }
+      if (targetId && !(await this.closeTargetAndVerify(targetId))) {
+        throw new BrowserPilotError(
+          'unknown_outcome',
+          'Temporary Profile identity target could not be safely closed',
+          {
+            retryable: true,
+            context: { profileContextId: profile.id },
+            remediation: {
+              code: 'inspect_profile_tabs',
+              message: 'List tabs and close any leftover chrome://version window before retrying.',
+              actionRequired: true,
+            },
+            ...(failure !== undefined ? { cause: failure } : {}),
+          },
+        );
+      }
+    }
+  }
+
   private async tryCreateManagedTarget(
     params: Parameters<ManagedTargetLifecycle['createTarget']>[0],
     profile: ProfileContextRecord,
@@ -2151,7 +2332,6 @@ export class BrowserToolService implements BrowserToolExecutor {
       await this.network.attachSession(session);
       await this.transport.send('Page.enable', {}, attached.sessionId).catch(() => {});
       await this.downloads?.attachSession(session);
-      await this.transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, attached.sessionId).catch(() => {});
       return session;
     } catch (error) {
       this.retireSession(key, session);

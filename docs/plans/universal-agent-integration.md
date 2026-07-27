@@ -93,9 +93,11 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [x] **A2.3** Replace global target/frame/session state with Workspace and
   Lease state; provide a compatibility Workspace for one-shot CLI calls.
   - Covers: FR-1, FR-3, AC-1, AC-3.
-  - Complete: the CLI uses a fixed daemon-internal one-shot Connection plus
-    idempotently keyed compatibility Workspace and renewable five-minute Lease.
-    Every CLI command calls canonical tools; active targets, frames, sessions,
+  - Complete: the CLI derives a stable one-shot Connection identity from
+    `BROWSER_PILOT_CLIENT_KEY`/`--client-key`, plus an idempotently keyed
+    compatibility Workspace and renewable five-minute Lease. The default key
+    preserves single-Agent compatibility; distinct stable keys isolate Agents.
+    Every CLI command calls canonical tools; selected targets, frames, sessions,
     Observations, refs, auth, rules, and request identity remain only in daemon
     memory. No `state.json` or `refs.json` compatibility mapping remains.
 - [x] **A2.4** Serialize commands through a per-target actor and implement
@@ -272,7 +274,8 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     version semantics. Health and schema-2 locator metadata expose the current
     service, executable installation identity, protocol range, and bounded live
     client counts. Protected compare-and-stop shutdown rejects mismatched
-    executables and returns `broker_in_use` while embedded Connections remain.
+    executables and returns `broker_in_use` while embedded Connections or any
+    active Lease remains.
     Owner-only version history retains only current/previous executable metadata
     and no transient browser state. `BROWSER_PILOT_HOME` provides explicit
     cross-platform isolation; incompatibility never triggers hidden replacement
@@ -290,7 +293,11 @@ Pilot. Tenon and OpenClaw are reference consumers only.
     platform archives; macOS Developer ID/notarization and Windows Authenticode
     hooks activate only with complete credentials, while unsigned/ad-hoc state
     remains explicit. Release CI uses fixed official Node 22.17.0 native runners
-    and verifies every artifact before publishing it.
+    and verifies every artifact before publishing it. The supported native
+    matrix is Apple Silicon macOS, x64 Linux, and x64 Windows; Intel Mac is not
+    supported. A versioned release index binds these assets to the npm package,
+    exact Agent plugin/skill version, protocol range, and checksums, and GitHub
+    Release publication waits for npm publication.
 
 ### A7. Agent-neutral integration kit
 
@@ -318,6 +325,12 @@ Pilot. Tenon and OpenClaw are reference consumers only.
 - [x] **A7.4** Update the Agent skill to teach direct one-shot use and embedded
   stdio use without assuming a particular Agent runtime.
   - Covers: FR-1, AC-1.
+  - Complete: the main skill is a bounded operating guide with progressive
+    command/stdio references, version-range CLI compatibility checking, stable
+    one-shot error recovery, explicit user-tab/Profile/tab-group boundaries,
+    local capture semantics, and generated Codex UI metadata. Release
+    verification and a machine-readable skill compatibility manifest prevent
+    silent CLI/skill version drift.
 
 ## Cross-Workstream Dependencies
 

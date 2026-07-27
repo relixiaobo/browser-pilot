@@ -109,7 +109,7 @@ export class DaemonClient implements Transport {
       id?: string;
       product: string;
       channel?: string;
-      profile: string;
+      userDataRoot: string;
       state?: 'connected' | 'disconnected' | 'reconnecting';
       connectionGeneration?: number;
     };

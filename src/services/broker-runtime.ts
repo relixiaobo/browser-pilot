@@ -37,6 +37,7 @@ import {
   getToolDefinition,
   getToolManifest,
   isToolAvailableInProtocol,
+  minimumProtocolMinorForTool,
   validateToolArguments,
   validateToolResult,
   type ToolDefinition,
@@ -87,8 +88,10 @@ export interface BrokerBrowserBinding {
 function normalizeBrowserCandidate(candidate: BrowserCandidate): BrowserCandidate {
   const ready = candidate.state === 'ready';
   const authorizationRequired = candidate.state === 'authorization_required';
+  const userDataRoot = candidate.userDataRoot ?? candidate.profile;
   return {
     ...candidate,
+    ...(userDataRoot ? { userDataRoot, profile: userDataRoot } : {}),
     processState: candidate.processState ?? (ready || authorizationRequired ? 'running' : 'unknown'),
     remoteDebuggingState: candidate.remoteDebuggingState ?? (
       ready || authorizationRequired
@@ -101,6 +104,15 @@ function normalizeBrowserCandidate(candidate: BrowserCandidate): BrowserCandidat
         : authorizationRequired ? 'required' : candidate.state === 'disconnected' ? 'unknown' : 'not_applicable'
     ),
   };
+}
+
+function browserCandidateForProtocol(candidate: BrowserCandidate, protocolMinor: number): BrowserCandidate {
+  const { profile, userDataRoot, ...rest } = candidate;
+  const root = userDataRoot ?? profile;
+  if (!root) return rest;
+  return protocolMinor >= 3
+    ? { ...rest, userDataRoot: root }
+    : { ...rest, profile: root };
 }
 
 export interface BrokerRuntimeOptions {
@@ -698,7 +710,9 @@ export class MemoryBrokerRuntime {
         capabilities,
         brokerProcessIdentity: this.options.brokerProcessIdentity,
         connectionId: existing.value.id,
-        browsers: this.browserBindings.map(binding => ({ ...binding.candidate })),
+        browsers: this.browserBindings.map(binding => (
+          browserCandidateForProtocol(binding.candidate, existing.value.protocol.minor)
+        )),
         limits: { ...existing.limits },
       } satisfies InitializeResult);
     }
@@ -735,7 +749,7 @@ export class MemoryBrokerRuntime {
       capabilities,
       brokerProcessIdentity: this.options.brokerProcessIdentity,
       connectionId,
-      browsers: this.browserBindings.map(binding => ({ ...binding.candidate })),
+      browsers: this.browserBindings.map(binding => browserCandidateForProtocol(binding.candidate, protocol.minor)),
       limits: { ...limits },
     };
     const connection: RuntimeConnection = {
@@ -1171,8 +1185,10 @@ export class MemoryBrokerRuntime {
     const params = validateToolCallParams(value);
     const definition = getToolDefinition(params.name);
     if (!isToolAvailableInProtocol(definition.name, connection.value.protocol)) {
-      throw protocolIncompatible(`${definition.name} requires protocol 1.2 or newer`, {
+      const requiredMinor = minimumProtocolMinorForTool(definition.name);
+      throw protocolIncompatible(`${definition.name} requires protocol 1.${requiredMinor} or newer`, {
         tool: definition.name,
+        requiredProtocol: { major: 1, minor: requiredMinor },
         selectedProtocol: `${connection.value.protocol.major}.${connection.value.protocol.minor}`,
       });
     }

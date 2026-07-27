@@ -309,7 +309,7 @@ test.describe('tabs', () => {
 
   test('tab switch', async () => {
     bp(`open "${BASE}/input/number" --new`);
-    const result = bp('tab 0');
+    const result = bp('tab 1');
     expect(result.ok).toBe(true);
   });
 
@@ -371,10 +371,10 @@ test.describe('output format', () => {
 
 // ── Visual Overlay ──────────────────────────────────
 
-test.describe('visual overlay', () => {
-  test('overlay is injected', async () => {
+test.describe('page isolation', () => {
+  test('browser control does not inject a DOM overlay', async () => {
     open(`${BASE}/input/types`);
     const result = evaluate('!!document.getElementById("__bp_overlay")');
-    expect(result.value).toBe(true);
+    expect(result.value).toBe(false);
   });
 });

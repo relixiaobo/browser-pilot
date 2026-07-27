@@ -234,7 +234,7 @@ test('Broker Artifact methods require an owning Workspace and active Lease', asy
       instance: {
         id: 'browser-instance:test',
         product: 'Chrome',
-        profilePath: '/profiles/test',
+        userDataRoot: '/profiles/test',
         processIdentity: 'process:test',
         connectionGeneration: 1,
         state: 'connected',

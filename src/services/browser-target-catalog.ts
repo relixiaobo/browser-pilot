@@ -37,13 +37,24 @@ export function isEligibleUserPage(target: BrowserTargetCandidate): boolean {
     return !new Set([
       'devtools:',
       'chrome:',
+      'chrome-extension:',
       'chrome-untrusted:',
       'edge:',
+      'edge-extension:',
       'brave:',
       'vivaldi:',
     ]).has(url.protocol);
   } catch {
     return target.url === 'about:blank';
+  }
+}
+
+function isExtensionPage(target: BrowserTargetCandidate): boolean {
+  try {
+    const protocol = new URL(target.url).protocol;
+    return protocol === 'chrome-extension:' || protocol === 'edge-extension:';
+  } catch {
+    return false;
   }
 }
 
@@ -82,6 +93,9 @@ export class CdpBrowserTargetCatalog implements BrowserTargetCatalog {
         type: typeof value.type === 'string' ? value.type : '',
         ...(typeof value.openerId === 'string' ? { openerCdpTargetId: value.openerId } : {}),
       };
+      // Extension-owned pages are implementation details, not ordinary browser
+      // tabs or evidence that an Agent can use to identify a Chrome Profile.
+      if (isExtensionPage(candidate)) continue;
       const eligible = isEligibleUserPage(candidate) && !this.options.isExcludedTarget(candidate);
       snapshots.push({
         ...candidate,

@@ -235,7 +235,7 @@ test('simultaneous bridge processes start and reuse exactly one per-user Broker'
   assert.equal(locator.schemaVersion, 2);
   assert.equal(locator.serviceVersion, locator.executable.version);
   assert.deepEqual(locator.protocol, {
-    min: { major: 1, minor: 0 }, max: { major: 1, minor: 2 },
+    min: { major: 1, minor: 0 }, max: { major: 1, minor: 3 },
   });
 
   process.kill(locator.pid, 'SIGKILL');
@@ -544,7 +544,7 @@ test('compatible Browser Pilot executable versions reuse one Broker while one-sh
   assert.equal(stopped.code, 0, stopped.stderr);
 });
 
-test('bp disconnect refuses to stop a Broker with a live embedded client', async t => {
+test('bp disconnect releases its namespace without stopping a Broker with a live embedded client', async t => {
   const root = await mkdtemp('/tmp/bp-live-client-process-');
   const socketPath = join(root, '.browser-pilot', 'daemon.sock');
   const bridge = startLiveBridge(root, 'live-client:one');
@@ -559,11 +559,9 @@ test('bp disconnect refuses to stop a Broker with a live embedded client', async
   const before = await daemonRequest(socketPath, '/health');
   assert.equal(before.clients.embeddedConnections, 1);
 
-  const refused = await runCli(root, ['disconnect']);
-  assert.equal(refused.code, 1, refused.stderr);
-  const refusal = JSON.parse(refused.stdout.trim());
-  assert.equal(refusal.code, 'broker_in_use');
-  assert.equal(refusal.remediation.code, 'close_embedded_clients');
+  const disconnected = await runCli(root, ['disconnect']);
+  assert.equal(disconnected.code, 0, disconnected.stderr);
+  assert.equal(JSON.parse(disconnected.stdout.trim()).ok, true);
   const stillRunning = await daemonRequest(socketPath, '/health');
   assert.equal(stillRunning.brokerProcessIdentity, before.brokerProcessIdentity);
 
