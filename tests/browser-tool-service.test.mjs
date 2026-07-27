@@ -85,6 +85,7 @@ class BrowserFixtureTransport {
   onMouseReleased;
   onKeyUp;
   onInsertText;
+  retainClosedTargets = false;
 
   async send(method, params = {}, sessionId) {
     this.calls.push({ method, params, sessionId });
@@ -134,10 +135,12 @@ class BrowserFixtureTransport {
         this.sessions.delete(params.sessionId);
         return {};
       case 'Target.closeTarget':
-        this.targets.delete(params.targetId);
-        this.windows.delete(params.targetId);
-        this.loaders.delete(params.targetId);
-        this.fallbackWindowNames.delete(params.targetId);
+        if (!this.retainClosedTargets) {
+          this.targets.delete(params.targetId);
+          this.windows.delete(params.targetId);
+          this.loaders.delete(params.targetId);
+          this.fallbackWindowNames.delete(params.targetId);
+        }
         return { success: true };
       case 'Page.enable': return {};
       case 'Runtime.enable': return {};
@@ -649,6 +652,35 @@ test('tools/call lists user tabs, creates a managed target, and preserves user t
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(transport.targets.has('user-form'), true);
   assert.equal([...transport.targets.keys()].some(id => id.startsWith('managed-')), false);
+});
+
+test('a closing managed target is never reclassified as a user tab', async () => {
+  const transport = new BrowserFixtureTransport();
+  transport.retainClosedTargets = true;
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:closing-target',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:closing-target',
+    'com.example.agent',
+    'instance:closing-target',
+  );
+  await tool(runtime, client, 'browser.open', {
+    url: 'https://managed.test/task',
+    newTarget: true,
+    observationLimit: 10,
+  });
+  const before = await tool(runtime, client, 'browser.tabs.list', { scope: 'managed_only' });
+  assert.equal(before.targets.length, 1);
+
+  await tool(runtime, client, 'browser.tabs.close', {}, before.targets[0].targetId);
+  const after = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
+  assert.deepEqual(after.targets.map(target => target.origin), ['user_tab']);
+  assert.equal(after.targets[0].title, 'User Form');
 });
 
 test('Profile routing is passive, explicit, fallback-safe, and binds one ManagedTabSet per context', async () => {

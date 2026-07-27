@@ -227,6 +227,14 @@ test('bulk close affects only ManagedTabSet while explicit close can close a use
       .map(call => call.params.targetId),
     ['cdp:managed', 'cdp:managed-popup', 'cdp:managed-nested'],
   );
+  assert.equal(
+    harness.registry.isManagedCdpTarget(harness.browserInstanceId, 'cdp:managed', 1),
+    true,
+  );
+  assert.equal(
+    harness.registry.isManagedCdpTarget(harness.browserInstanceId, 'cdp:managed', 2),
+    false,
+  );
   assert.ok(harness.transport.targets.some(target => target.targetId === 'cdp:user-form'));
 
   await harness.inventory.close(harness.contextA, userForm.targetId);

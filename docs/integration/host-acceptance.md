@@ -22,7 +22,7 @@ for each host process:
 
 ```bash
 node scripts/run-isolated-host-integration-acceptance.mjs \
-  --expected-version 0.3.0-rc.5 \
+  --expected-version 0.3.0-rc.6 \
   -- /absolute/path/to/browser-pilot
 
 node scripts/run-isolated-host-integration-acceptance.mjs -- \
@@ -42,7 +42,7 @@ results and passed back to the protocol as opaque Profile IDs:
 
 ```bash
 node scripts/run-host-integration-acceptance.mjs \
-  --expected-version 0.3.0-rc.5 \
+  --expected-version 0.3.0-rc.6 \
   --profile 1 \
   --second-profile 2 \
   --report test-results/host-acceptance-real.json \

@@ -413,6 +413,7 @@ export class BrowserToolService implements BrowserToolExecutor {
         isExcludedTarget: target => this.registry.isManagedCdpTarget(
           binding.instance.id,
           target.cdpTargetId,
+          binding.instance.connectionGeneration,
         ),
       },
     );

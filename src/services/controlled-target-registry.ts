@@ -463,12 +463,16 @@ export class MemoryControlledTargetRegistry {
       .map(cloneRecord);
   }
 
-  isManagedCdpTarget(browserInstanceId: BrowserInstanceId, cdpTargetId: string): boolean {
+  isManagedCdpTarget(
+    browserInstanceId: BrowserInstanceId,
+    cdpTargetId: string,
+    browserConnectionGeneration: number,
+  ): boolean {
     for (const record of this.records.values()) {
       if (
-        record.state === 'active' &&
         record.browserInstanceId === browserInstanceId &&
         record.cdpTargetId === cdpTargetId &&
+        record.browserConnectionGeneration === browserConnectionGeneration &&
         record.origin !== 'user_tab'
       ) return true;
     }
