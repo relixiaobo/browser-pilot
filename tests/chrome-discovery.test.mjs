@@ -65,7 +65,7 @@ test('browser discovery passively returns stable structured candidates', async t
     id: first[0].candidate.id,
     product: 'Chrome',
     channel: 'stable',
-    profile: ready.dataDir,
+    userDataRoot: ready.dataDir,
     processState: 'running',
     remoteDebuggingState: 'enabled',
     authorizationState: 'unknown',

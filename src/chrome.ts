@@ -365,7 +365,7 @@ export async function discoverBrowserCandidates(options: BrowserDiscoveryOptions
       id: stableBrowserId(definition, os),
       product: definition.product,
       channel: definition.channel,
-      profile: definition.dataDir,
+      userDataRoot: definition.dataDir,
       processState,
       remoteDebuggingState,
       authorizationState,

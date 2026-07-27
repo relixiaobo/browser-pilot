@@ -31,7 +31,7 @@ export default async function globalSetup(): Promise<void | (() => Promise<void>
 
     const browsers = bp('browsers');
     const isolated = browsers.browsers?.find((candidate: { profile?: string }) => (
-      candidate.profile === fixture.profile
+      (candidate.userDataRoot ?? candidate.profile) === fixture.profile
     ));
     if (!isolated || isolated.remoteDebuggingState !== 'enabled') {
       throw new Error('Browser Pilot did not discover the isolated test profile');

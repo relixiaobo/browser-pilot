@@ -12,7 +12,6 @@ import {
   discoverBrowserCandidates,
   type DiscoveredBrowser,
 } from './chrome.js';
-import { INJECT_BORDER } from './page-scripts.js';
 import type { Transport } from './transport.js';
 import { BrowserPilotError } from './protocol/errors.js';
 import { internalProcessInvocation } from './runtime-layout.js';
@@ -188,13 +187,6 @@ export async function waitForLoad(transport: Transport, sessionId: string, timeo
   const deadline = new Promise<typeof deadlineReached>(resolve => {
     deadlineTimer = setTimeout(() => resolve(deadlineReached), timeout);
   });
-  const injectBorder = async (): Promise<void> => {
-    await Promise.race([
-      transport.send('Runtime.evaluate', { expression: INJECT_BORDER }, sessionId).catch(() => undefined),
-      deadline,
-    ]);
-  };
-
   try {
     while (true) {
       const evaluation = await Promise.race([
@@ -209,7 +201,6 @@ export async function waitForLoad(transport: Transport, sessionId: string, timeo
       if (evaluation === deadlineReached) throw new PageLoadTimeoutError(timeout);
 
       if (evaluation.state === 'complete') {
-        await injectBorder();
         return;
       }
 
@@ -217,7 +208,6 @@ export async function waitForLoad(transport: Transport, sessionId: string, timeo
         if (interactiveSince === null) interactiveSince = Date.now();
         // DOM parsed and usable; if 'complete' doesn't come quickly, accept and move on.
         if (Date.now() - interactiveSince >= interactiveGrace) {
-          await injectBorder();
           return;
         }
       }

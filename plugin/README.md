@@ -7,8 +7,14 @@ separate decision guide for products embedding `browser-pilot bridge --stdio`.
 ## Install browser-pilot-cli first
 
 ```bash
-npm install -g browser-pilot-cli
+npm install -g browser-pilot-cli@latest
+bp --version
 ```
+
+The bundled skill reads `compatibility.json`, accepts the declared compatible
+CLI range, and rejects versions outside it. Each plugin release records the CLI
+version it was tested with; embedded products should pin that exact version.
+Native macOS releases support Apple Silicon only.
 
 Enable Chrome remote debugging: open `chrome://inspect/#remote-debugging` and toggle ON.
 
@@ -32,13 +38,13 @@ claude --plugin-dir ./plugin
 ### Codex CLI
 
 ```bash
-npx skills add relixiaobo/browser-pilot
+npx skills add relixiaobo/browser-pilot --skill browser-pilot
 ```
 
 ### Cursor / VS Code Copilot
 
 ```bash
-npx skills add relixiaobo/browser-pilot
+npx skills add relixiaobo/browser-pilot --skill browser-pilot
 ```
 
 ### OpenClaw
@@ -54,10 +60,11 @@ cp -r skills/browser-pilot ~/.agents/skills/
 After installation, your AI agent learns to use `bp` commands via bash:
 
 - `bp open <url>` — navigate and get page snapshot
-- `bp profiles` / `bp profile <index>` — route new managed tabs across live Chrome Profiles
+- `bp profiles` / `bp profiles --identify` / `bp profile <index>` — identify and route across live Chrome Profiles
 - `bp click <ref>` — click elements by reference number
 - `bp type <ref> "text"` — fill form fields
-- `bp eval <js>` — run JavaScript
+- `bp scroll` / `bp dropdown` / `bp select` — use verified page primitives
+- `bp eval <js>` — escape hatch for missing operations
 - `bp screenshot <file>` — capture the page to a local file
 - `bp net` — monitor network requests
 
@@ -65,6 +72,10 @@ The agent uses your real browser with your existing login sessions. `bp tabs`
 includes Browser Pilot managed tabs and eligible user-opened tabs; no extension
 or separate browser profile is required. Dialogs remain pending until the Agent
 explicitly accepts or dismisses them.
+
+When independent Agents share direct one-shot CLI access, give each one a
+stable `BROWSER_PILOT_CLIENT_KEY`. Embedded products should use
+`browser-pilot bridge --stdio`, which provides its own isolated lifecycle.
 
 ## Slash commands
 

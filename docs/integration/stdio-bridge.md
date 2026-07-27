@@ -17,6 +17,11 @@ Resolve an exact Browser Pilot executable version from one of these locations:
 2. A project-local npm dependency.
 3. A compatible global installation selected explicitly by the host.
 
+For release bundles, verify the versioned release index first. It binds the npm
+package, Agent plugin/skill compatible CLI range and tested version, protocol
+range, supported native assets, and adjacent SHA-256 files. Native releases support `darwin-arm64`,
+`linux-x64`, and `win32-x64`; Intel Mac is not supported.
+
 Launch it directly, without a shell:
 
 ```text
@@ -105,13 +110,13 @@ exception because a browser dialog can pause the command that caused it.
 `initialize` must be the first successful request on a bridge Connection:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"client":{"id":"com.example.agent","name":"Example Agent","version":"2.0.0","instanceId":"install:01J..."},"protocol":{"min":{"major":1,"minor":1},"max":{"major":1,"minor":2}},"requestedCapabilities":["browser.control","workspace.manage","observation.read","action.input","artifact.read","event.read"],"launchMode":"embedded","limits":{"maxMessageBytes":1048576,"maxResultBytes":4194304}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"client":{"id":"com.example.agent","name":"Example Agent","version":"2.0.0","instanceId":"install:01J..."},"protocol":{"min":{"major":1,"minor":1},"max":{"major":1,"minor":3}},"requestedCapabilities":["browser.control","workspace.manage","observation.read","action.input","artifact.read","event.read"],"launchMode":"embedded","limits":{"maxMessageBytes":1048576,"maxResultBytes":4194304}}}
 ```
 
 The response returns the selected protocol, supported and granted
 capabilities, executable and service versions, a process-stable Broker
 identity, a Connection ID, browser candidates, and negotiated limits. Each
-candidate has a stable `id`, product/channel/profile identity, aggregate
+candidate has a stable `id`, product/channel and `userDataRoot`, aggregate
 `state`, separate `processState`, `remoteDebuggingState`, and
 `authorizationState`, plus structured `remediation` when action is needed.
 Initialization succeeds when no candidate is ready, so a host can present setup
@@ -132,6 +137,13 @@ Protocol 1.2 adds connection-scoped Chrome Profile routing. It exposes
 tab inventory and new-target operations. Protocol 1.0/1.1 clients retain their
 existing tools; the Broker hides 1.2-only operations and rejects a manually
 constructed Profile call with `protocol_incompatible`.
+
+Protocol 1.3 adds the explicit `browser.profiles.identify` mutation and
+structured Profile identity fields. Browser discovery returns `userDataRoot`
+instead of the legacy candidate field `profile`, and tab inventory returns
+`selected` instead of `active`. `selected` means the target selected by this
+Lease; it does not describe Chrome foreground focus. Protocol 1.2 clients keep
+the old field vocabulary and do not see the identity tool.
 
 The initialize request and response use the service's fixed bootstrap limits.
 The bridge switches limits only after the successful response has been written,
@@ -259,25 +271,36 @@ show another Chrome Allow dialog per Profile. `browser.tabs.list` returns every
 eligible managed and user-opened tab across those contexts, each with an opaque
 `profileContextId`. Existing tabs can be selected and controlled immediately;
 Profile selection is routing for new managed targets, not a permission grant.
+Browser-internal and extension-owned pages are excluded from ordinary tab and
+Profile representative inventory.
 
-Protocol 1.2 hosts should use this flow when creating independent work:
+Protocol 1.2+ hosts should use this flow when creating independent work:
 
 1. Call `browser.profiles.list`. It is passive and returns neutral labels,
    bounded representative tabs, counts, and the Workspace selection.
-2. If there is one Profile, `browser.open` can infer it. If there are several
+2. On protocol 1.3, if account-aware identity is needed, call
+   `browser.profiles.identify`. It briefly creates visible `chrome://version`
+   targets, verifies each reported path as an immediate child of the connected
+   `userDataRoot`, reads bounded Chrome Local State metadata, closes every
+   temporary target, and caches the result for one connection generation.
+   `refresh: true` explicitly re-probes.
+3. If there is one Profile, `browser.open` can infer it. If there are several
    and no current target or Workspace selection, ask the user which Profile to
    use.
-3. Call `browser.profiles.select` with the returned opaque ID, or pass that ID
+4. Call `browser.profiles.select` with the returned opaque ID, or pass that ID
    directly as `browser.open.arguments.profileContextId`.
-4. Treat IDs as scoped to the current browser connection generation. After
-   reconnect, relist Profiles, tabs, frames, and Observations.
+5. Treat IDs and verified identity as scoped to the current browser connection
+   generation. After reconnect, relist Profiles, tabs, frames, and Observations.
 
-Profile names are included only when Browser Pilot has verified them without a
-visible discovery tab; otherwise hosts present the neutral label and
-representative page titles/URLs. Never expose or persist raw CDP context IDs.
-New-target routing uses an explicit call argument, the Lease's logical active
+Profile results use `identityStatus: unidentified | verified | unavailable`.
+Only verified results may include `profileName`, `accountName`, `accountEmail`,
+and `profileDirectory`; unavailable results include a stable
+`identityErrorCode` rather than a guessed account. Current codes are
+`profile_path_unavailable`, `profile_path_unverified`,
+`local_state_unavailable`, and `profile_metadata_missing`. Never expose or persist raw
+CDP context IDs. New-target routing uses an explicit call argument, the Lease's logical selected
 target, the Workspace selection, or the only available context, in that order.
-`browser.profiles.select` clears only the logical active-target anchor so its
+`browser.profiles.select` clears only the logical selected-target anchor so its
 selection applies to the next new managed target; it does not release control,
 activate a user tab, or change Chrome focus.
 
@@ -598,7 +621,8 @@ The stdio `shutdown` method exits only that bridge and disconnects its Broker
 Connection. The human `bp disconnect` command separately releases the one-shot
 compatibility Workspace and requests daemon shutdown. The daemon accepts that
 request only when the Broker process identity and executable installation
-identity still match and `embeddedConnections` is zero. Otherwise it returns
+identity still match, `embeddedConnections` is zero, and no other active Lease
+remains. Otherwise it returns
 `protocol_incompatible` or retryable `broker_in_use`; it never evicts an Agent
 product to complete an upgrade.
 
@@ -626,9 +650,9 @@ pattern into their own integration and continue treating this document plus the
 runtime manifest as authoritative.
 
 The shared example launches an absolute executable path without a shell,
-negotiates protocol 1.1 through 1.2, discovers tools at runtime, and maps a host work scope
+negotiates protocol 1.1 through 1.3, discovers tools at runtime, and maps a host work scope
 to a Workspace plus its active invocation to a renewable Lease. It never stores
-an active tab, frame, Observation, ref, credential, rule, Artifact, or event
+a selected tab, frame, Observation, ref, credential, rule, Artifact, or event
 cursor on disk. Host tool-call IDs become Command and idempotency identities;
 transport loss after dispatch of a mutating operation is returned as
 non-retryable `unknown_outcome`.

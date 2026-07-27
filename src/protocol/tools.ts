@@ -3,6 +3,7 @@ import {
   CAPABILITIES,
   OBSERVATION_TRUNCATION_REASONS,
   OBSERVATION_V1_LIMITS,
+  PROFILE_IDENTITY_ERROR_CODES,
   SENSITIVITIES,
   type ArtifactDescriptor,
   type Capability,
@@ -408,6 +409,12 @@ const profileRepresentativeTabSchema = objectSchema({
 const profileContextSchema = objectSchema({
   profileContextId: opaqueIdSchema,
   label: stringSchema({ minLength: 1, maxLength: 128 }),
+  identityStatus: stringSchema({ enum: ['unidentified', 'verified', 'unavailable'] }),
+  profileName: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+  accountName: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+  accountEmail: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+  profileDirectory: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+  identityErrorCode: stringSchema({ enum: [...PROFILE_IDENTITY_ERROR_CODES] }),
   displayName: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
   tabCount: integerSchema({ minimum: 0 }),
   eligibleTabCount: integerSchema({ minimum: 0 }),
@@ -434,6 +441,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         id: opaqueIdSchema,
         product: stringSchema({ minLength: 1, maxLength: 128 }),
         channel: stringSchema({ maxLength: 128 }),
+        userDataRoot: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
         profile: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
         processState: stringSchema({ enum: ['running', 'not_running', 'unknown'] }),
         remoteDebuggingState: stringSchema({ enum: ['enabled', 'disabled', 'stale'] }),
@@ -491,6 +499,25 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     artifactKinds: [],
   }),
   tool({
+    name: 'browser.profiles.identify',
+    title: 'Identify browser Profiles',
+    description: 'Explicitly identify live Chrome Profiles using temporary visible chrome://version targets.',
+    context: 'workspace',
+    inputSchema: objectSchema({
+      profileContextId: opaqueIdSchema,
+      refresh: booleanSchema(),
+    }),
+    outputSchema: resultSchema('workspace', {
+      profiles: arraySchema(profileContextSchema, { maxItems: 128 }),
+    }, ['profiles']),
+    requiredCapabilities: ['browser.control'],
+    mutating: true,
+    idempotency: 'non_idempotent',
+    cancellation: 'best_effort',
+    sensitivity: { input: [], output: ['browser_data'] },
+    artifactKinds: [],
+  }),
+  tool({
     name: 'browser.profiles.select',
     title: 'Select browser Profile',
     description: 'Select one current Profile context for new managed targets in this Workspace.',
@@ -499,6 +526,12 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     outputSchema: resultSchema('workspace', {
       profileContextId: opaqueIdSchema,
       label: stringSchema({ minLength: 1, maxLength: 128 }),
+      identityStatus: stringSchema({ enum: ['unidentified', 'verified', 'unavailable'] }),
+      profileName: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+      accountName: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+      accountEmail: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+      profileDirectory: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
+      identityErrorCode: stringSchema({ enum: [...PROFILE_IDENTITY_ERROR_CODES] }),
       displayName: sensitive(stringSchema({ minLength: 1, maxLength: 4096 }), 'browser_data'),
     }, ['profileContextId', 'label']),
     requiredCapabilities: ['browser.control'],
@@ -917,10 +950,11 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         title: sensitive(stringSchema({ maxLength: 4096 }), 'browser_data'),
         url: boundedUrl,
         active: booleanSchema(),
+        selected: booleanSchema(),
         origin: stringSchema({ enum: ['managed', 'managed_popup', 'user_tab'] }),
         managedTabSetId: opaqueIdSchema,
         controlState: stringSchema({ enum: ['available', 'controlled', 'busy'] }),
-      }, ['targetId', 'title', 'url', 'active', 'origin', 'controlState'])),
+      }, ['targetId', 'title', 'url', 'origin', 'controlState'])),
     }, ['targets']),
     requiredCapabilities: ['browser.control'],
     mutating: false,
@@ -932,7 +966,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tool({
     name: 'browser.tabs.switch',
     title: 'Switch tab',
-    description: 'Set a managed or user tab as the active controlled target for the current Lease.',
+    description: 'Select a managed or user tab as the controlled target for the current Lease.',
     context: 'workspace',
     inputSchema: objectSchema({ targetId: opaqueIdSchema }, ['targetId']),
     outputSchema: resultSchema('target'),
@@ -1265,12 +1299,21 @@ const PROTOCOL_1_2_TOOLS = new Set([
   'browser.profiles.list',
   'browser.profiles.select',
 ]);
+const PROTOCOL_1_3_TOOLS = new Set([
+  'browser.profiles.identify',
+]);
+
+export function minimumProtocolMinorForTool(name: string): number {
+  if (PROTOCOL_1_3_TOOLS.has(name)) return 3;
+  if (PROTOCOL_1_2_TOOLS.has(name)) return 2;
+  return 0;
+}
 
 export function isToolAvailableInProtocol(
   name: string,
   protocol: ProtocolVersion,
 ): boolean {
-  return protocol.major === 1 && (protocol.minor >= 2 || !PROTOCOL_1_2_TOOLS.has(name));
+  return protocol.major === 1 && protocol.minor >= minimumProtocolMinorForTool(name);
 }
 
 function schemaSensitivities(schema: JsonSchema, result = new Set<Sensitivity>()): Set<Sensitivity> {

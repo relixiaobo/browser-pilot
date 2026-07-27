@@ -208,7 +208,7 @@ async function main() {
         candidate: {
           id: customBrowserId,
           product: browserProduct || 'Chromium',
-          profile: browserProfile,
+          userDataRoot: browserProfile,
           processState: initialWsUrl ? 'running' : 'unknown',
           remoteDebuggingState: initialWsUrl ? 'enabled' : 'disabled',
           authorizationState: initialWsUrl ? 'authorized' : 'not_applicable',
@@ -244,7 +244,7 @@ async function main() {
       : {
         id: browserId,
         product: browserProduct || 'Unavailable browser',
-        profile: browserProfile,
+        userDataRoot: browserProfile,
         processState: initialWsUrl ? 'running' : 'unknown',
         remoteDebuggingState: initialWsUrl ? 'enabled' : 'disabled',
         authorizationState: initialWsUrl ? 'authorized' : 'not_applicable',
@@ -253,7 +253,7 @@ async function main() {
     instance: {
       id: browserInstanceId,
       product: selectedProduct || 'Unavailable browser',
-      profilePath: selectedProfile,
+      userDataRoot: selectedProfile,
       processIdentity: initialWsUrl ?? '',
       connectionGeneration: initialWsUrl ? 1 : 0,
       state: initialWsUrl ? 'connected' : 'disconnected',
@@ -299,7 +299,7 @@ async function main() {
       instance: {
         id: instanceId,
         product: discovered.candidate.product,
-        profilePath: discovered.dataDir,
+        userDataRoot: discovered.dataDir,
         processIdentity: '',
         connectionGeneration: 0,
         state: 'disconnected',
@@ -355,7 +355,7 @@ async function main() {
 
     const attempt = (async (): Promise<void> => {
       const chrome = discoverChromeAtDataDir(
-        controller.binding.instance.profilePath,
+        controller.binding.instance.userDataRoot,
         controller.binding.instance.product,
       );
       if (!chrome) {
@@ -599,7 +599,7 @@ async function main() {
             id: browserBinding.candidate.id,
             product: selectedProduct,
             ...(browserBinding.candidate.channel ? { channel: browserBinding.candidate.channel } : {}),
-            profile: selectedProfile,
+            userDataRoot: selectedProfile,
             state: browserBinding.instance.state,
             connectionGeneration: browserBinding.instance.connectionGeneration,
           } } : {}),
@@ -754,13 +754,13 @@ async function main() {
             });
           }
           const clients = broker.lifecycleSummary();
-          if (clients.embeddedConnections > 0) {
-            throw new BrowserPilotError('broker_in_use', 'Browser Pilot has live embedded clients and cannot be stopped', {
+          if (clients.embeddedConnections > 0 || clients.activeLeases > 0) {
+            throw new BrowserPilotError('broker_in_use', 'Browser Pilot has other live clients and cannot be stopped', {
               retryable: true,
               context: clients,
               remediation: {
-                code: 'close_embedded_clients',
-                message: 'Close the Agent products using Browser Pilot, then retry disconnect.',
+                code: 'close_active_clients',
+                message: 'Close the other Agent clients using Browser Pilot, then retry disconnect.',
                 actionRequired: true,
               },
             });

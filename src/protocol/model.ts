@@ -35,6 +35,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [
   { major: 1, minor: 0 },
   { major: 1, minor: 1 },
   { major: 1, minor: 2 },
+  { major: 1, minor: 3 },
 ] as const satisfies readonly ProtocolVersion[];
 
 export const CAPABILITIES = [
@@ -99,6 +100,8 @@ export interface BrowserCandidate {
   id: string;
   product: string;
   channel?: string;
+  userDataRoot?: string;
+  /** @deprecated Protocol 1.0-1.2 alias for userDataRoot. */
   profile?: string;
   processState: BrowserProcessState;
   remoteDebuggingState: BrowserRemoteDebuggingState;
@@ -273,17 +276,33 @@ export interface ClientConnection {
 export interface BrowserInstance {
   id: BrowserInstanceId;
   product: string;
-  profilePath: string;
+  userDataRoot: string;
   processIdentity: string;
   connectionGeneration: number;
   state: 'connected' | 'disconnected' | 'reconnecting';
 }
+
+export const PROFILE_IDENTITY_ERROR_CODES = [
+  'profile_path_unavailable',
+  'profile_path_unverified',
+  'local_state_unavailable',
+  'profile_metadata_missing',
+] as const;
+
+export type ProfileIdentityErrorCode = (typeof PROFILE_IDENTITY_ERROR_CODES)[number];
 
 export interface ProfileContext {
   id: ProfileContextId;
   browserInstanceId: BrowserInstanceId;
   browserConnectionGeneration: number;
   label: string;
+  identityStatus: 'unidentified' | 'verified' | 'unavailable';
+  profileName?: string;
+  accountName?: string;
+  accountEmail?: string;
+  profileDirectory?: string;
+  identityErrorCode?: ProfileIdentityErrorCode;
+  /** @deprecated Protocol 1.2 alias for profileName. */
   displayName?: string;
   tabCount: number;
   eligibleTabCount: number;

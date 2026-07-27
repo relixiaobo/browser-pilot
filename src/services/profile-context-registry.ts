@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import type {
   BrowserInstanceId,
+  ProfileIdentityErrorCode,
   ProfileContext,
   ProfileContextId,
 } from '../protocol/model.js';
@@ -27,6 +28,13 @@ export interface ProfileContextRecord extends ProfileContext {
   targets: ProfileTargetSnapshot[];
   sequence: number;
   active: boolean;
+}
+
+export interface VerifiedProfileIdentity {
+  profileName: string;
+  accountName?: string;
+  accountEmail?: string;
+  profileDirectory: string;
 }
 
 export interface ProfileContextRegistryOptions {
@@ -111,6 +119,7 @@ export class MemoryProfileContextRegistry {
           browserInstanceId: this.browserInstanceId,
           browserConnectionGeneration,
           label: `Profile ${++this.nextSequence}`,
+          identityStatus: 'unidentified',
           tabCount: 0,
           eligibleTabCount: 0,
           sequence: this.nextSequence,
@@ -184,6 +193,40 @@ export class MemoryProfileContextRegistry {
     return cloneRecord(record);
   }
 
+  setVerifiedIdentity(
+    profileContextId: ProfileContextId,
+    browserConnectionGeneration: number,
+    identity: VerifiedProfileIdentity,
+  ): ProfileContextRecord {
+    const record = this.currentRecord(profileContextId, browserConnectionGeneration);
+    record.identityStatus = 'verified';
+    record.profileName = identity.profileName;
+    record.displayName = identity.profileName;
+    record.profileDirectory = identity.profileDirectory;
+    if (identity.accountName) record.accountName = identity.accountName;
+    else delete record.accountName;
+    if (identity.accountEmail) record.accountEmail = identity.accountEmail;
+    else delete record.accountEmail;
+    delete record.identityErrorCode;
+    return cloneRecord(record);
+  }
+
+  setIdentityUnavailable(
+    profileContextId: ProfileContextId,
+    browserConnectionGeneration: number,
+    identityErrorCode: ProfileIdentityErrorCode,
+  ): ProfileContextRecord {
+    const record = this.currentRecord(profileContextId, browserConnectionGeneration);
+    record.identityStatus = 'unavailable';
+    record.identityErrorCode = identityErrorCode;
+    delete record.profileName;
+    delete record.displayName;
+    delete record.profileDirectory;
+    delete record.accountName;
+    delete record.accountEmail;
+    return cloneRecord(record);
+  }
+
   forTarget(
     cdpTargetId: string,
     browserConnectionGeneration: number,
@@ -215,6 +258,14 @@ export class MemoryProfileContextRegistry {
     }
     this.currentByKey.clear();
     this.contextByTarget.clear();
+  }
+
+  private currentRecord(
+    profileContextId: ProfileContextId,
+    browserConnectionGeneration: number,
+  ): ProfileContextRecord {
+    this.resolve(profileContextId, browserConnectionGeneration);
+    return this.recordsById.get(profileContextId)!;
   }
 
   private pruneStaleRecords(): void {

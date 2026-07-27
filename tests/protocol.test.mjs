@@ -144,18 +144,22 @@ test('canonical tool manifest is internally consistent and capability-filtered',
   assert.equal(TOOL_DEFINITIONS.some(tool => tool.name.startsWith('browser.access.')), false);
 });
 
-test('protocol 1.2 exposes Profile routing while older manifests remain compatible', () => {
+test('protocol 1.3 adds explicit Profile identity while 1.2 routing remains compatible', () => {
   const capabilities = ['browser.control', 'observation.read'];
   const protocol11 = getToolManifest(capabilities, undefined, { major: 1, minor: 1 });
   const protocol12 = getToolManifest(capabilities, undefined, { major: 1, minor: 2 });
+  const protocol13 = getToolManifest(capabilities, undefined, { major: 1, minor: 3 });
   const names11 = protocol11.tools.map(tool => tool.name);
   const names12 = protocol12.tools.map(tool => tool.name);
+  const names13 = protocol13.tools.map(tool => tool.name);
 
   assert.equal(names11.includes('browser.profiles.list'), false);
   assert.equal(names11.includes('browser.profiles.select'), false);
   assert.equal(names11.includes('browser.open'), true);
   assert.equal(names12.includes('browser.profiles.list'), true);
   assert.equal(names12.includes('browser.profiles.select'), true);
+  assert.equal(names12.includes('browser.profiles.identify'), false);
+  assert.equal(names13.includes('browser.profiles.identify'), true);
 
   assert.deepEqual(validateToolArguments('browser.profiles.select', {
     profileContextId: 'profile-context:current',
@@ -170,6 +174,13 @@ test('protocol 1.2 exposes Profile routing while older manifests remain compatib
     url: 'https://example.com/task',
     newTarget: true,
     profileContextId: 'profile-context:current',
+  });
+  assert.deepEqual(validateToolArguments('browser.profiles.identify', {
+    profileContextId: 'profile-context:current',
+    refresh: true,
+  }), {
+    profileContextId: 'profile-context:current',
+    refresh: true,
   });
 
   const profilesResult = {
@@ -193,6 +204,30 @@ test('protocol 1.2 exposes Profile routing while older manifests remain compatib
     validateToolResult('browser.profiles.list', profilesResult),
     profilesResult,
   );
+  const identifiedResult = {
+    ...profilesResult,
+    profiles: [{
+      ...profilesResult.profiles[0],
+      displayName: undefined,
+      identityStatus: 'verified',
+      profileName: 'Work Account',
+      accountName: 'Alice Example',
+      accountEmail: 'alice@example.test',
+      profileDirectory: 'Default',
+    }],
+  };
+  delete identifiedResult.profiles[0].displayName;
+  assert.deepEqual(
+    validateToolResult('browser.profiles.identify', identifiedResult),
+    identifiedResult,
+  );
+  assert.throws(
+    () => validateToolResult('browser.profiles.identify', {
+      ...identifiedResult,
+      profiles: [{ ...identifiedResult.profiles[0], identityErrorCode: 'guessed_profile' }],
+    }),
+    error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+  );
   assert.throws(
     () => validateToolResult('browser.profiles.list', {
       ...profilesResult,
@@ -200,6 +235,36 @@ test('protocol 1.2 exposes Profile routing while older manifests remain compatib
     }),
     error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
   );
+});
+
+test('protocol 1.3 browser and tab vocabulary is structured and unambiguous', () => {
+  const discovery = {
+    browsers: [{
+      id: 'browser:chrome',
+      product: 'Chrome',
+      userDataRoot: '/profiles/chrome',
+      processState: 'running',
+      remoteDebuggingState: 'enabled',
+      authorizationState: 'authorized',
+      state: 'ready',
+    }],
+  };
+  assert.deepEqual(validateToolResult('browser.discover', discovery), discovery);
+
+  const tabs = {
+    workspaceId: 'workspace:123',
+    leaseId: 'lease:123',
+    targets: [{
+      targetId: 'target:user-1',
+      profileContextId: 'profile-context:current',
+      title: 'Form',
+      url: 'https://example.com/form',
+      selected: true,
+      origin: 'user_tab',
+      controlState: 'controlled',
+    }],
+  };
+  assert.deepEqual(validateToolResult('browser.tabs.list', tabs), tabs);
 });
 
 test('canonical schemas propagate field-level sensitivity without changing values', () => {

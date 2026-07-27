@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DaemonClient, isDaemonRunning } from './client.js';
 import { connectDaemon } from './session.js';
 import { createExecutableMetadataSync } from './broker-locator.js';
@@ -38,7 +38,8 @@ export interface CompatibilityTarget {
   profileContextId: ProfileContextId;
   title: string;
   url: string;
-  active: boolean;
+  active?: boolean;
+  selected?: boolean;
   origin: 'managed' | 'managed_popup' | 'user_tab';
   managedTabSetId?: string;
   controlState: 'available' | 'controlled' | 'busy';
@@ -48,6 +49,12 @@ export interface CompatibilityProfile {
   profileContextId: ProfileContextId;
   label: string;
   displayName?: string;
+  identityStatus?: 'unidentified' | 'verified' | 'unavailable';
+  profileName?: string;
+  accountName?: string;
+  accountEmail?: string;
+  profileDirectory?: string;
+  identityErrorCode?: string;
   tabCount: number;
   eligibleTabCount: number;
   selected: boolean;
@@ -56,6 +63,24 @@ export interface CompatibilityProfile {
     title: string;
     url: string;
   }>;
+}
+
+function compatibilityIdentity(clientKey: string): {
+  bridgeSessionId: string;
+  instanceId: string;
+} {
+  if (clientKey === CLIENT_KEY) {
+    return { bridgeSessionId: BRIDGE_SESSION_ID, instanceId: 'local:one-shot' };
+  }
+  const digest = createHash('sha256').update(clientKey).digest('base64url').slice(0, 24);
+  return {
+    bridgeSessionId: `bridge:browser-pilot-cli:${digest}`,
+    instanceId: `local:one-shot:${digest}`,
+  };
+}
+
+function isSelected(target: CompatibilityTarget): boolean {
+  return target.selected ?? target.active === true;
 }
 
 function asRecord(value: JsonValue, label: string): Record<string, JsonValue> {
@@ -79,6 +104,7 @@ export class CompatibilityBrokerClient {
 
   private constructor(
     private readonly transport: BrokerRpcTransport,
+    private readonly bridgeSessionId: string,
     readonly initialized: InitializeResult,
     readonly workspace: BrowserWorkspace,
     readonly lease: ControlLease,
@@ -87,15 +113,17 @@ export class CompatibilityBrokerClient {
   static async create(
     transport: BrokerRpcTransport,
     executableVersion: string,
+    clientKey = CLIENT_KEY,
   ): Promise<CompatibilityBrokerClient> {
-    const initialized = asRecord(await transport.brokerCall(BRIDGE_SESSION_ID, 'initialize', {
+    const identity = compatibilityIdentity(clientKey);
+    const initialized = asRecord(await transport.brokerCall(identity.bridgeSessionId, 'initialize', {
       client: {
         id: 'org.browser-pilot.cli',
         name: 'Browser Pilot CLI',
         version: executableVersion,
-        instanceId: 'local:one-shot',
+        instanceId: identity.instanceId,
       },
-      protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 2 } },
+      protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 3 } },
       requestedCapabilities: [...CAPABILITIES],
       launchMode: 'one-shot',
     }), 'initialize') as unknown as InitializeResult;
@@ -108,15 +136,21 @@ export class CompatibilityBrokerClient {
         },
       });
     }
-    const created = asRecord(await transport.brokerCall(BRIDGE_SESSION_ID, 'workspaces/create', {
-      clientKey: CLIENT_KEY,
+    const created = asRecord(await transport.brokerCall(identity.bridgeSessionId, 'workspaces/create', {
+      clientKey,
     }), 'workspaces/create') as unknown as WorkspaceCreateResult;
-    const leased = asRecord(await transport.brokerCall(BRIDGE_SESSION_ID, 'leases/create', {
+    const leased = asRecord(await transport.brokerCall(identity.bridgeSessionId, 'leases/create', {
       workspaceId: created.workspace.id,
-      clientKey: CLIENT_KEY,
+      clientKey,
       ttlMs: LEASE_TTL_MS,
     }), 'leases/create') as unknown as LeaseCreateResult;
-    return new CompatibilityBrokerClient(transport, initialized, created.workspace, leased.lease);
+    return new CompatibilityBrokerClient(
+      transport,
+      identity.bridgeSessionId,
+      initialized,
+      created.workspace,
+      leased.lease,
+    );
   }
 
   async callTool(
@@ -125,7 +159,7 @@ export class CompatibilityBrokerClient {
     targetId?: ControlledTargetId,
   ): Promise<Record<string, JsonValue>> {
     this.commandSequence += 1;
-    return commandResult(await this.transport.brokerCall(BRIDGE_SESSION_ID, 'tools/call', {
+    return commandResult(await this.transport.brokerCall(this.bridgeSessionId, 'tools/call', {
       name,
       arguments: args,
       workspaceId: this.workspace.id,
@@ -170,6 +204,20 @@ export class CompatibilityBrokerClient {
     return result.profiles as unknown as CompatibilityProfile[];
   }
 
+  async identifyProfiles(
+    profileContextId?: ProfileContextId,
+    refresh = false,
+  ): Promise<CompatibilityProfile[]> {
+    const result = await this.callTool('browser.profiles.identify', {
+      ...(profileContextId ? { profileContextId } : {}),
+      ...(refresh ? { refresh: true } : {}),
+    });
+    if (!Array.isArray(result.profiles)) {
+      throw new BrowserPilotError('internal_error', 'browser.profiles.identify returned invalid Profiles');
+    }
+    return result.profiles as unknown as CompatibilityProfile[];
+  }
+
   async selectProfile(profileContextId: ProfileContextId): Promise<CompatibilityProfile> {
     const result = await this.callTool('browser.profiles.select', { profileContextId });
     const profiles = await this.listProfiles();
@@ -184,12 +232,12 @@ export class CompatibilityBrokerClient {
 
   async ensureTarget(): Promise<CompatibilityTarget> {
     const targets = await this.listTabs('all');
-    const selected = targets.find(target => target.active) ??
+    const selected = targets.find(isSelected) ??
       targets.find(target => target.origin !== 'user_tab');
     if (selected) {
-      if (!selected.active) {
+      if (!isSelected(selected)) {
         await this.callTool('browser.tabs.switch', { targetId: selected.targetId });
-        selected.active = true;
+        selected.selected = true;
       }
       return selected;
     }
@@ -198,11 +246,11 @@ export class CompatibilityBrokerClient {
 
   async ensureManagedTarget(): Promise<CompatibilityTarget> {
     const targets = await this.listTabs('managed_only');
-    const selected = targets.find(target => target.active) ?? targets[0];
+    const selected = targets.find(isSelected) ?? targets[0];
     if (selected) {
-      if (!selected.active) {
+      if (!isSelected(selected)) {
         await this.callTool('browser.tabs.switch', { targetId: selected.targetId });
-        selected.active = true;
+        selected.selected = true;
       }
       return selected;
     }
@@ -220,7 +268,7 @@ export class CompatibilityBrokerClient {
       profileContextId: opened.profileContextId as ProfileContextId,
       title: String(opened.title ?? ''),
       url: String(opened.url),
-      active: true,
+      selected: true,
       origin: 'managed',
       controlState: 'controlled',
     };
@@ -235,7 +283,7 @@ export class CompatibilityBrokerClient {
   }
 
   async importArtifact(path: string, mimeType?: string): Promise<ArtifactDescriptor> {
-    const result = asRecord(await this.transport.brokerCall(BRIDGE_SESSION_ID, 'artifacts/import', {
+    const result = asRecord(await this.transport.brokerCall(this.bridgeSessionId, 'artifacts/import', {
       workspaceId: this.workspace.id,
       leaseId: this.lease.id,
       path,
@@ -245,7 +293,7 @@ export class CompatibilityBrokerClient {
   }
 
   async exportArtifact(artifactId: string, path: string): Promise<void> {
-    await this.transport.brokerCall(BRIDGE_SESSION_ID, 'artifacts/export', {
+    await this.transport.brokerCall(this.bridgeSessionId, 'artifacts/export', {
       workspaceId: this.workspace.id,
       leaseId: this.lease.id,
       artifactId,
@@ -255,7 +303,7 @@ export class CompatibilityBrokerClient {
   }
 
   async releaseArtifact(artifactId: string): Promise<void> {
-    await this.transport.brokerCall(BRIDGE_SESSION_ID, 'artifacts/release', {
+    await this.transport.brokerCall(this.bridgeSessionId, 'artifacts/release', {
       workspaceId: this.workspace.id,
       leaseId: this.lease.id,
       artifactId,
@@ -263,7 +311,7 @@ export class CompatibilityBrokerClient {
   }
 
   async releaseWorkspace(): Promise<void> {
-    await this.transport.brokerCall(BRIDGE_SESSION_ID, 'workspaces/release', {
+    await this.transport.brokerCall(this.bridgeSessionId, 'workspaces/release', {
       workspaceId: this.workspace.id,
     });
   }
@@ -316,20 +364,22 @@ async function validateCompatibilityDaemon(
 export async function connectCompatibility(
   executableVersion: string,
   browserFilter?: string,
+  clientKey = CLIENT_KEY,
 ): Promise<CompatibilityBrokerClient> {
   const daemon = await connectDaemon(browserFilter);
   await validateCompatibilityDaemon(daemon, executableVersion);
-  return CompatibilityBrokerClient.create(daemon, executableVersion);
+  return CompatibilityBrokerClient.create(daemon, executableVersion, clientKey);
 }
 
 export async function resumeCompatibility(
   executableVersion: string,
+  clientKey = CLIENT_KEY,
 ): Promise<CompatibilityBrokerClient | null> {
   if (!isDaemonRunning()) return null;
   const daemon = new DaemonClient();
   try {
     await validateCompatibilityDaemon(daemon, executableVersion);
-    return await CompatibilityBrokerClient.create(daemon, executableVersion);
+    return await CompatibilityBrokerClient.create(daemon, executableVersion, clientKey);
   } catch (error) {
     if (error instanceof BrowserPilotError && error.code === 'protocol_incompatible') throw error;
     return null;
@@ -339,14 +389,18 @@ export async function resumeCompatibility(
 export async function withCompatibilityTarget<T>(
   executableVersion: string,
   operation: (client: CompatibilityBrokerClient, target: CompatibilityTarget) => Promise<T>,
+  clientKey = CLIENT_KEY,
 ): Promise<T> {
-  const client = await resumeCompatibility(executableVersion);
+  const client = await resumeCompatibility(executableVersion, clientKey);
   if (!client) throw new Error('Not connected');
   const target = await client.ensureTarget();
   return operation(client, target);
 }
 
-export async function shutdownCompatibility(executableVersion: string): Promise<void> {
+export async function shutdownCompatibility(
+  executableVersion: string,
+  clientKey = CLIENT_KEY,
+): Promise<void> {
   if (!isDaemonRunning()) return;
   const daemon = new DaemonClient();
   await validateDaemon(daemon);
@@ -386,11 +440,15 @@ export async function shutdownCompatibility(executableVersion: string): Promise<
     });
   }
   try {
-    const client = await CompatibilityBrokerClient.create(daemon, executableVersion);
+    const client = await CompatibilityBrokerClient.create(daemon, executableVersion, clientKey);
     await client.releaseWorkspace();
   } catch (error) {
     // With no ready browser there cannot be a compatibility Workspace to release.
     if (!(error instanceof BrowserPilotError) || error.code !== 'browser_not_found') throw error;
+  }
+  const afterRelease = await daemon.healthInfo();
+  if ((afterRelease.clients?.embeddedConnections ?? 0) > 0 || (afterRelease.clients?.activeLeases ?? 0) > 0) {
+    return;
   }
   await daemon.shutdown({
     brokerProcessIdentity: health.brokerProcessIdentity,

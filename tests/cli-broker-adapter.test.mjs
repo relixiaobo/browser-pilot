@@ -49,7 +49,9 @@ async function startFakeDaemon(root) {
   const socketPath = join(stateDirectory, 'daemon.sock');
   const calls = [];
   let selectedProfileContextId;
+  let profilesIdentified = false;
   let managedClosed = false;
+  let preserveSelectedManagedAfterClose = false;
   await mkdir(stateDirectory, { recursive: true });
   await writeFile(join(stateDirectory, 'daemon.pid'), String(process.pid));
 
@@ -61,7 +63,7 @@ async function startFakeDaemon(root) {
             id: 'browser:fake',
             product: 'Chrome',
             channel: 'stable',
-            profile: '/profiles/fake',
+            userDataRoot: '/profiles/fake',
             processState: 'running',
             remoteDebuggingState: 'enabled',
             authorizationState: 'authorized',
@@ -76,12 +78,21 @@ async function startFakeDaemon(root) {
           connectionGeneration: 1,
           state: 'connected',
         };
+      case 'browser.profiles.identify':
+        profilesIdentified = true;
+        // Fall through so identify and list share one daemon-memory cache.
       case 'browser.profiles.list': {
         const profiles = [
           {
             profileContextId: 'profile-context:work',
             label: 'Profile 1',
-            displayName: 'Work',
+            identityStatus: profilesIdentified ? 'verified' : 'unidentified',
+            ...(profilesIdentified ? {
+              profileName: 'Work Account',
+              accountName: 'Alice Example',
+              accountEmail: 'alice@work.example.test',
+              profileDirectory: 'Default',
+            } : {}),
             tabCount: 2,
             eligibleTabCount: 2,
             selected: selectedProfileContextId === 'profile-context:work',
@@ -94,7 +105,13 @@ async function startFakeDaemon(root) {
           {
             profileContextId: 'profile-context:personal',
             label: 'Profile 2',
-            displayName: 'Personal',
+            identityStatus: profilesIdentified ? 'verified' : 'unidentified',
+            ...(profilesIdentified ? {
+              profileName: 'Personal Account',
+              accountName: 'Alice',
+              accountEmail: 'alice@personal.example.test',
+              profileDirectory: 'Profile 1',
+            } : {}),
             tabCount: 1,
             eligibleTabCount: 1,
             selected: selectedProfileContextId === 'profile-context:personal',
@@ -110,8 +127,14 @@ async function startFakeDaemon(root) {
       case 'browser.profiles.select': {
         selectedProfileContextId = args.profileContextId;
         const selected = selectedProfileContextId === 'profile-context:personal'
-          ? { label: 'Profile 2', displayName: 'Personal' }
-          : { label: 'Profile 1', displayName: 'Work' };
+          ? {
+              label: 'Profile 2', identityStatus: 'verified', profileName: 'Personal Account',
+              accountName: 'Alice', accountEmail: 'alice@personal.example.test', profileDirectory: 'Profile 1',
+            }
+          : {
+              label: 'Profile 1', identityStatus: 'verified', profileName: 'Work Account',
+              accountName: 'Alice Example', accountEmail: 'alice@work.example.test', profileDirectory: 'Default',
+            };
         return {
           workspaceId: 'workspace:cli',
           leaseId: 'lease:cli',
@@ -131,7 +154,17 @@ async function startFakeDaemon(root) {
           profileContextId: 'profile-context:work',
           title: 'Example Form',
           url: 'https://example.test/form',
-          active: true,
+          selected: true,
+          origin: 'managed',
+          managedTabSetId: 'managed-tab-set:cli',
+          controlState: 'controlled',
+        };
+        const selectedManagedSurvivor = {
+          targetId: 'target:managed-survivor',
+          profileContextId: 'profile-context:work',
+          title: 'Selected Survivor',
+          url: 'https://example.test/survivor',
+          selected: true,
           origin: 'managed',
           managedTabSetId: 'managed-tab-set:cli',
           controlState: 'controlled',
@@ -141,7 +174,7 @@ async function startFakeDaemon(root) {
           profileContextId: 'profile-context:work',
           title: 'User Page',
           url: 'https://example.test/user',
-          active: false,
+          selected: false,
           origin: 'user_tab',
           controlState: 'available',
         };
@@ -149,8 +182,12 @@ async function startFakeDaemon(root) {
           workspaceId: 'workspace:cli',
           leaseId: 'lease:cli',
           targets: args.scope === 'managed_only'
-            ? (managedClosed ? [] : [managedTarget])
-            : (managedClosed ? [userTarget] : [managedTarget]),
+            ? (managedClosed
+                ? (preserveSelectedManagedAfterClose ? [selectedManagedSurvivor] : [])
+                : [managedTarget])
+            : (managedClosed
+                ? (preserveSelectedManagedAfterClose ? [selectedManagedSurvivor, userTarget] : [userTarget])
+                : [managedTarget]),
         };
       }
       case 'browser.tabs.close':
@@ -266,7 +303,7 @@ async function startFakeDaemon(root) {
         return {
           serviceVersion: PACKAGE_VERSION,
           executableVersion: PACKAGE_VERSION,
-          protocol: { major: 1, minor: 2 },
+          protocol: { major: 1, minor: 3 },
           supportedCapabilities: [],
           capabilities: { granted: [], unsupported: [] },
           brokerProcessIdentity: 'broker:fake',
@@ -285,7 +322,7 @@ async function startFakeDaemon(root) {
             id: 'workspace:cli',
             principalId: 'principal:cli',
             browserInstanceId: 'browser-instance:fake',
-            clientKey: 'browser-pilot-cli',
+            clientKey: body.params.clientKey,
             createdAt: 1,
             updatedAt: 1,
             state: 'active',
@@ -299,7 +336,7 @@ async function startFakeDaemon(root) {
             id: 'lease:cli',
             workspaceId: 'workspace:cli',
             connectionId: 'connection:cli',
-            clientKey: 'browser-pilot-cli',
+            clientKey: body.params.clientKey,
             capabilities: [],
             createdAt: 1,
             lastHeartbeatAt: 1,
@@ -331,7 +368,7 @@ async function startFakeDaemon(root) {
         response.end(JSON.stringify({
           ok: true,
           brokerProtocol: 1,
-          browser: { product: 'Chrome', profile: '/profiles/fake', state: 'connected' },
+          browser: { product: 'Chrome', userDataRoot: '/profiles/fake', state: 'connected' },
         }));
         return;
       }
@@ -357,17 +394,72 @@ async function startFakeDaemon(root) {
   return {
     server,
     calls,
-    resetTabs() { managedClosed = false; },
+    resetTabs(options = {}) {
+      managedClosed = false;
+      preserveSelectedManagedAfterClose = options.preserveSelectedManagedAfterClose === true;
+    },
   };
 }
 
-async function runCli(home, args) {
+async function runCli(home, args, extraEnv = {}) {
   const { stdout } = await execFile(process.execPath, [CLI, ...args], {
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, HOME: home, ...extraEnv },
     timeout: 10_000,
   });
   return JSON.parse(stdout.trim());
 }
+
+async function runCliFailure(home, args, extraEnv = {}) {
+  try {
+    await execFile(process.execPath, [CLI, ...args], {
+      env: { ...process.env, HOME: home, BROWSER_PILOT_HOME: join(home, 'state'), ...extraEnv },
+      timeout: 10_000,
+    });
+  } catch (error) {
+    return {
+      exitCode: error.code,
+      stdout: String(error.stdout),
+      stderr: String(error.stderr),
+      output: error.stdout ? JSON.parse(String(error.stdout).trim()) : undefined,
+    };
+  }
+  assert.fail(`Expected bp ${args.join(' ')} to fail`);
+}
+
+test('one-shot CLI exposes stable machine errors for parser, input, and connection failures', async t => {
+  const root = await mkdtemp('/tmp/bp-cli-errors-');
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const cases = [
+    { args: ['unknown-command'], code: 'invalid_argument', parserCode: 'commander.unknownCommand' },
+    { args: ['open'], code: 'invalid_argument', parserCode: 'commander.missingArgument' },
+    { args: ['--unknown-option'], code: 'invalid_argument', parserCode: 'commander.unknownOption' },
+    { args: ['snapshot', '--limit', 'nope'], code: 'invalid_argument', field: 'limit' },
+    { args: ['click', '--xy', '1,'], code: 'invalid_argument', field: 'xy' },
+    { args: ['click', '--xy', '1,2,3'], code: 'invalid_argument', field: 'xy' },
+    { args: ['click', 'nope'], code: 'invalid_argument', field: 'ref' },
+    { args: ['click', '1', '--xy', '1,2'], code: 'invalid_argument', field: 'target' },
+    { args: ['type', 'nope', 'text'], code: 'invalid_argument', field: 'ref' },
+    { args: ['tabs'], code: 'browser_disconnected', retryable: true },
+  ];
+
+  for (const expected of cases) {
+    const result = await runCliFailure(root, expected.args);
+    assert.equal(result.exitCode, 1, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.equal(result.output.ok, false);
+    assert.equal(result.output.code, expected.code);
+    assert.equal(typeof result.output.error, 'string');
+    assert.equal(result.output.retryable, expected.retryable ?? false);
+    if (expected.parserCode) assert.equal(result.output.context.parserCode, expected.parserCode);
+    if (expected.field) assert.equal(result.output.context.field, expected.field);
+  }
+
+  const human = await runCliFailure(root, ['--human', 'open']);
+  assert.equal(human.exitCode, 1);
+  assert.equal(human.stdout, '');
+  assert.match(human.stderr, /missing required argument 'url'/);
+});
 
 test('one-shot CLI uses only canonical Broker and Artifact operations', async t => {
   const root = await mkdtemp('/tmp/bp-cli-');
@@ -383,6 +475,8 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
 
   const browsers = await runCli(root, ['browsers']);
   assert.equal(browsers.browsers[0].state, 'ready');
+  assert.equal(browsers.browsers[0].userDataRoot, '/profiles/fake');
+  assert.equal('profile' in browsers.browsers[0], false);
   assert.ok(calls.some(call => call.body?.params?.name === 'browser.discover'));
 
   const connected = await runCli(root, ['connect']);
@@ -395,20 +489,32 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
   );
 
   const profiles = await runCli(root, ['profiles']);
-  assert.deepEqual(profiles.profiles.map(profile => [profile.index, profile.displayName]), [
-    [0, 'Work'],
-    [1, 'Personal'],
+  assert.deepEqual(profiles.profiles.map(profile => [profile.index, profile.identityStatus]), [
+    [1, 'unidentified'],
+    [2, 'unidentified'],
   ]);
 
-  const selectedProfile = await runCli(root, ['profile', 'Personal']);
+  const identifiedProfiles = await runCli(root, ['profiles', '--identify']);
+  assert.deepEqual(identifiedProfiles.profiles.map(profile => [
+    profile.index,
+    profile.profileName,
+    profile.accountEmail,
+  ]), [
+    [1, 'Work Account', 'alice@work.example.test'],
+    [2, 'Personal Account', 'alice@personal.example.test'],
+  ]);
+  assert.ok(calls.some(call => call.body?.params?.name === 'browser.profiles.identify'));
+
+  const selectedProfile = await runCli(root, ['profile', 'alice@personal.example.test']);
   assert.equal(selectedProfile.profileContextId, 'profile-context:personal');
+  assert.equal(selectedProfile.profileName, 'Personal Account');
   const selectedCall = calls.find(call => call.body?.params?.name === 'browser.profiles.select');
   assert.deepEqual(selectedCall.body.params.arguments, {
     profileContextId: 'profile-context:personal',
   });
 
   const opened = await runCli(root, [
-    'open', 'https://work.example.test/task', '--new', '--profile', '0', '--limit', '12',
+    'open', 'https://work.example.test/task', '--new', '--profile', '1', '--limit', '12',
   ]);
   assert.equal(opened.profileContextId, 'profile-context:work');
   const openCall = calls.find(call => call.body?.params?.name === 'browser.open');
@@ -508,17 +614,46 @@ test('one-shot CLI uses only canonical Broker and Artifact operations', async t 
     switchCount,
     'managed-only cleanup must not switch control to a user tab',
   );
-  resetTabs();
+  resetTabs({ preserveSelectedManagedAfterClose: true });
   const closedCurrent = await runCli(root, ['close']);
-  assert.equal(closedCurrent.remaining, 1);
+  assert.equal(closedCurrent.remaining, 2);
   assert.equal(
     calls.filter(call => call.body?.params?.name === 'browser.tabs.switch').length,
     switchCount,
-    'closing the current managed tab must not switch control to a user tab',
+    'closing the current tab must preserve the Broker-selected fallback',
   );
   const remaining = await runCli(root, ['tabs']);
-  assert.equal(remaining.tabs[0].origin, 'user_tab');
-  assert.equal(remaining.tabs[0].controlState, 'available');
+  const remainingUserTab = remaining.tabs.find(tab => tab.origin === 'user_tab');
+  assert.equal(remaining.tabs.find(tab => tab.origin === 'managed').selected, true);
+  assert.equal(remainingUserTab.controlState, 'available');
+  assert.equal(remainingUserTab.selected, false);
+  assert.equal('active' in remainingUserTab, false);
+
+  const namespaceStart = calls.length;
+  await runCli(root, ['tabs'], { BROWSER_PILOT_CLIENT_KEY: 'agent.alpha' });
+  await runCli(root, ['--client-key', 'agent.alpha', 'tabs']);
+  await runCli(root, ['--client-key', 'agent.beta', 'tabs']);
+  const namespaceCalls = calls.slice(namespaceStart);
+  const namespaceInitializes = namespaceCalls
+    .filter(call => call.body?.method === 'initialize')
+    .map(call => call.body.params.client.instanceId);
+  assert.equal(namespaceInitializes[0], namespaceInitializes[1]);
+  assert.notEqual(namespaceInitializes[0], namespaceInitializes[2]);
+  assert.deepEqual(
+    namespaceCalls
+      .filter(call => call.body?.method === 'workspaces/create')
+      .map(call => call.body.params.clientKey),
+    ['agent.alpha', 'agent.alpha', 'agent.beta'],
+  );
+  await assert.rejects(
+    () => runCli(root, ['--client-key', 'x', 'tabs']),
+    error => {
+      const output = JSON.parse(String(error.stdout).trim());
+      return output.ok === false &&
+        output.code === 'invalid_argument' &&
+        output.context?.field === 'clientKey';
+    },
+  );
   assert.ok(calls.some(call => (
     call.body?.method === 'leases/create' &&
     call.body.params.clientKey === 'browser-pilot-cli' &&

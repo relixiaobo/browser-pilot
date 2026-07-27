@@ -1,7 +1,7 @@
 # Profile Context Routing Plan
 
 Status: **Complete**
-Target: Browser Pilot `v0.3.0`, protocol `1.2`
+Target: Browser Pilot `v0.4.0`, protocol `1.3`
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
 
 ## Goal
@@ -53,7 +53,8 @@ It has:
 - an internal raw CDP browser-context ID, never exposed;
 - the owning BrowserInstance and connection generation;
 - a connection-scoped neutral label;
-- an optional verified display name and Profile directory;
+- connection-generation-scoped identity status plus optional verified Profile
+  name, account name/email, and Profile directory;
 - current total and eligible tab counts;
 - one or more bounded representative targets for routing and user recognition.
 
@@ -99,10 +100,31 @@ Protocol 1.2 adds:
 Profile summaries and representative eligible tabs. It never opens, navigates,
 attaches to, or focuses a target merely to discover a display name.
 
+## Protocol 1.3
+
+Protocol 1.3 adds `browser.profiles.identify` as an explicit, mutating identity
+operation. For each requested unidentified Profile it creates a temporary
+visible `chrome://version` target in that exact context, reads `#profile_path`,
+verifies that path as an immediate child of the connected browser's
+`userDataRoot`, reads bounded metadata from Chrome `Local State`, then detaches
+and proves the temporary target was closed. Failure to prove cleanup returns
+`unknown_outcome`; Browser Pilot never silently leaves an identity page behind.
+
+Results use `identityStatus: unidentified | verified | unavailable` plus
+optional `profileName`, `accountName`, `accountEmail`, `profileDirectory`, and a
+stable `identityErrorCode`. Identity is cached only for the current browser
+connection generation. `refresh: true` explicitly re-probes. No directory
+ordering, tab title, or raw context ID is treated as account identity.
+
+Protocol 1.3 also renames browser candidate `profile` to `userDataRoot` and tab
+inventory `active` to `selected`. The latter is the Lease's logical target, not
+Chrome foreground focus. Protocol 1.2 clients retain their legacy fields.
+
 `browser.profiles.select` accepts only a public `profileContextId`. Human CLI
-selectors such as index, neutral label, or verified display name are resolved
+selectors such as one-based index, neutral label, or verified Profile/account
+name or email are resolved
 client-side from a fresh list. The machine protocol never accepts an ambiguous
-free-form selector. Selecting a Profile clears the Lease's logical active-target
+free-form selector. Selecting a Profile clears the Lease's logical selected-target
 anchor without releasing control or changing Chrome focus, so the next new
 managed target uses that explicit Workspace selection.
 
@@ -112,7 +134,7 @@ When `browser.open` needs a new target, resolve exactly one Profile context in
 this order:
 
 1. an explicit, current-generation `profileContextId`;
-2. the current Lease's active target context;
+2. the current Lease's selected target context;
 3. the Workspace's current, valid selection;
 4. the only currently available Profile context;
 5. otherwise fail with `profile_selection_required` before browser dispatch.
@@ -161,13 +183,13 @@ candidate targets were closed.
 - Protocol 1.0/1.1 clients continue to list and control existing tabs.
 - In a single available context, their existing `browser.open` behavior remains
   automatic.
-- In multiple contexts, an active target remains an unambiguous anchor.
+- In multiple contexts, a selected target remains an unambiguous anchor.
 - With multiple contexts and no anchor, older clients receive a structured
   failure and Browser Pilot never silently chooses the first context.
 - New Profile fields on existing results are additive; raw CDP IDs remain
   private.
-- The current CLI negotiates protocol 1.2, while the Broker continues to accept
-  1.0 and 1.1.
+- The current CLI negotiates protocol 1.3, while the Broker continues to accept
+  1.0 through 1.2.
 
 ## Delivery
 
@@ -186,13 +208,16 @@ candidate targets were closed.
 - [x] All eligible user tabs across live Profile contexts appear in one inventory.
 - [x] Existing user tabs can be controlled without selecting a Profile first.
 - [x] No multi-context open silently selects a first Profile.
-- [x] Explicit, active-target, Workspace, and single-context resolution follow the
+- [x] Explicit, selected-target, Workspace, and single-context resolution follow the
   specified order.
 - [x] Every managed target and popup matches its ManagedTabSet Profile context.
 - [x] Two Workspaces may select different contexts and create targets concurrently
   without cross-routing.
 - [x] Reconnect invalidates old Profile IDs, target mappings, frames, and refs.
 - [x] Passive listing creates no target and never focuses or navigates a user tab.
+- [x] Explicit identity verifies Profile paths, returns structured account-aware
+  fields, cleans temporary targets, caches only within one connection
+  generation, and never guesses unavailable metadata.
 - [x] Janitor EOF/SIGKILL cleanup closes fallback-created managed windows but never
   user tabs.
 - [x] Protocol 1.1 clients retain existing-tab control and cannot open ambiguously.

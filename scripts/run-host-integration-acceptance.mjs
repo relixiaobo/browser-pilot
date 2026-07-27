@@ -370,8 +370,8 @@ export async function runHostIntegrationAcceptance(options) {
       [hostA, hostB] = await Promise.all([connectHost('a'), connectHost('b')]);
       const a = hostA.initializeResult;
       const b = hostB.initializeResult;
-      assertAcceptance(a.protocol?.major === 1 && a.protocol?.minor >= 2, 'Host A did not negotiate protocol 1.2');
-      assertAcceptance(b.protocol?.major === 1 && b.protocol?.minor >= 2, 'Host B did not negotiate protocol 1.2');
+      assertAcceptance(a.protocol?.major === 1 && a.protocol?.minor >= 3, 'Host A did not negotiate protocol 1.3');
+      assertAcceptance(b.protocol?.major === 1 && b.protocol?.minor >= 3, 'Host B did not negotiate protocol 1.3');
       assertAcceptance(a.brokerProcessIdentity === b.brokerProcessIdentity, 'Hosts did not reuse one Broker');
       assertAcceptance(a.connectionId !== b.connectionId, 'Hosts did not receive isolated Connections');
       assertAcceptance(a.executableVersion === b.executableVersion, 'Hosts disagree on executable version');

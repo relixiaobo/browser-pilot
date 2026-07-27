@@ -15,6 +15,26 @@ logins, cookies, and extensions remain available. Browser Pilot can list and
 control both its managed tabs and eligible tabs the user opened; it requires no
 browser extension.
 
+## Verify Compatibility
+
+Read the bundled [compatibility.json](compatibility.json). Its
+`browserPilotCli` block declares the version tested with this skill and its
+supported CLI range. Before the first Browser Pilot operation in a task, check
+both command resolution and version:
+
+```bash
+command -v bp
+bp --version
+```
+
+If `bp` is absent, install
+`browser-pilot-cli@<browserPilotCli.testedVersion>`. If the resolved version is
+outside `browserPilotCli.supportedVersionRange`, stop and use a compatible
+release; do not silently drive an incompatible global CLI. A newer version
+inside the declared range is valid. Embedded products should still pin the
+tested version for reproducible distribution.
+macOS native releases support Apple Silicon only, not Intel.
+
 ## Select the Interface
 
 - For an Agent with shell access completing a browser task now, use the
@@ -27,16 +47,9 @@ browser extension.
 
 ## Prepare
 
-Check installation without changing the machine:
-
-```bash
-command -v bp
-```
-
-If it is absent, install the official executable with
-`npm install -g browser-pilot-cli`. Chrome remote debugging must be enabled at
-`chrome://inspect/#remote-debugging`. Connect only when a command reports that
-Browser Pilot is not connected:
+Chrome remote debugging must be enabled at
+`chrome://inspect/#remote-debugging`. Connect only when a command returns
+`browser_disconnected`:
 
 ```bash
 bp connect
@@ -49,10 +62,19 @@ same pending service-side connection.
 
 One successful connection covers all live Chrome Profiles exposed by that
 browser endpoint. If `bp connect` reports multiple Profiles, do not connect
-again. Run `bp profiles`; when the intended Profile is clear from the user's
-request and representative tabs, select it with `bp profile <index>`. Otherwise
-ask the user which Profile to use. Profile selection routes new managed tabs and
-does not grant or restrict access to existing tabs.
+again. Run passive `bp profiles` first. If representative tabs do not make the
+choice clear, run `bp profiles --identify`; this explicit command briefly opens
+and closes one visible `chrome://version` page per unidentified Profile and
+returns only identity verified against Chrome's reported Profile path. Select
+with the one-based `bp profile <index>`, or ask the user when several verified
+accounts still match. Profile selection routes new managed tabs and does not
+grant or restrict access to existing tabs.
+
+When this Agent shares the one-shot CLI with other independent Agents, set a
+stable Agent-specific `BROWSER_PILOT_CLIENT_KEY` (or global `--client-key`) on
+every command. Commands with one key reuse their target, frame, refs, auth, and
+network state; different keys are isolated. Do not generate a new key per tool
+call. Embedded `bridge --stdio` hosts already receive isolated lifecycle state.
 
 ## Operate from Current State
 
@@ -62,7 +84,8 @@ does not grant or restrict access to existing tabs.
    - For independent work, prefer `bp open <url> --new` so an unrelated user tab
      is not replaced.
    - If several Profiles are live and the new tab must use a specific one, run
-     `bp profiles` and use `bp open <url> --new --profile <index|id|label>`.
+     `bp profiles` and use
+     `bp open <url> --new --profile <index|id|label|verified-name|verified-email>`.
    - Use plain `bp open <url>` only when navigating the currently selected tab
      is intended.
 2. Inspect the right representation.
@@ -107,7 +130,8 @@ does not grant or restrict access to existing tabs.
 ```bash
 bp tabs                              # all controllable managed and user tabs
 bp tab 2                             # select tab index 2
-bp profiles                          # live Chrome Profile contexts
+bp profiles                          # passive live Chrome Profile contexts
+bp profiles --identify              # verified Profile/account identity
 bp profile 1                         # route subsequent managed tabs
 bp open "https://example.com" --new  # create an independent managed tab
 bp open "https://example.com" --new --profile 1
@@ -159,6 +183,16 @@ is known, but do not replace a user-opened form or draft merely to save steps.
 Selecting a user tab makes it the current controlled tab. `bp close` explicitly
 closes the current tab even when it is user-owned; `bp close --all` closes only
 managed tabs. Do not close a tab unless the task requires it.
+
+Tab indexes are one-based. In JSON, `selected` means selected for this Agent's
+Lease; it does not mean Chrome's foreground tab or operating-system focus.
+Browser-internal and extension-owned pages are excluded from ordinary tab and
+Profile representative inventory.
+
+Chrome tab groups do not change tab eligibility: Browser Pilot can control an
+eligible grouped tab whether its group is expanded or collapsed. Without an
+extension it cannot inspect group membership or create, rename, move, collapse,
+or delete tab groups, so do not infer group state from the tab inventory.
 
 Tabs may span several live Chrome Profiles under one authorized browser
 connection. Existing tabs need no prior Profile selection. `profileContextId`
@@ -221,22 +255,39 @@ arguments for secrets when the surrounding Agent runtime supports it. Avoid
 
 ## Recover from Direct CLI Errors
 
-- Not connected: run `bp connect`, wait for authorization, then retry the read
-  or state-discovery command.
-- Profile selection required: run `bp profiles`; select from fresh results or
+Non-TTY failures always return `ok: false`, `error`, stable `code`, and
+`retryable`, with optional `context`, `remediation`, and `hint`. Branch on
+`code`, never on English text. `retryable: true` means a later call may be
+valid; it never makes an uncertain mutation safe to replay automatically.
+
+- `browser_disconnected`: run one `bp connect`, wait for authorization, then
+  relist tabs and obtain fresh state. Never start concurrent connection attempts.
+- `browser_not_authorized`: follow `remediation`; do not loop `bp connect` or
+  claim success before Chrome authorizes the request.
+- `profile_selection_required`: run `bp profiles`; select from fresh results or
   ask the user when the intended Profile is ambiguous. Do not reconnect.
-- Profile stale/unavailable: list Profiles again and follow the structured
+- `profile_context_stale` or `profile_context_unavailable`: list Profiles again
+  and follow the structured
   remediation. Do not substitute an old ID or silently choose the first entry.
-- Ref not found/stale: run `bp snapshot` and select a ref from that result.
-- Selector not found: inspect `bp snapshot` or `bp read`; correct the selector
+- Profile identity unavailable in a successful Profile result: use its neutral
+  label and representative tabs,
+  or ask the user. Never infer an account from the Profile directory or retry
+  identity without an explicit `--refresh` decision.
+- `stale_ref`: run `bp snapshot` and select a ref from that result.
+- `target_busy`: another Agent controls that physical tab. Choose another tab
+  or wait; never steal control or close the user's tab to force a handoff.
+- `action_not_verified` or `unknown_outcome`: inspect current tab state before
+  deciding whether any retry is safe.
+- `invalid_argument`: correct the reported `context.field` or invocation.
+- `internal_error`: preserve the error details and stop blind retries.
+- Selector not found in a successful/failed operation: inspect `bp snapshot` or
+  `bp read`; correct the selector
   instead of repeating it.
-- Page load timeout or uncertain action: run `bp tabs`, select the intended tab,
-  and inspect with `bp snapshot`/`bp read` before deciding whether to continue.
 - Pending dialog: run `bp dialogs` and respond explicitly.
 - Missing/closed tab or frame: list tabs/frames again and rebuild state.
 
 Never treat an English error substring as evidence that a mutation did not
-happen. Embedded hosts have stable error codes and command outcomes; see the
+happen. Embedded hosts additionally expose Command lookup and events; see the
 stdio reference for exact recovery semantics.
 
 ## Cleanup

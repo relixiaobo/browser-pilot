@@ -181,9 +181,14 @@ Chrome Profile contexts; those are not separate BrowserInstances.
 One live regular browser context inside a BrowserInstance. Its public
 `profileContextId` is opaque and scoped to the current browser connection
 generation; the raw CDP browser-context ID is internal. A ProfileContext has a
-connection-scoped neutral label, optional verified display metadata, bounded
+connection-scoped neutral label, structured identity status and optional
+verified Profile/account metadata, bounded
 representative tabs, and current tab counts. Passive discovery never opens a
-tab to infer its display name. Reconnect invalidates every ProfileContext ID.
+tab to infer Profile or account identity. Protocol 1.3 identity is an explicit visible
+operation: it reads Chrome's reported Profile path, verifies it against the
+BrowserInstance user-data root, then maps bounded Local State metadata to
+structured Profile/account fields. Reconnect invalidates every ProfileContext
+ID and cached identity.
 
 ### BrowserWorkspace
 
@@ -304,6 +309,14 @@ certificate exists, otherwise records unsigned state. Linux records unsigned
 state. Build or release automation must fail on incomplete credentials and
 must never describe an artifact as signed when signing did not run.
 
+The supported native matrix is `darwin-arm64`, `linux-x64`, and `win32-x64`;
+Intel Mac is not supported. Each release also publishes a versioned Agent
+plugin/skill archive and checksum. A deterministic release index binds those
+assets to the npm package version, exact compatible skill/CLI version, and
+runtime protocol range. GitHub Release publication waits for successful npm
+publication so consumers cannot observe a nominal release with only one half
+of that distribution contract.
+
 ### Broker Locator and Startup
 
 The executable, not an embedding Host, resolves the per-user Broker endpoint.
@@ -350,16 +363,21 @@ compatibility Workspace and Lease, then explicitly requests the browser
 connection. Other browser commands require that connection and never trigger
 authorization implicitly.
 Existing and future eligible user tabs are available immediately. The command
-returns the existing JSON shape during migration. Failures include a stable
-machine code in addition to compatible human guidance. One-shot processes use
-a fixed daemon-internal Connection, idempotently keyed Workspace, and renewable
-Lease with a maximum five-minute TTL. Normal process exit leaves that transient
+returns the existing JSON shape during migration. Every non-TTY failure,
+including command parsing and local argument validation, includes a stable
+machine code and `retryable` flag in addition to compatible human guidance.
+One-shot processes
+derive a stable Connection identity from `BROWSER_PILOT_CLIENT_KEY` or
+`--client-key`, then use an idempotently keyed Workspace and renewable Lease
+with a maximum five-minute TTL. Independent Agents use distinct stable keys;
+the default key preserves single-Agent compatibility. Normal process exit leaves that transient
 daemon-memory state available to the next command; expiry invalidates refs and
 releases target control. No target, frame, session, Observation, ref, auth, or
 network mapping is persisted to disk. `bp disconnect` explicitly releases the
 compatibility Workspace and closes only its managed targets. It stops the
-daemon only when called by the matching executable installation and no live
-embedded Connection remains; otherwise it returns `protocol_incompatible` or
+daemon only when called by the matching executable installation and no other
+active Lease or embedded Connection remains; otherwise it returns
+`protocol_incompatible` or
 `broker_in_use` without replacing or terminating the Broker. JavaScript dialogs
 remain pending and are handled explicitly with `bp dialogs` and `bp dialog`;
 Workspace isolation prevents access to other clients' dialogs.
@@ -416,15 +434,17 @@ to ManagedTabSets.
 `browser.tabs.list` inventories eligible tabs from every Profile context exposed
 by the selected BrowserInstance. Existing targets are immediately controllable
 and carry an opaque `profileContextId`. New managed work resolves a Profile from
-an explicit context, the current active target, the Workspace selection, or a
+an explicit context, the current Lease-selected target, the Workspace selection, or a
 single available context, in that order. Multiple contexts without an anchor
 return `profile_selection_required` before creating a target. The Agent host
 asks the user which Profile to use; Browser Pilot does not add an approval UI.
 
 `browser.profiles.list` is passive and returns bounded, connection-scoped
-summaries. `browser.profiles.select` updates only the owning Workspace. A Chrome
+summaries. Protocol 1.3 `browser.profiles.identify` explicitly creates and
+cleans temporary visible identity targets when account-aware identity is
+needed. `browser.profiles.select` updates only the owning Workspace. A Chrome
 reconnect invalidates old ProfileContext IDs and requires relisting and
-reselection. Selection clears only the Lease's logical active-target anchor; it
+reselection. Selection clears only the Lease's logical selected-target anchor; it
 does not release control, activate a tab, or change Chrome focus. The exact
 creation and compatibility algorithm is frozen in `docs/plans/profile-context-routing.md`.
 
@@ -484,6 +504,11 @@ selection, Profile identity on tab inventory, and context-aware managed target
 creation. Protocol 1.0/1.1 clients retain existing-target control and automatic
 single-context behavior, but an ambiguous multi-context open fails rather than
 silently selecting a Profile.
+
+Protocol 1.3 adds explicit verified Profile/account identity. Browser candidate
+results use `userDataRoot`, Profile results use structured identity status and
+fields, and tab inventory uses `selected` for the Lease-local target instead of
+the ambiguous `active`. Protocol 1.2 retains its legacy field vocabulary.
 
 ### Tool Contract
 
@@ -579,8 +604,10 @@ Artifacts. Raw CDP is never listed. `eval` requires `developer.eval`.
   opaque target ID. The Broker retires its target session and scoped state
   before a different Lease can acquire control with that Lease's own opaque ID.
   No handoff call accepts a foreign Lease or target ID.
-- **BR-7:** The Pilot window visibly identifies the controlling client without
-  injecting mutable content into the page DOM.
+- **BR-7:** Browser Pilot returns controlling-client identity in scoped
+  protocol results and events so a Host may present it in Host-owned UI. With no
+  extension, Browser Pilot does not claim it can modify Chrome's browser chrome,
+  and it never injects status borders, labels, or controls into page DOM.
 - **BR-21:** Exposing the CLI or bridge to an Agent is the product-level
   browser-control authorization boundary. Chrome's own remote-debugging
   authorization is requested only by explicit `bp connect`/`browser.connect`.
@@ -599,7 +626,9 @@ Artifacts. Raw CDP is never listed. `eval` requires `developer.eval`.
   chain rooted in the same ManagedTabSet.
 - **BR-26:** `tabs.list` returns eligible current and future tabs, tagging each
   with origin and ManagedTabSet membership. Browser Pilot internal targets,
-  DevTools, and unsupported browser-internal targets remain excluded.
+  DevTools, extension-owned pages, and unsupported browser-internal targets
+  remain excluded. Excluded extension pages do not create or represent a
+  ProfileContext.
 - **BR-27:** Bulk cleanup and `close --all` default to the ManagedTabSet. No
   bulk operation closes user tabs outside it. Each user tab requires an
   explicit target-specific close command.
@@ -607,9 +636,11 @@ Artifacts. Raw CDP is never listed. `eval` requires `developer.eval`.
   not only `Target.getBrowserContexts`. Public ProfileContext IDs never expose
   raw CDP identifiers and are invalid after browser reconnect.
 - **BR-30:** Profile listing is passive. It cannot create, attach, activate, or
-  navigate a target solely to infer a Profile name. Unverified names are
-  omitted instead of guessed.
-- **BR-31:** New-target Profile routing follows explicit context, active target,
+  navigate a target solely to infer a Profile name. Identity requires the
+  explicit protocol 1.3 operation, exact Profile-path verification, bounded
+  metadata reads, and verified cleanup. Unverified names are omitted instead
+  of guessed.
+- **BR-31:** New-target Profile routing follows explicit context, selected target,
   Workspace selection, then single available context. Multiple unanchored
   contexts fail with `profile_selection_required` before browser dispatch.
 - **BR-32:** Every ManagedTabSet is bound to at most one ProfileContext. Managed
@@ -917,7 +948,7 @@ fields, never on message text.
   `BROWSER_PILOT_HOME`; Browser Pilot never creates a hidden version namespace.
 - Broker shutdown is compare-and-stop: it requires the current Broker process
   identity and matching executable installation identity, and refuses while
-  any embedded Connection remains live.
+  any embedded Connection or active Lease remains live.
 - Additive tool and field changes use capability negotiation and schema
   evolution. Breaking semantics require a protocol-major change.
 - Unknown response fields are ignored; unknown request fields are rejected only
@@ -945,7 +976,7 @@ fields, never on message text.
 - **FR-3 Multi-client isolation:** Concurrent clients have isolated control and
   transient state.
   - **AC-3:** Two clients can operate separate Pilot windows concurrently, and
-    refs, active targets, frames, auth, rules, and close operations cannot cross
+    refs, selected targets, frames, auth, rules, and close operations cannot cross
     Workspace boundaries.
 - **FR-4 User-browser control:** An Agent can list and control all eligible
   current and future tabs in the selected BrowserInstance, including tabs the

@@ -21,8 +21,9 @@ command prefix after `--`. Do not include `bridge --stdio`; the runner adds it
 for each host process:
 
 ```bash
+BROWSER_PILOT_VERSION="$(node -p "require('./package.json').version")"
 node scripts/run-isolated-host-integration-acceptance.mjs \
-  --expected-version 0.3.0 \
+  --expected-version "$BROWSER_PILOT_VERSION" \
   -- /absolute/path/to/browser-pilot
 
 node scripts/run-isolated-host-integration-acceptance.mjs -- \
@@ -41,8 +42,9 @@ for both hosts. The indices are resolved from fresh `browser.profiles.list`
 results and passed back to the protocol as opaque Profile IDs:
 
 ```bash
+BROWSER_PILOT_VERSION="$(node -p "require('./package.json').version")"
 node scripts/run-host-integration-acceptance.mjs \
-  --expected-version 0.3.0 \
+  --expected-version "$BROWSER_PILOT_VERSION" \
   --profile 1 \
   --second-profile 2 \
   --report test-results/host-acceptance-real.json \
@@ -65,7 +67,7 @@ The versioned JSON report contains no URLs, titles, opaque IDs, page text,
 Artifact paths, or bridge diagnostics. It verifies:
 
 - two independent host Connections, Workspaces, and Leases reuse one Broker;
-- one explicit concurrent connect path and protocol 1.2 negotiation;
+- one explicit concurrent connect path and protocol 1.3 negotiation;
 - explicit Profile routing for both managed Workspaces;
 - user-tab exclusivity, `target_busy`, release, and handoff;
 - concurrent one-shot CLI use while both embedded hosts remain live;

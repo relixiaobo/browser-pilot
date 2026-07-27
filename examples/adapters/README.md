@@ -10,9 +10,10 @@ Both adapters use the same black-box process owner in
 
 - direct absolute-path launch without a shell;
 - protocol/capability negotiation and runtime tool discovery;
-- protocol 1.2 Profile discovery and selection without Agent-specific routing;
+- protocol 1.2 Profile discovery/selection plus protocol 1.3 explicit verified
+  Profile identity without Agent-specific routing;
 - Workspace/Lease creation, heartbeat, event cursors, and bounded cleanup;
-- explicit target context with no hidden active-tab state;
+- explicit target context with no hidden selected-tab state;
 - stable Command IDs and idempotency keys derived from host tool-call IDs;
 - best-effort command cancellation without replaying mutations;
 - screenshot conversion to native `{ type: "image", data, mimeType }` content;
@@ -26,7 +27,7 @@ Both adapters use the same black-box process owner in
 `tenon/browser-pilot-adapter.mjs` maps one Tenon Thread to a Browser Pilot
 Workspace and one active Turn to a renewable Lease. It projects every discovered
 Browser Pilot operation as an individual Pi-style Agent tool. Target-scoped
-tools require `controlTargetId`; the adapter never persists an active target or
+tools require `controlTargetId`; the adapter never persists a selected target or
 ref. End the Turn to release its Lease, release the Thread to close only its
 managed tabs, and close the adapter during app shutdown.
 
@@ -86,7 +87,9 @@ live Chrome Profile are immediately controllable and already carry
 multi-Profile browser with no target anchor, present `browser.profiles.list` to
 the user and pass the chosen opaque ID to `browser.profiles.select` or directly
 to `browser.open`. Never treat Profile selection as permission or persist it as
-a product-wide default.
+a product-wide default. When neutral labels and representative tabs are not
+enough, expose protocol 1.3 `browser.profiles.identify` as an ordinary explicit
+tool call and present only its verified structured Profile/account fields.
 
 The only identity intended to survive product restarts is the host's normal,
 installation-scoped `client.instanceId`. It identifies the embedding product to

@@ -52,7 +52,7 @@ test('Tenon adapter maps Thread/Turn lifecycle, target context, and native image
   const observe = tools.find(tool => tool.name === 'browser_pilot_browser_observe');
   const capture = tools.find(tool => tool.name === 'browser_pilot_browser_capture');
   assert.ok(open && profiles && observe && capture);
-  assert.deepEqual(adapter.initializeResult.protocol, { major: 1, minor: 2 });
+  assert.deepEqual(adapter.initializeResult.protocol, { major: 1, minor: 3 });
   assert.equal(observe.parameters.required.includes('controlTargetId'), true);
 
   const opened = await open.execute('call-open', { url: 'about:blank', newTarget: true });

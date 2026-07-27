@@ -123,7 +123,7 @@ async function handle(message) {
     response(id, {
       serviceVersion: '1.0.0-fixture',
       executableVersion: '1.0.0-fixture',
-      protocol: { major: 1, minor: 2 },
+      protocol: { major: 1, minor: 3 },
       supportedCapabilities: params.requestedCapabilities,
       capabilities: { granted: params.requestedCapabilities, denied: [], unsupported: [] },
       brokerProcessIdentity: 'broker:fake',
@@ -144,6 +144,7 @@ async function handle(message) {
       tools: [
         'browser.connect',
         'browser.profiles.list',
+        'browser.profiles.identify',
         'browser.profiles.select',
         'browser.open',
         'browser.observe',
@@ -224,13 +225,17 @@ async function handle(message) {
       }));
       return;
     }
-    if (params.name === 'browser.profiles.list') {
+    if (params.name === 'browser.profiles.list' || params.name === 'browser.profiles.identify') {
       response(id, toolOutcome(params.name, {
         workspaceId: ids.workspaceId,
         leaseId: ids.leaseId,
         profiles: [{
           profileContextId: ids.profileContextId,
           label: 'Profile 1',
+          identityStatus: params.name === 'browser.profiles.identify' ? 'verified' : 'unidentified',
+          ...(params.name === 'browser.profiles.identify'
+            ? { profileName: 'Fixture Profile', profileDirectory: 'Default' }
+            : {}),
           tabCount: 1,
           eligibleTabCount: 1,
           selected: true,

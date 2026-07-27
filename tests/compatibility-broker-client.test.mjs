@@ -28,7 +28,7 @@ test('one-shot compatibility clients reuse daemon-memory Workspace and Lease sta
       instance: {
         id: 'browser-instance:test',
         product: 'Chrome',
-        profilePath: '/profiles/test',
+        userDataRoot: '/profiles/test',
         processIdentity: 'process:test',
         connectionGeneration: 1,
         state: 'connected',
@@ -53,6 +53,47 @@ test('one-shot compatibility clients reuse daemon-memory Workspace and Lease sta
   });
 });
 
+test('stable CLI client keys isolate Agents while repeated calls reuse their own state', async () => {
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '0.4.0',
+    executableVersion: '0.4.0',
+    brokerProcessIdentity: 'broker:client-key-isolation',
+    browsers: [{
+      candidate: {
+        id: 'browser:test',
+        product: 'Chrome',
+        userDataRoot: '/profiles/test',
+        state: 'ready',
+      },
+      instance: {
+        id: 'browser-instance:test',
+        product: 'Chrome',
+        userDataRoot: '/profiles/test',
+        processIdentity: 'process:test',
+        connectionGeneration: 1,
+        state: 'connected',
+      },
+    }],
+  });
+  const transport = runtimeTransport(runtime);
+  const firstA = await CompatibilityBrokerClient.create(transport, '0.4.0', 'agent.alpha');
+  const secondA = await CompatibilityBrokerClient.create(transport, '0.4.0', 'agent.alpha');
+  const agentB = await CompatibilityBrokerClient.create(transport, '0.4.0', 'agent.beta');
+
+  assert.equal(secondA.initialized.connectionId, firstA.initialized.connectionId);
+  assert.equal(secondA.workspace.id, firstA.workspace.id);
+  assert.equal(secondA.lease.id, firstA.lease.id);
+  assert.notEqual(agentB.initialized.connectionId, firstA.initialized.connectionId);
+  assert.notEqual(agentB.workspace.id, firstA.workspace.id);
+  assert.notEqual(agentB.lease.id, firstA.lease.id);
+  assert.deepEqual(runtime.stats(), {
+    principals: 2,
+    connections: 2,
+    activeWorkspaces: 2,
+    activeLeases: 2,
+  });
+});
+
 test('compatibility client rejects a daemon from another executable version', async () => {
   const runtime = new MemoryBrokerRuntime({
     serviceVersion: '0.1.5',
@@ -63,7 +104,7 @@ test('compatibility client rejects a daemon from another executable version', as
       instance: {
         id: 'browser-instance:test',
         product: 'Chrome',
-        profilePath: '/profiles/test',
+        userDataRoot: '/profiles/test',
         processIdentity: 'process:test',
         connectionGeneration: 1,
         state: 'connected',

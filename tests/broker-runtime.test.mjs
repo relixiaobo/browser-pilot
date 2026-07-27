@@ -16,7 +16,7 @@ function createRuntime(options = {}) {
       instance: {
         id: 'browser-instance:test',
         product: 'Chrome',
-        profilePath: '/profiles/test',
+        userDataRoot: '/profiles/test',
         processIdentity: 'process:test',
         connectionGeneration: 1,
         state: 'connected',
@@ -111,6 +111,29 @@ test('Broker initializes one connection and filters the canonical tool manifest'
   });
 });
 
+test('Broker versions browser candidate vocabulary at the protocol 1.3 boundary', async () => {
+  const runtime = createRuntime();
+  const legacy = await initialize(runtime, 'bridge:candidate-12', {
+    client: { instanceId: 'instance:candidate-12' },
+    protocol: {
+      min: { major: 1, minor: 2 },
+      max: { major: 1, minor: 2 },
+    },
+  });
+  const current = await initialize(runtime, 'bridge:candidate-13', {
+    client: { instanceId: 'instance:candidate-13' },
+    protocol: {
+      min: { major: 1, minor: 3 },
+      max: { major: 1, minor: 3 },
+    },
+  });
+
+  assert.equal(legacy.browsers[0].profile, '/profiles/test');
+  assert.equal('userDataRoot' in legacy.browsers[0], false);
+  assert.equal(current.browsers[0].userDataRoot, '/profiles/test');
+  assert.equal('profile' in current.browsers[0], false);
+});
+
 test('browser discovery is Broker-owned, filterable, and available without a browser connection', async () => {
   const runtime = createRuntime({
     browsers: [],
@@ -142,7 +165,7 @@ test('browser discovery is Broker-owned, filterable, and available without a bro
     instance: {
       id: 'browser-instance:brave',
       product: 'Brave',
-      profilePath: '/profiles/brave',
+      userDataRoot: '/profiles/brave',
       processIdentity: '',
       connectionGeneration: 0,
       state: 'disconnected',
@@ -260,6 +283,45 @@ test('Broker hides and rejects protocol 1.2 Profile routing on protocol 1.1', as
   assert.equal(executions, 0);
 });
 
+test('Broker hides and rejects explicit Profile identity before protocol 1.3', async () => {
+  let executions = 0;
+  const runtime = createRuntime({
+    toolExecutor: {
+      supportedTools: ['browser.profiles.identify'],
+      async call() {
+        executions += 1;
+        throw new Error('protocol guard failed');
+      },
+    },
+  });
+  await initialize(runtime, 'bridge:profile-protocol-12', {
+    client: { instanceId: 'instance:profile-protocol-12' },
+    protocol: {
+      min: { major: 1, minor: 2 },
+      max: { major: 1, minor: 2 },
+    },
+  });
+  const manifest = await runtime.call('bridge:profile-protocol-12', 'tools/list', {});
+  assert.equal(manifest.tools.some(tool => tool.name === 'browser.profiles.identify'), false);
+
+  const { workspace } = await runtime.call('bridge:profile-protocol-12', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:profile-protocol-12', 'leases/create', {
+    workspaceId: workspace.id,
+  });
+  await assert.rejects(
+    () => runtime.call('bridge:profile-protocol-12', 'tools/call', {
+      name: 'browser.profiles.identify',
+      arguments: {},
+      workspaceId: workspace.id,
+      leaseId: lease.id,
+    }),
+    error => error.code === 'protocol_incompatible' &&
+      error.context?.tool === 'browser.profiles.identify' &&
+      error.context?.requiredProtocol?.minor === 3,
+  );
+  assert.equal(executions, 0);
+});
+
 test('One-shot initialize reuses only the same Connection identity and contract', async () => {
   const runtime = createRuntime();
   const first = await initializeOneShot(runtime, 'bridge:cli');
@@ -366,7 +428,7 @@ test('Keyed Workspace reuse does not depend on default browser ordering', async 
         instance: {
           id: 'browser-instance:first',
           product: 'Chrome',
-          profilePath: '/profiles/first',
+          userDataRoot: '/profiles/first',
           processIdentity: 'process:first',
           connectionGeneration: 1,
           state: 'connected',
@@ -377,7 +439,7 @@ test('Keyed Workspace reuse does not depend on default browser ordering', async 
         instance: {
           id: 'browser-instance:second',
           product: 'Brave',
-          profilePath: '/profiles/second',
+          userDataRoot: '/profiles/second',
           processIdentity: 'process:second',
           connectionGeneration: 1,
           state: 'connected',

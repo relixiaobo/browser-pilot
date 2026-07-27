@@ -9,13 +9,32 @@ For complete envelopes and schemas, use the installed package's
 `docs/integration/stdio-bridge.md` and discover the runtime surface through
 `tools/list`. This reference defines the Agent decision rules.
 
+This guide supports the CLI range declared in the skill's
+[`compatibility.json`](../compatibility.json). A shipping Host should pin
+`browserPilotCli.testedVersion` for a reproducible bundle; protocol negotiation
+still determines whether separately released clients can share a running
+Broker.
+
+## Contents
+
+- [Lifecycle](#lifecycle)
+- [Representation Decisions](#representation-decisions)
+- [Action Decisions](#action-decisions)
+- [Hint Decisions](#hint-decisions)
+- [Error Recovery](#error-recovery)
+- [Events and Recovery State](#events-and-recovery-state)
+- [Artifacts and Native Model Content](#artifacts-and-native-model-content)
+- [Non-Negotiable Boundaries](#non-negotiable-boundaries)
+
 ## Lifecycle
 
 1. Launch the exact bundled, project-local, or explicitly selected global
    executable directly, without a shell.
    For a product bundle, pin either `browser-pilot-cli` plus the product's Node
    runtime or the platform-native self-contained release archive. Never locate
-   private Broker/janitor entry points or download a runtime at launch.
+   private Broker/janitor entry points or download a runtime at launch. Verify
+   the versioned release index and checksums when consuming release assets;
+   native macOS archives support Apple Silicon only.
 2. Send `initialize` first. Negotiate protocol/capabilities and retain the
    returned connection and browser state. Branch on `error.data.code`, never
    English messages.
@@ -29,12 +48,17 @@ For complete envelopes and schemas, use the installed package's
 6. Call `tools/list`; register only returned tools and preserve every schema,
    including `x-browser-pilot-sensitivity` annotations.
 7. List tabs before adopting current browser context. Inventory contains
-   managed tabs and eligible user tabs; one physical target is controlled by at
-   most one Lease.
-8. On protocol 1.2, list Profiles before unanchored new work. Existing tabs
+   managed tabs and eligible user tabs, excluding extension-owned and internal
+   pages; one physical target is controlled by at most one Lease. Protocol 1.3
+   calls the Lease-local choice `selected`; it is not Chrome foreground focus.
+8. On protocol 1.2+, list Profiles before unanchored new work. Existing tabs
    across all Profiles need no selection. With multiple Profiles and no intended
    target context, ask the user and pass the returned opaque Profile ID to
-   selection or `browser.open`; never reconnect per Profile.
+   selection or `browser.open`; never reconnect per Profile. On protocol 1.3,
+   call `browser.profiles.identify` only when neutral labels and representative
+   tabs are insufficient. It is an explicit visible mutation that probes
+   `chrome://version`, verifies the exact Profile path against `userDataRoot`,
+   and caches structured Profile/account identity for one connection generation.
 9. On shutdown, release the Lease and Workspace, then send `shutdown`. EOF also
    releases Connection-owned Leases, but explicit cleanup is preferable.
 
@@ -187,6 +211,8 @@ field names, and do not remove taint when transforming content.
 
 - Expose no raw CDP forwarding. Offer `browser.eval` only when the host grants
   `developer.eval`.
+- Present controller identity in Host-owned UI when needed. Browser Pilot does
+  not inject status elements, borders, or labels into the user's page DOM.
 - Do not implement a second approval model inside Browser Pilot. The host may
   remove operations at launch or apply its own task approval UX.
 - Do not persist refs, browser target mappings, cookies, credentials, network

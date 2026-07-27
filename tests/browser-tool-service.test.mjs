@@ -42,6 +42,7 @@ class BrowserFixtureTransport {
   fallbackOpenerTargetId;
   fallbackWindowNameOverride;
   fallbackWindowNames = new Map();
+  profilePathsByBrowserContext = new Map();
   suppressFallbackTarget = false;
   screenshotDimensions;
   responseBodies = new Map();
@@ -180,6 +181,13 @@ class BrowserFixtureTransport {
           },
         };
       case 'Runtime.evaluate': {
+        if (String(params.expression).includes('browser-pilot.profile-path.v1')) {
+          return {
+            result: {
+              value: this.profilePathsByBrowserContext.get(target?.browserContextId),
+            },
+          };
+        }
         if (String(params.expression).startsWith('window.open(')) {
           if (this.suppressFallbackTarget) return { result: { value: true } };
           const match = String(params.expression).match(
@@ -541,7 +549,7 @@ const binding = {
   instance: {
     id: 'browser-instance:test',
     product: 'Chrome',
-    profilePath: '/profiles/test',
+    userDataRoot: '/profiles/test',
     processIdentity: 'process:test',
     connectionGeneration: 1,
     state: 'connected',
@@ -603,7 +611,7 @@ test('production tools/list exposes only fully wired Browser tools', async () =>
     browsers: [binding],
     toolExecutor: browserTools,
   });
-  await initialize(runtime, 'bridge:list', 'com.example.agent', 'instance:list', 2);
+  await initialize(runtime, 'bridge:list', 'com.example.agent', 'instance:list', 3);
 
   const manifest = await runtime.call('bridge:list', 'tools/list', {});
   const names = manifest.tools.map(definition => definition.name);
@@ -800,6 +808,151 @@ test('Profile routing is passive, explicit, fallback-safe, and binds one Managed
   assert.equal(
     [...transport.targets.values()].some(target => target.url.includes('task')),
     false,
+  );
+});
+
+test('Profile identity is explicit, verified, cached, refreshed, and scoped to a connection generation', async t => {
+  const userDataRoot = await mkdtemp(join(tmpdir(), 'browser-pilot-profile-identity-'));
+  t.after(async () => rm(userDataRoot, { recursive: true, force: true }));
+  await writeFile(join(userDataRoot, 'Local State'), JSON.stringify({
+    profile: {
+      info_cache: {
+        Default: {
+          name: 'Work Account',
+          gaia_name: 'Alice Example',
+          user_name: 'alice@example.test',
+        },
+        'Profile 1': {
+          name: 'Personal Account',
+          gaia_given_name: 'Alice',
+          user_name: 'personal@example.test',
+        },
+      },
+    },
+  }));
+
+  const transport = new BrowserFixtureTransport();
+  transport.targets.get('user-form').browserContextId = 'context-work';
+  transport.targets.set('user-personal', {
+    targetId: 'user-personal',
+    type: 'page',
+    title: 'Personal Inbox',
+    url: 'https://mail.example.test/',
+    browserContextId: 'context-personal',
+  });
+  transport.windows.set('user-personal', 20);
+  transport.loaders.set('user-personal', 'loader:user-personal:1');
+  transport.profilePathsByBrowserContext.set('context-work', join(userDataRoot, 'Default'));
+  transport.profilePathsByBrowserContext.set('context-personal', join(userDataRoot, 'Profile 1'));
+
+  const connectionBinding = structuredClone(binding);
+  delete connectionBinding.candidate.profile;
+  connectionBinding.candidate.userDataRoot = userDataRoot;
+  connectionBinding.instance.userDataRoot = userDataRoot;
+  const browserTools = new BrowserToolService(transport, connectionBinding);
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.3.0',
+    brokerProcessIdentity: 'broker:profile-identity',
+    browsers: [connectionBinding],
+    toolExecutor: browserTools,
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:profile-identity',
+    'com.example.profile-identity-agent',
+    'instance:profile-identity',
+    3,
+  );
+
+  const passive = await tool(runtime, client, 'browser.profiles.list', {});
+  assert.deepEqual(passive.profiles.map(profile => profile.identityStatus), [
+    'unidentified',
+    'unidentified',
+  ]);
+  assert.equal(
+    transport.calls.some(call => ['Target.createTarget', 'Target.attachToTarget'].includes(call.method)),
+    false,
+    'passive Profile listing must never open or attach to identity pages',
+  );
+
+  const identified = await tool(runtime, client, 'browser.profiles.identify', {});
+  const work = identified.profiles.find(profile => profile.profileDirectory === 'Default');
+  const personal = identified.profiles.find(profile => profile.profileDirectory === 'Profile 1');
+  assert.deepEqual(work, {
+    profileContextId: work.profileContextId,
+    label: work.label,
+    identityStatus: 'verified',
+    profileName: 'Work Account',
+    accountName: 'Alice Example',
+    accountEmail: 'alice@example.test',
+    profileDirectory: 'Default',
+    tabCount: 1,
+    eligibleTabCount: 1,
+    selected: false,
+    representativeTabs: [{
+      targetId: work.representativeTabs[0].targetId,
+      title: 'User Form',
+      url: 'https://example.test/form',
+    }],
+  });
+  assert.equal(personal.identityStatus, 'verified');
+  assert.equal(personal.profileName, 'Personal Account');
+  assert.equal(personal.accountEmail, 'personal@example.test');
+  assert.equal([...transport.targets.values()].some(target => target.url === 'chrome://version/'), false);
+
+  const createCount = () => transport.calls.filter(call => call.method === 'Target.createTarget').length;
+  assert.equal(createCount(), 2);
+  assert.equal(
+    transport.calls
+      .filter(call => call.method === 'Target.createTarget')
+      .every(call => call.params.url === 'about:blank'),
+    true,
+    'Profile probes must respect the managed-target creation boundary before navigating',
+  );
+  await tool(runtime, client, 'browser.profiles.identify', {});
+  assert.equal(createCount(), 2, 'verified identity should be reused within one connection generation');
+  await tool(runtime, client, 'browser.profiles.identify', { refresh: true });
+  assert.equal(createCount(), 4, 'refresh should explicitly re-probe every live Profile');
+
+  transport.profilePathsByBrowserContext.set('context-personal', join(userDataRoot, 'Profile 2'));
+  const unavailable = await tool(runtime, client, 'browser.profiles.identify', {
+    profileContextId: personal.profileContextId,
+    refresh: true,
+  });
+  assert.deepEqual(unavailable.profiles, [{
+    profileContextId: personal.profileContextId,
+    label: personal.label,
+    identityStatus: 'unavailable',
+    identityErrorCode: 'profile_metadata_missing',
+    tabCount: 1,
+    eligibleTabCount: 1,
+    selected: false,
+    representativeTabs: [{
+      targetId: personal.representativeTabs[0].targetId,
+      title: 'Personal Inbox',
+      url: 'https://mail.example.test/',
+    }],
+  }]);
+
+  const previousIds = new Set(identified.profiles.map(profile => profile.profileContextId));
+  runtime.updateBrowserConnection(connectionBinding.instance.id, {
+    state: 'disconnected',
+    connectionGeneration: 1,
+  });
+  runtime.updateBrowserConnection(connectionBinding.instance.id, {
+    state: 'connected',
+    connectionGeneration: 2,
+    processIdentity: 'process:test:profile-identity-restored',
+  });
+  const reconnected = await tool(runtime, client, 'browser.profiles.list', {});
+  assert.deepEqual(reconnected.profiles.map(profile => profile.identityStatus), [
+    'unidentified',
+    'unidentified',
+  ]);
+  assert.equal(
+    reconnected.profiles.some(profile => previousIds.has(profile.profileContextId)),
+    false,
+    'Profile identity and opaque IDs must not survive a browser connection generation',
   );
 });
 

@@ -507,27 +507,6 @@ export const PAGE_DIMENSIONS = `JSON.stringify({
   height: Math.max(document.documentElement.scrollHeight, document.documentElement.clientHeight)
 })`;
 
-/** Inject pulsing glow overlay to indicate agent is active. CSP-safe via Web Animations API. */
-export const INJECT_BORDER = `(() => {
-  if (document.getElementById('__bp_overlay')) return;
-  const d = document.createElement('div');
-  d.id = '__bp_overlay';
-  d.setAttribute('aria-hidden','true');
-  d.setAttribute('role','presentation');
-  Object.assign(d.style, {position:'fixed',inset:'0',zIndex:'2147483647',pointerEvents:'none'});
-  document.documentElement.appendChild(d);
-  try{d.animate([
-    {boxShadow:'inset 0 0 20px rgba(59,130,246,.8),inset 0 0 40px rgba(59,130,246,.4),inset 0 0 80px rgba(59,130,246,.15)'},
-    {boxShadow:'inset 0 0 30px rgba(59,130,246,1),inset 0 0 60px rgba(59,130,246,.5),inset 0 0 100px rgba(59,130,246,.2)'},
-    {boxShadow:'inset 0 0 20px rgba(59,130,246,.8),inset 0 0 40px rgba(59,130,246,.4),inset 0 0 80px rgba(59,130,246,.15)'},
-  ],{duration:2500,iterations:Infinity,easing:'ease-in-out'})}catch(e){}
-})()`;
-
-/** Remove border overlay. */
-export const REMOVE_BORDER = `(() => {
-  document.getElementById('__bp_overlay')?.remove();
-})()`;
-
 /** Return bounding rect of a querySelector match (or null). */
 export function elementRect(selector: string): string {
   return `JSON.stringify((() => {
