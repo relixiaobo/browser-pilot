@@ -36,14 +36,39 @@ Intel Mac is unsupported.
 
 ## Connect Deliberately
 
-Chrome remote debugging must be enabled at
-`chrome://inspect/#remote-debugging`. `bp browsers` inspects setup passively and
-does not show Chrome's Allow dialog.
+Before the first browser operation in a task, run `bp status`. It is passive and
+does not request Chrome authorization. If it reports a usable session, continue
+with `bp tabs`; do not reconnect or mention setup to the user.
 
-Run `bp connect` only after a command reports `browser_disconnected`, or when
-the user explicitly asks to connect. Chrome may ask the user to click Allow.
-Do not launch another connect attempt while one is pending; all CLI clients
-share the same pending browser connection.
+If status or a browser command reports `browser_disconnected`, run `bp browsers`
+and follow the selected candidate's structured remediation before connecting:
+
+- `start_browser`: ask the user to start that browser.
+- `enable_remote_debugging`: give the user
+  `chrome://inspect/#remote-debugging` and ask them to enable remote debugging
+  in that browser. If the setting is unavailable, Chrome 144 or newer is
+  required.
+- `restart_remote_debugging`: ask the user to restart that browser and enable
+  remote debugging again.
+- `connect_browser` or `authorize_remote_debugging`: an explicit connection is
+  appropriate.
+
+Do not run `bp connect` while the browser is stopped or remote debugging is
+disabled. Wait for the user to complete the requested setup, then run
+`bp browsers` again. If several usable browser candidates match and the task
+does not identify one, ask the user which browser to control; pass its returned
+ID to `bp connect --browser <id>`.
+
+Immediately before invoking `bp connect`, tell the user that Chrome may show an
+Allow dialog and ask them to click Allow once if it appears. Send this message
+before the shell call: machine-readable CLI output is emitted only when the
+command finishes, so the command cannot provide the reminder while it waits.
+
+Run exactly one connect attempt and wait for that process. Do not launch another
+attempt while it is pending; all CLI clients share one pending browser
+connection. If the call times out, is interrupted, or returns
+`browser_not_authorized`, inspect `bp status` and the returned command before
+deciding what to do. Never loop `bp connect`.
 
 One connection covers all live Chrome profiles on that endpoint. When several
 profiles are open:

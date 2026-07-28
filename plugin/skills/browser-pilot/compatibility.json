@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "skillVersion": "0.5.0",
+  "skillVersion": "0.5.1",
   "browserPilotCli": {
-    "testedVersion": "0.5.0",
-    "minimumVersion": "0.5.0",
+    "testedVersion": "0.5.1",
+    "minimumVersion": "0.5.1",
     "maximumVersionExclusive": "1.0.0",
-    "supportedVersionRange": ">=0.5.0 <1.0.0"
+    "supportedVersionRange": ">=0.5.1 <1.0.0"
   },
   "protocol": {
     "min": {

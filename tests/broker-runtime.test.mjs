@@ -180,6 +180,51 @@ test('browser discovery is Broker-owned, filterable, and available without a bro
   });
 });
 
+test('disconnected browser commands preserve the candidate setup remediation', async () => {
+  const runtime = createRuntime({
+    toolExecutor: { supportedTools: ['browser.tabs.list'] },
+    browsers: [{
+      candidate: {
+        id: 'browser:chrome-disabled',
+        product: 'Chrome',
+        channel: 'stable',
+        state: 'remote_debugging_disabled',
+        remediation: {
+          code: 'enable_remote_debugging',
+          message: 'Open chrome://inspect/#remote-debugging and enable remote debugging.',
+          actionRequired: true,
+        },
+      },
+      instance: {
+        id: 'browser-instance:chrome-disabled',
+        product: 'Chrome',
+        userDataRoot: '/profiles/chrome-disabled',
+        processIdentity: '',
+        connectionGeneration: 0,
+        state: 'disconnected',
+      },
+    }],
+  });
+  await initializeCli(runtime, 'bridge:setup-remediation');
+  const { workspace } = await runtime.call('bridge:setup-remediation', 'workspaces/create', {});
+  const { lease } = await runtime.call('bridge:setup-remediation', 'leases/create', {
+    workspaceId: workspace.id,
+  });
+
+  await assert.rejects(
+    () => runtime.call('bridge:setup-remediation', 'tools/call', {
+      name: 'browser.tabs.list',
+      arguments: { scope: 'all' },
+      workspaceId: workspace.id,
+      leaseId: lease.id,
+    }),
+    error => (
+      error.code === 'browser_disconnected' &&
+      error.remediation?.code === 'enable_remote_debugging'
+    ),
+  );
+});
+
 test('Broker negotiates protocol 1.1 transport limits per Connection', async () => {
   const runtime = createRuntime();
   const constrained = await initialize(runtime, 'bridge:constrained', {

@@ -1,6 +1,6 @@
 {
   "name": "browser-pilot-plugin",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Agent plugin for browser-pilot — teach AI coding agents to control Chrome via CLI",
   "keywords": [
     "browser-pilot",
@@ -32,6 +32,6 @@
     ]
   },
   "peerDependencies": {
-    "browser-pilot-cli": ">=0.5.0 <1.0.0"
+    "browser-pilot-cli": ">=0.5.1 <1.0.0"
   }
 }
