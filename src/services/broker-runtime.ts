@@ -1186,6 +1186,11 @@ export class MemoryBrokerRuntime {
       throw new BrowserPilotError('browser_disconnected', 'Workspace browser is disconnected', {
         retryable: true,
         context: workspaceRecord ? { workspaceId: workspaceRecord.value.id } : undefined,
+        remediation: binding?.candidate.remediation ?? {
+          code: 'connect_browser',
+          message: "Run 'bp browsers', follow its setup remediation, then run one explicit 'bp connect'.",
+          actionRequired: true,
+        },
       });
     }
     const isBrowserConnectionAttempt = isBrowserConnectTool && binding.instance.state !== 'connected';

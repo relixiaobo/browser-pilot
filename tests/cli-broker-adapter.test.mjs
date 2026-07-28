@@ -438,6 +438,23 @@ async function startFakeDaemon(root, options = {}) {
       const body = raw ? JSON.parse(raw) : undefined;
       calls.push({ path: request.url, body });
       if (request.method === 'POST' && request.url === '/broker/rpc') {
+        const toolError = body?.method === 'tools/call'
+          ? options.toolErrors?.[body.params?.name]
+          : undefined;
+        if (toolError) {
+          response.end(JSON.stringify({
+            error: {
+              code: -32000,
+              message: toolError.message,
+              data: {
+                code: toolError.code,
+                retryable: toolError.retryable ?? false,
+                ...(toolError.remediation ? { remediation: toolError.remediation } : {}),
+              },
+            },
+          }));
+          return;
+        }
         response.end(JSON.stringify({ result: await rpcResult(body) }));
         return;
       }
@@ -504,6 +521,7 @@ test('CLI exposes stable machine errors for parser, input, and connection failur
     { args: ['--request-id', 'bad request', 'tabs'], code: 'invalid_argument', field: 'requestId' },
     { args: ['--timeout', '0', 'tabs'], code: 'invalid_argument', field: 'timeout' },
     { args: ['tabs'], code: 'browser_disconnected', retryable: true },
+    { args: ['snapshot'], code: 'browser_disconnected', retryable: true },
   ];
 
   for (const expected of cases) {
@@ -522,6 +540,49 @@ test('CLI exposes stable machine errors for parser, input, and connection failur
   assert.equal(human.exitCode, 1);
   assert.equal(human.stdout, '');
   assert.match(human.stderr, /missing required argument 'url'/);
+});
+
+test('CLI preserves specific browser setup remediation without suggesting another blind connect', async t => {
+  const root = await mkdtemp('/tmp/bp-cli-setup-remediation-');
+  const setupError = {
+    code: 'browser_disconnected',
+    message: 'Browser remote debugging endpoint is unavailable',
+    retryable: true,
+    remediation: {
+      code: 'enable_remote_debugging',
+      message: 'Open chrome://inspect/#remote-debugging in this browser and turn on remote debugging.',
+      actionRequired: true,
+    },
+  };
+  const { server } = await startFakeDaemon(root, {
+    toolErrors: {
+      'browser.connect': setupError,
+      'browser.tabs.list': setupError,
+    },
+  });
+  t.after(async () => {
+    await new Promise(resolveClose => server.close(resolveClose));
+    await rm(root, { recursive: true, force: true });
+  });
+  const env = { BROWSER_PILOT_HOME: join(root, '.browser-pilot') };
+
+  const machine = await runCliFailure(root, ['tabs'], env);
+  assert.equal(machine.output.code, 'browser_disconnected');
+  assert.equal(machine.output.remediation.code, 'enable_remote_debugging');
+  assert.equal('hint' in machine.output, false);
+
+  const connect = await runCliFailure(root, ['connect'], env);
+  assert.equal(connect.output.code, 'browser_disconnected');
+  assert.equal(connect.output.remediation.code, 'enable_remote_debugging');
+  assert.equal('hint' in connect.output, false);
+
+  const status = await runCli(root, ['status'], env);
+  assert.equal(status.recovery.required, true);
+  assert.equal(status.recovery.action, setupError.remediation.message);
+
+  const human = await runCliFailure(root, ['--human', 'tabs'], env);
+  assert.match(human.stderr, /action: Open chrome:\/\/inspect\/#remote-debugging/);
+  assert.doesNotMatch(human.stderr, /Run 'bp connect' first/);
 });
 
 test('CLI rejects an incompatible private Broker transport before sending RPC', async t => {

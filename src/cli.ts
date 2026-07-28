@@ -17,7 +17,6 @@ import {
   connectCompatibility,
   resumeCompatibility,
   shutdownCompatibility,
-  withCompatibilityTarget,
   type CompatibilityBrokerClient,
   type CompatibilityInvocationOptions,
   type CompatibilityProfile,
@@ -36,7 +35,9 @@ program
   .option('--timeout <ms>', 'browser command deadline in milliseconds', '60000')
   .addHelpText('after', `
 Workflow:
-  bp connect                          # one-time setup (click Allow in Chrome)
+  bp status                           # inspect connection state without requesting authorization
+  bp browsers                         # inspect browser setup without requesting authorization
+  bp connect --browser <id>           # connect once after setup (click Allow in Chrome if prompted)
   bp profiles                         # list live Chrome Profile contexts
   bp profile <index>                  # route new managed tabs to one Profile
   bp open <url>                       # navigate — returns snapshot with [ref] numbers
@@ -130,7 +131,10 @@ function fail(error: string, hint?: string, details?: BrowserPilotError): never 
     ...(stable.context ? { context: stable.context } : {}),
     ...(stable.remediation ? { remediation: stable.remediation } : {}),
   }));
-  else console.error(`\u2717 ${error}${hint ? `\n  hint: ${hint}` : ''}`);
+  else {
+    const guidance = hint ?? stable.remediation?.message;
+    console.error(`\u2717 ${error}${guidance ? `\n  action: ${guidance}` : ''}`);
+  }
   process.exit(receivedSignal === 'SIGINT' ? 130 : receivedSignal === 'SIGTERM' ? 143 : 1);
 }
 
@@ -209,7 +213,13 @@ function action(fn: (...args: any[]) => Promise<void>) {
       fail(msg, "Run 'bp snapshot' to refresh element refs.", stable);
     }
     if (stable.code === 'browser_disconnected') {
-      fail(msg, "Run 'bp connect' first.", stable);
+      fail(
+        msg,
+        stable.remediation
+          ? undefined
+          : "Run 'bp browsers', follow its setup remediation, then connect once.",
+        stable,
+      );
     }
     if (stable.code === 'unknown_outcome') {
       fail(msg, 'Inspect the current tab state before deciding whether to retry.', stable);
@@ -391,16 +401,32 @@ async function cliElementAddress(
   return { selector: raw };
 }
 
+async function disconnectedBrowserSetup() {
+  const discovered = await discoverBrowserCandidates();
+  const selected = discovered.find(candidate => candidate.endpoint !== undefined) ?? discovered[0];
+  return {
+    discovered,
+    selected,
+    remediation: selected?.candidate.remediation ?? {
+      code: 'connect_browser',
+      message: "Run 'bp browsers', follow its setup remediation, then run one explicit 'bp connect'.",
+      actionRequired: true,
+    },
+  };
+}
+
 async function requireCompatibility(): Promise<CompatibilityBrokerClient> {
   const client = await resumeCompatibility(PKG_VERSION, cliClientKey(), cliInvocationOptions());
   if (!client) {
+    const setup = await disconnectedBrowserSetup();
     throw new BrowserPilotError('browser_disconnected', 'Browser Pilot is not connected', {
       retryable: true,
-      remediation: {
-        code: 'connect_browser',
-        message: "Run 'bp connect', complete Chrome authorization if prompted, then retry.",
-        actionRequired: true,
-      },
+      context: setup.selected ? {
+        browserId: setup.selected.candidate.id,
+        product: setup.selected.candidate.product,
+        browserState: setup.selected.candidate.state,
+      } : undefined,
+      remediation: setup.remediation,
     });
   }
   return client;
@@ -458,10 +484,12 @@ function cliProfile(profile: CompatibilityProfile, index: number): Record<string
   };
 }
 
-function withCliTarget<T>(
+async function withCliTarget<T>(
   operation: (client: CompatibilityBrokerClient, target: CompatibilityTarget) => Promise<T>,
 ): Promise<T> {
-  return withCompatibilityTarget(PKG_VERSION, operation, cliClientKey(), cliInvocationOptions());
+  const client = await requireCompatibility();
+  const target = await client.ensureTarget();
+  return operation(client, target);
 }
 
 function readStdin(): Promise<string> {
@@ -485,7 +513,9 @@ program.command('status')
     const brokerRunning = isDaemonRunning();
     const client = await resumeCompatibility(PKG_VERSION, cliClientKey(), cliInvocationOptions());
     if (!client) {
-      const browsers = (await discoverBrowserCandidates()).map(discovered => discovered.candidate);
+      const setup = await disconnectedBrowserSetup();
+      const browsers = setup.discovered.map(candidate => candidate.candidate);
+      const action = setup.remediation.message;
       emit({
         ok: true,
         service: { state: brokerRunning ? 'unavailable' : 'stopped', version: PKG_VERSION },
@@ -495,11 +525,11 @@ program.command('status')
         recovery: {
           required: true,
           code: 'browser_disconnected',
-          action: 'bp connect',
+          action,
         },
       }, brokerRunning
-        ? 'Browser Pilot Broker is running, but the browser session is unavailable.'
-        : 'Browser Pilot is not connected. Run bp connect.');
+        ? `Browser Pilot Broker is running, but the browser session is unavailable.\nAction: ${action}`
+        : `Browser Pilot is not connected.\nAction: ${action}`);
       return;
     }
 
@@ -756,7 +786,16 @@ program.command('browsers')
 program.command('connect')
   .description('Connect to Chrome and prepare unambiguous managed browsing')
   .option('-b, --browser <name>', 'browser to connect to')
-  .addHelpText('after', '\nExamples:\n  bp connect\n  bp connect --browser brave')
+  .addHelpText('after', [
+    '',
+    'Preparation:',
+    '  Run bp browsers and complete its setup remediation first.',
+    '  If an Agent invokes this command, it must tell the user about the possible Allow dialog before the call.',
+    '',
+    'Examples:',
+    '  bp connect',
+    '  bp connect --browser brave',
+  ].join('\n'))
   .action(action(async (opts) => {
     if (!useJson()) {
       console.log('Connecting to Chrome...');

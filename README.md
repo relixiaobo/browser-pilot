@@ -25,15 +25,23 @@ Inspect installed browsers without requesting authorization:
 bp browsers
 ```
 
-Connect when browser work is needed:
+Follow the returned remediation first. Start the selected browser or enable
+remote debugging when requested. Browser Pilot does not connect automatically.
+
+When the browser is ready and browser work is needed, tell the user to watch
+for Chrome's Allow dialog, then connect once:
 
 ```bash
-bp connect
+bp connect --browser <browser-id>
 ```
 
 Chrome may display one Allow dialog for the browser connection. Browser
 discovery and background-service startup are passive. Concurrent clients share
 one pending connection request, so they do not create an authorization loop.
+Machine-readable `bp connect` output is emitted after the attempt finishes, so
+an Agent must show the Allow reminder before invoking the command. A timeout or
+`browser_not_authorized` result must be inspected; it is not a reason to loop
+connection attempts.
 
 ### 2. Install the Agent skill
 

@@ -20,14 +20,17 @@ do not start a second browser connection or repeat the mutation.
 
 ## Stable Error Codes
 
-- `browser_disconnected`: run one `bp connect`, wait for Chrome authorization,
-  then list tabs and inspect fresh state.
+- `browser_disconnected`: run `bp browsers` and follow its candidate remediation.
+  Connect once only after the browser is running and remote debugging is
+  enabled. Tell the user about the possible Allow dialog before the shell call,
+  then list tabs and inspect fresh state after connection.
 - `protocol_incompatible`: use a CLI inside the skill's declared compatible
   range. If an older Broker is still live, stop it with the executable that
   started it or use the returned isolation remediation; never replace a live
   process blindly.
 - `browser_not_authorized`: follow structured remediation and wait for the
-  user. Do not loop connection attempts.
+  user. Inspect status and the original command before considering another
+  explicit connection. Do not loop connection attempts.
 - `profile_selection_required`: list profiles and select one or ask the user.
   Do not reconnect.
 - `profile_context_stale` or `profile_context_unavailable`: list profiles again

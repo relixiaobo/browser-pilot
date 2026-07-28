@@ -43,8 +43,12 @@ the connect selector.
 
 ### `bp connect [--browser <selector>]`
 
-Request one browser connection. Chrome may show its Allow dialog. Do not run
-concurrent connect attempts.
+Request one browser connection only after `bp browsers` reports that the
+selected browser is ready for an explicit connection. Before invoking the
+command through an Agent shell, tell the user that Chrome may show an Allow
+dialog and ask them to click Allow once if it appears. Machine-readable output
+is returned only after the command finishes. Do not run concurrent or blind
+retry attempts.
 
 ### `bp status`
 
