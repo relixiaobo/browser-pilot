@@ -36,6 +36,7 @@ export * from './managed-target-lifecycle.js';
 export * from './browser-tool-service.js';
 export * from './browser-tool-router.js';
 export { CompatibilityBrokerClient } from '../compatibility-broker-client.js';
+export { canonicalJson } from '../canonical-json.js';
 export {
   discoverBrowserCandidates,
   discoverChrome,

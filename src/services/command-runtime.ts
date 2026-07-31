@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { canonicalJson } from '../canonical-json.js';
 import { asBrowserPilotError, BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import type {
   BrowserWorkspaceId,
@@ -85,15 +86,6 @@ const TERMINAL_STATUSES = new Set<CommandStatus>([
   'expired',
 ]);
 
-function canonical(value: JsonValue): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  const entries = Object.entries(value)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, child]) => `${JSON.stringify(key)}:${canonical(child)}`);
-  return `{${entries.join(',')}}`;
-}
-
 function cloneJson<T extends JsonValue | JsonRpcErrorObject>(value: T): T {
   return structuredClone(value);
 }
@@ -169,7 +161,7 @@ export class MemoryCommandRuntime {
     const idempotencyKey = input.idempotencyKey ?? (
       input.commandId ? `command-id:${input.commandId}` : `auto:${randomUUID()}`
     );
-    const fingerprint = canonical(input.request);
+    const fingerprint = canonicalJson(input.request);
     const idempotencyIndex = `${scopeKey}\u0000${idempotencyKey}`;
     const duplicateId = this.commandsByIdempotency.get(idempotencyIndex);
     if (duplicateId) {

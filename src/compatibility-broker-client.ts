@@ -2,8 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { BROKER_RPC_VERSION, DaemonClient, isDaemonRunning } from './client.js';
 import { connectDaemon } from './session.js';
 import { createExecutableMetadataSync } from './broker-locator.js';
+import { canonicalJson } from './canonical-json.js';
 import { publicExecutablePath } from './runtime-layout.js';
 import { BrowserPilotError } from './protocol/errors.js';
+import { getToolDefinition } from './protocol/tools.js';
 import {
   CAPABILITIES,
   type ArtifactDescriptor,
@@ -174,7 +176,14 @@ export class CompatibilityBrokerClient {
     if (this.invocation.signal?.aborted) {
       throw new BrowserPilotError('command_cancelled', 'Command was cancelled before dispatch');
     }
+    const definition = getToolDefinition(name);
     const commandId = this.commandId(this.commandSequence);
+    const resolvedTargetId = targetId ?? (
+      typeof args.targetId === 'string' ? args.targetId as ControlledTargetId : undefined
+    );
+    const idempotencyKey = this.invocation.requestId && definition.mutating
+      ? this.mutatingIdempotencyKey(this.invocation.requestId, name, args, resolvedTargetId)
+      : undefined;
     const request = this.transport.brokerCall(this.clientSessionId, 'tools/call', {
       name,
       arguments: args,
@@ -182,9 +191,7 @@ export class CompatibilityBrokerClient {
       leaseId: this.lease.id,
       ...(targetId ? { targetId } : {}),
       commandId,
-      ...(this.invocation.requestId
-        ? { idempotencyKey: `cli-request:${this.invocation.requestId}:${this.commandSequence}` }
-        : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {}),
       deadlineMs: this.invocation.deadlineMs ?? 60_000,
     });
     const cancel = (): void => {
@@ -388,18 +395,24 @@ export class CompatibilityBrokerClient {
   }
 
   private commandId(sequence: number): CommandId {
-    if (!this.invocation.requestId) {
-      return `command:cli-${process.pid}-${sequence}-${randomUUID()}` as CommandId;
-    }
+    return `command:cli-${process.pid}-${sequence}-${randomUUID()}` as CommandId;
+  }
+
+  private mutatingIdempotencyKey(
+    requestId: string,
+    name: string,
+    args: Record<string, JsonValue>,
+    targetId?: ControlledTargetId,
+  ): string {
     const digest = createHash('sha256')
-      .update(this.workspace.clientKey ?? CLIENT_KEY)
+      .update('browser-pilot-cli:mutating-tool:v1')
       .update('\0')
-      .update(this.invocation.requestId)
+      .update(canonicalJson(args))
       .update('\0')
-      .update(String(sequence))
+      .update(targetId ?? '')
       .digest('base64url')
       .slice(0, 32);
-    return `command:cli-${digest}-${sequence}` as CommandId;
+    return `cli-request:${requestId}:${name}:${digest}`;
   }
 }
 

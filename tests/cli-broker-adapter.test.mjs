@@ -59,6 +59,8 @@ async function startFakeDaemon(root, options = {}) {
   let profilesIdentified = false;
   let managedClosed = false;
   let preserveSelectedManagedAfterClose = false;
+  let droppedToolCall;
+  let droppedToolDispatches = 0;
   await Promise.all([
     mkdir(stateDirectory, { recursive: true }),
     mkdir(paths.runtimeDir, { recursive: true }),
@@ -447,6 +449,25 @@ async function startFakeDaemon(root, options = {}) {
       const body = raw ? JSON.parse(raw) : undefined;
       calls.push({ path: request.url, body });
       if (request.method === 'POST' && request.url === '/broker/rpc') {
+        if (
+          body?.method === 'tools/call' &&
+          body.params?.name === options.dropAfterDispatchOnce
+        ) {
+          const idempotencyKey = body.params.idempotencyKey;
+          if (droppedToolCall?.idempotencyKey === idempotencyKey) {
+            response.end(JSON.stringify({ result: droppedToolCall.result }));
+            return;
+          }
+          droppedToolDispatches += 1;
+          const result = await rpcResult(body);
+          if (!droppedToolCall) {
+            droppedToolCall = { idempotencyKey, result };
+            response.destroy();
+            return;
+          }
+          response.end(JSON.stringify({ result }));
+          return;
+        }
         const toolError = body?.method === 'tools/call'
           ? options.toolErrors?.[body.params?.name]
           : undefined;
@@ -488,6 +509,9 @@ async function startFakeDaemon(root, options = {}) {
   return {
     server,
     calls,
+    get droppedToolDispatches() {
+      return droppedToolDispatches;
+    },
     async close() {
       await new Promise(resolveClose => server.close(resolveClose));
       if (paths.runtimeDir !== paths.stateDir) {
@@ -626,6 +650,34 @@ test('CLI rejects an incompatible private Broker transport before sending RPC', 
   assert.equal(calls.some(call => call.path === '/broker/rpc'), false);
 });
 
+test('CLI reuses a mutating idempotency key after dispatch response loss', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-request-retry-'));
+  const daemon = await startFakeDaemon(root, { dropAfterDispatchOnce: 'browser.open' });
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const args = ['--request-id', 'retry-open-42', 'open', 'https://retry.example.test/task'];
+  const interrupted = await runCliFailure(root, args);
+  assert.equal(interrupted.exitCode, 1);
+  const retried = await runCli(root, args);
+  assert.equal(retried.ok, true);
+
+  const openCalls = daemon.calls.filter(call => (
+    call.body?.method === 'tools/call' &&
+    call.body.params.name === 'browser.open' &&
+    call.body.params.arguments.url === 'https://retry.example.test/task'
+  ));
+  assert.equal(openCalls.length, 2);
+  assert.equal(openCalls[0].body.params.idempotencyKey, openCalls[1].body.params.idempotencyKey);
+  assert.match(
+    openCalls[0].body.params.idempotencyKey,
+    /^cli-request:retry-open-42:browser\.open:[A-Za-z0-9_-]{32}$/,
+  );
+  assert.equal(daemon.droppedToolDispatches, 1);
+});
+
 test('CLI uses only canonical Broker and file operations', async t => {
   const root = await mkdtemp(testTempPrefix('bp-cli-'));
   const { calls, close, resetTabs } = await startFakeDaemon(root);
@@ -658,9 +710,13 @@ test('CLI uses only canonical Broker and file operations', async t => {
   assert.equal(cancelled.command.status, 'cancelled');
 
   await runCli(root, ['--request-id', 'host-call-42', 'snapshot']);
-  const requestCall = calls.find(call => call.body?.params?.idempotencyKey === 'cli-request:host-call-42:1');
+  const requestCall = calls.find(call => (
+    call.body?.params?.name === 'browser.observe' &&
+    call.body.params.arguments.limit === 50
+  ));
   assert.ok(requestCall);
-  assert.match(requestCall.body.params.commandId, /^command:cli-[A-Za-z0-9_-]+-1$/);
+  assert.equal('idempotencyKey' in requestCall.body.params, false);
+  assert.match(requestCall.body.params.commandId, /^command:cli-\d+-\d+-[a-f0-9-]{36}$/);
 
   const waitedText = await runCli(root, ['--timeout', '1000', 'wait', '--text', 'Submit']);
   assert.equal(waitedText.condition, 'text');
