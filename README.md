@@ -363,6 +363,14 @@ Build and verify a native artifact with an SEA-capable Node runtime:
 BROWSER_PILOT_SEA_NODE=/absolute/path/to/node npm run build:standalone
 npm run verify:standalone
 npm run package:standalone
+npm run release:prune -- --dry-run # preview local artifact retention
+npm run release:prune              # retain the two newest version groups
+```
+
+Agent evaluations are maintainer-only and use a separate Caliper checkout:
+
+```bash
+CALIPER_ROOT=/absolute/path/to/caliper npm run test:agent:dry
 ```
 
 The root `package.json` version is the release source of truth. The npm version

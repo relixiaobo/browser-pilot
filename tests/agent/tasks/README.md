@@ -4,9 +4,10 @@ These 4 JSON files are the **historical source** for caliper's
 `heroku_smoke` task. They were hand-written during browser-pilot v0
 and used by `tests/agent/run.py` through v8.
 
-As of M1.7a / M1.7b (Phase 1 close), they have been ported to:
+As of M1.7a / M1.7b (Phase 1 close), they have been ported to the
+separate checkout configured by `CALIPER_ROOT`:
 
-    ~/Documents/Coding/caliper/packages/caliper-browser-pilot/
+    $CALIPER_ROOT/packages/caliper-browser-pilot/
       src/caliper_browser_pilot/tasks/smoke.py
 
 The caliper port uses the same URLs, the same verification
@@ -19,10 +20,10 @@ To run the smoke tasks:
 
 ```bash
 # Via browser-pilot's npm script (delegates to caliper):
-npm run test:agent
+CALIPER_ROOT=/absolute/path/to/caliper npm run test:agent
 
 # Or directly via caliper:
-cd ~/Documents/Coding/caliper
+cd "$CALIPER_ROOT"
 uv run inspect eval \
     packages/caliper-browser-pilot/src/caliper_browser_pilot/tasks/smoke.py@heroku_smoke \
     --model anthropic/claude-sonnet-4-6 \

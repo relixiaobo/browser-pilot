@@ -28,14 +28,14 @@ no LLM judge, ~1 min runtime.
 For the v8 baseline (12 WebVoyager tasks × 2 epochs, LLM judge),
 use caliper directly:
 
-    cd ~/Documents/Coding/caliper
+    cd "$CALIPER_ROOT"
     uv run inspect eval \\
         packages/caliper-browser-pilot/src/caliper_browser_pilot/tasks/v8_baseline.py@v8_baseline \\
         --model anthropic/claude-sonnet-4-6 \\
         --max-samples 1 \\
         --epochs 2
 
-See ~/Documents/Coding/caliper/docs/roadmap.md for the full
+See $CALIPER_ROOT/docs/roadmap.md for the full
 mapping of old run.py workflows to caliper equivalents.
 
 M1.7b: this shim was written to formally retire run.py and close
@@ -53,11 +53,9 @@ from pathlib import Path
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Caliper repo location. Override via CALIPER_ROOT env var if your
-# checkout is somewhere else.
-CALIPER_ROOT = Path(
-    os.environ.get("CALIPER_ROOT", "~/Documents/Coding/caliper")
-).expanduser()
+# Agent evaluation is maintainer-only and depends on a separate checkout.
+_CALIPER_ROOT = os.environ.get("CALIPER_ROOT")
+CALIPER_ROOT = Path(_CALIPER_ROOT).expanduser() if _CALIPER_ROOT else None
 
 # The caliper task file + @task selector for heroku smoke.
 SMOKE_TASK = (
@@ -122,13 +120,22 @@ def _check_legacy_args(argv: list[str]) -> None:
 
 
 def main() -> int:
+    if CALIPER_ROOT is None:
+        print(
+            "ERROR: maintainer-only agent tests require CALIPER_ROOT.\n"
+            "Set it to an absolute path for the separate caliper checkout.\n"
+            "  CALIPER_ROOT=/absolute/path/to/caliper npm run test:agent:dry",
+            file=sys.stderr,
+        )
+        return 1
+
     _check_legacy_args(sys.argv[1:])
 
     if not CALIPER_ROOT.is_dir():
         print(
             f"ERROR: caliper repo not found at {CALIPER_ROOT}\n"
             "Set CALIPER_ROOT to point at your caliper checkout.\n"
-            "  export CALIPER_ROOT=~/path/to/caliper",
+            "  export CALIPER_ROOT=/absolute/path/to/caliper",
             file=sys.stderr,
         )
         return 1
