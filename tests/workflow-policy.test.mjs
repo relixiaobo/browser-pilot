@@ -71,6 +71,25 @@ test('every workflow job has a timeout and cancellation remains CI-only', () => 
 
   const ciHeader = ci.slice(0, ci.indexOf('\njobs:\n'));
   assert.match(ciHeader, /concurrency:\n  group: ci-\$\{\{ github\.workflow }}-\$\{\{ github\.ref }}\n  cancel-in-progress: true/);
-  assert.doesNotMatch(release, /^concurrency:/m);
-  assert.doesNotMatch(release, /cancel-in-progress/);
+  const releaseHeader = release.slice(0, release.indexOf('\njobs:\n'));
+  assert.match(releaseHeader, /concurrency:\n  group: release-\$\{\{ github\.ref_name }}\n  cancel-in-progress: false/);
+});
+
+test('release publication is one tag-gated draft to npm to public state machine', () => {
+  const jobs = workflowJobs(release);
+  const build = jobs.get('build');
+  const publish = jobs.get('publish');
+  assert.ok(build, 'Release must define a build job');
+  assert.ok(publish, 'Release must define a publish job');
+  assert.equal(jobs.has('publish-npm'), false);
+  assert.match(publish, /^    if: startsWith\(github\.ref, 'refs\/tags\/v'\)$/m);
+  assert.match(publish, /^    needs: build$/m);
+  assert.match(publish, /permissions:[\s\S]*contents: write[\s\S]*id-token: write/);
+  const plugin = publish.indexOf('npm run package:agent-plugin');
+  const index = publish.indexOf('npm run package:release-index');
+  const stateMachine = publish.indexOf('node scripts/release-publish.mjs --assets release-assets');
+  assert.ok(plugin >= 0 && index > plugin && stateMachine > index);
+  assert.doesNotMatch(publish, /npm publish/);
+  assert.doesNotMatch(build, /-print -quit/);
+  assert.match(build, /for ARCHIVE in "\$\{ARCHIVES\[@\]\}"/);
 });

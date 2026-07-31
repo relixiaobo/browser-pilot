@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: ${{ matrix.os }}
@@ -117,12 +121,21 @@ jobs:
             echo "macOS notarization credentials are incomplete." >&2
             exit 1
           fi
-          ARCHIVE="$(find release -maxdepth 1 -name '*.zip' -print -quit)"
-          xcrun notarytool submit "$ARCHIVE" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_PASSWORD" \
-            --wait
+          ARCHIVES=()
+          while IFS= read -r -d '' ARCHIVE; do
+            ARCHIVES+=("$ARCHIVE")
+          done < <(find release -maxdepth 1 -name '*.zip' -print0)
+          if [[ "${#ARCHIVES[@]}" -eq 0 ]]; then
+            echo "No macOS archives were produced for notarization." >&2
+            exit 1
+          fi
+          for ARCHIVE in "${ARCHIVES[@]}"; do
+            xcrun notarytool submit "$ARCHIVE" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" \
+              --wait
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -136,9 +149,12 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, publish-npm]
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -146,6 +162,9 @@ jobs:
         with:
           node-version: 22.17.0
           cache: npm
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.5.1
 
       - uses: actions/download-artifact@v4
         with:
@@ -159,52 +178,7 @@ jobs:
       - name: Build and verify release index
         run: npm run package:release-index -- --assets release-assets
 
-      - name: Publish release assets
+      - name: Publish draft, npm package, and GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-              if [[ -f "docs/releases/$GITHUB_REF_NAME.md" ]]; then
-                gh release create "$GITHUB_REF_NAME" --verify-tag --notes-file "docs/releases/$GITHUB_REF_NAME.md" --prerelease
-              else
-                gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --prerelease
-              fi
-            elif [[ -f "docs/releases/$GITHUB_REF_NAME.md" ]]; then
-              gh release create "$GITHUB_REF_NAME" --verify-tag --notes-file "docs/releases/$GITHUB_REF_NAME.md"
-            else
-              gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-            fi
-          fi
-          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
-
-  publish-npm:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.17.0
-          cache: npm
-
-      - name: Install npm with trusted publishing support
-        run: npm install --global npm@11.5.1
-
-      - run: npm ci
-      - run: npm run build
-      - name: Publish npm package
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            npm publish --access public --provenance --tag next
-          else
-            npm publish --access public --provenance
-          fi
+        run: node scripts/release-publish.mjs --assets release-assets

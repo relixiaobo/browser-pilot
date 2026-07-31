@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { publishRelease } from '../scripts/release-publish.mjs';
 import { releaseVersionMetadata } from '../scripts/release-version-utils.mjs';
 import { testTempPrefix } from './helpers/platform.mjs';
 
@@ -14,6 +15,116 @@ const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'
 const packageLock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
 const version = packageJson.version;
 const cliCompatibility = releaseVersionMetadata(version);
+const npmArchiveName = `browser-pilot-cli-${version}.tgz`;
+
+function npmIntegrity(content) {
+  return `sha512-${createHash('sha512').update(content).digest('base64')}`;
+}
+
+async function preparePublishAssets(directory) {
+  await mkdir(directory, { recursive: true });
+  await writeChecksummedAsset(directory, `browser-pilot-${version}-fixture.zip`, 'release-fixture');
+}
+
+function releaseHarness(options = {}) {
+  const calls = [];
+  const assets = new Map(options.assets ?? []);
+  let release = options.release ? { ...options.release } : undefined;
+  let registry = options.registryIntegrity;
+  let packCount = 0;
+  let publishCount = 0;
+
+  const result = (status = 0, stdout = '', stderr = '') => ({ status, stdout, stderr });
+  const optionValues = (args, name) => args.flatMap((value, index) => (
+    value === name ? [args[index + 1]] : []
+  ));
+  return {
+    calls,
+    assets,
+    get release() { return release; },
+    get registryIntegrity() { return registry; },
+    get packCount() { return packCount; },
+    get publishCount() { return publishCount; },
+    async runGh(args) {
+      calls.push(['gh', ...args]);
+      if (args[0] === 'api') {
+        return release
+          ? result(0, JSON.stringify(release))
+          : result(1, '', 'gh: Not Found (HTTP 404)');
+      }
+      if (args[0] === 'release' && args[1] === 'download') {
+        const directory = args[args.indexOf('--dir') + 1];
+        const patterns = optionValues(args, '--pattern');
+        const selected = [...assets].filter(([name]) => patterns.length === 0 || patterns.includes(name));
+        if (selected.length === 0) return result(1, '', 'no assets matched');
+        await mkdir(directory, { recursive: true });
+        await Promise.all(selected.map(([name, bytes]) => writeFile(join(directory, name), bytes)));
+        return result();
+      }
+      if (args[0] === 'release' && args[1] === 'create') {
+        release = { draft: true, prerelease: args.includes('--prerelease') };
+        return result();
+      }
+      if (args[0] === 'release' && args[1] === 'upload') {
+        const firstAsset = args.indexOf('--clobber') + 1;
+        for (const path of args.slice(firstAsset)) {
+          assets.set(basename(path), await readFile(path));
+        }
+        return result();
+      }
+      if (args[0] === 'release' && args[1] === 'edit') {
+        release = { ...release, draft: false };
+        return result();
+      }
+      return result(1, '', `unexpected gh call: ${args.join(' ')}`);
+    },
+    async runNpm(args) {
+      calls.push(['npm', ...args]);
+      if (args[0] === 'view') {
+        return registry
+          ? result(0, JSON.stringify(registry))
+          : result(1, '', 'npm error code E404');
+      }
+      if (args[0] === 'pack') {
+        packCount += 1;
+        const directory = args[args.indexOf('--pack-destination') + 1];
+        await writeFile(join(directory, npmArchiveName), `npm-pack-${packCount}`);
+        return result(0, JSON.stringify([{ filename: npmArchiveName }]));
+      }
+      if (args[0] === 'publish') {
+        publishCount += 1;
+        registry = npmIntegrity(await readFile(args[1]));
+        return result();
+      }
+      return result(1, '', `unexpected npm call: ${args.join(' ')}`);
+    },
+  };
+}
+
+function authoritativeNpmAssets(content) {
+  const bytes = Buffer.from(content);
+  const integrity = npmIntegrity(bytes);
+  return {
+    integrity,
+    assets: [
+      [npmArchiveName, bytes],
+      [`${npmArchiveName}.integrity`, Buffer.from(`${integrity}\n`)],
+    ],
+  };
+}
+
+async function runPublish(assetsDirectory, harness) {
+  return publishRelease({
+    root,
+    assetsDirectory,
+    tag: `v${version}`,
+    repository: 'example/browser-pilot',
+  }, {
+    runGh: harness.runGh,
+    runNpm: harness.runNpm,
+    sleep: async () => {},
+  });
+}
 
 async function writeChecksummedAsset(directory, fileName, content) {
   const path = join(directory, fileName);
@@ -195,5 +306,110 @@ test('release index rejects an asset whose checksum sidecar does not match', asy
       assets,
     ], { cwd: root, timeout: 30_000 }),
     error => /checksum mismatch/.test(String(error.stderr)),
+  );
+});
+
+test('release publisher creates a draft before npm and finalizes it afterward', async t => {
+  const assets = await mkdtemp(testTempPrefix('browser-pilot-publish-fresh-'));
+  t.after(() => rm(assets, { recursive: true, force: true }));
+  await preparePublishAssets(assets);
+  const harness = releaseHarness();
+
+  const published = await runPublish(assets, harness);
+  assert.equal(published.state, 'published');
+  assert.equal(published.packed, true);
+  assert.equal(published.npmPublished, true);
+  assert.equal(harness.release.draft, false);
+  assert.equal(harness.packCount, 1);
+  assert.equal(harness.publishCount, 1);
+  assert.equal(harness.assets.has(npmArchiveName), true);
+  assert.equal(harness.assets.has(`${npmArchiveName}.integrity`), true);
+  const operations = harness.calls.map(call => `${call[0]} ${call[1]} ${call[2] ?? ''}`);
+  assert.ok(operations.indexOf('npm pack --json') < operations.indexOf('gh release create'));
+  assert.ok(operations.indexOf('gh release create') < operations.indexOf('npm publish ' + join(assets, npmArchiveName)));
+  assert.ok(operations.indexOf('npm publish ' + join(assets, npmArchiveName)) < operations.indexOf('gh release edit'));
+});
+
+test('release publisher reuses the draft npm archive when npm already succeeded', async t => {
+  const assets = await mkdtemp(testTempPrefix('browser-pilot-publish-rerun-'));
+  t.after(() => rm(assets, { recursive: true, force: true }));
+  await preparePublishAssets(assets);
+  const npm = authoritativeNpmAssets('authoritative-rerun-package');
+  const harness = releaseHarness({
+    release: { draft: true, prerelease: false },
+    assets: npm.assets,
+    registryIntegrity: npm.integrity,
+  });
+
+  const published = await runPublish(assets, harness);
+  assert.equal(published.state, 'published');
+  assert.equal(published.packed, false);
+  assert.equal(published.npmPublished, false);
+  assert.equal(harness.packCount, 0);
+  assert.equal(harness.publishCount, 0);
+  assert.equal(harness.release.draft, false);
+});
+
+test('release publisher rejects a registry integrity mismatch', async t => {
+  const assets = await mkdtemp(testTempPrefix('browser-pilot-publish-mismatch-'));
+  t.after(() => rm(assets, { recursive: true, force: true }));
+  await preparePublishAssets(assets);
+  const npm = authoritativeNpmAssets('draft-package');
+  const harness = releaseHarness({
+    release: { draft: true, prerelease: false },
+    assets: npm.assets,
+    registryIntegrity: npmIntegrity('different-registry-package'),
+  });
+
+  await assert.rejects(
+    () => runPublish(assets, harness),
+    /Draft npm archive does not match the npm registry integrity/,
+  );
+  assert.equal(harness.packCount, 0);
+  assert.equal(harness.publishCount, 0);
+  assert.equal(harness.release.draft, true);
+});
+
+test('release publisher fails when npm exists but its authoritative draft is missing', async t => {
+  const assets = await mkdtemp(testTempPrefix('browser-pilot-publish-missing-draft-'));
+  t.after(() => rm(assets, { recursive: true, force: true }));
+  await preparePublishAssets(assets);
+  const harness = releaseHarness({ registryIntegrity: npmIntegrity('already-published') });
+
+  await assert.rejects(
+    () => runPublish(assets, harness),
+    /npm already contains .* but draft release .* is missing/,
+  );
+  assert.equal(harness.packCount, 0);
+  assert.equal(harness.publishCount, 0);
+  assert.equal(harness.release, undefined);
+});
+
+test('release publisher verifies an already-public release and performs no writes', async t => {
+  const localAssets = await mkdtemp(testTempPrefix('browser-pilot-publish-public-'));
+  t.after(() => rm(localAssets, { recursive: true, force: true }));
+  const npm = authoritativeNpmAssets('public-package');
+  const releaseFileName = `browser-pilot-${version}-public.zip`;
+  const releaseBytes = Buffer.from('public-release-asset');
+  const releaseDigest = createHash('sha256').update(releaseBytes).digest('hex');
+  const harness = releaseHarness({
+    release: { draft: false, prerelease: false },
+    registryIntegrity: npm.integrity,
+    assets: [
+      ...npm.assets,
+      [releaseFileName, releaseBytes],
+      [`${releaseFileName}.sha256`, Buffer.from(`${releaseDigest}  ${releaseFileName}\n`)],
+    ],
+  });
+
+  const published = await runPublish(localAssets, harness);
+  assert.equal(published.state, 'already_public');
+  assert.equal(published.integrity, npm.integrity);
+  assert.equal(published.checksumsVerified, 1);
+  assert.equal(harness.packCount, 0);
+  assert.equal(harness.publishCount, 0);
+  assert.equal(
+    harness.calls.some(call => call[0] === 'gh' && ['upload', 'edit', 'create'].includes(call[2])),
+    false,
   );
 });
