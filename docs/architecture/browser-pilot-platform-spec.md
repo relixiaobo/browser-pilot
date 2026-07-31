@@ -439,6 +439,29 @@ released from one synchronized root version.
 - File operations reject unsafe paths and symbolic-link escapes.
 - Raw CDP is not a public Agent interface.
 
+### 20.1 Local Broker Endpoint Threat Model
+
+The Broker endpoint is local to one OS account. On Unix, a mode-0600 socket
+inside a mode-0700 directory prevents access by other OS users. On Windows,
+the named pipe relies on the platform's default DACL; the resulting limitation
+and the selected hardening strategy are recorded separately below.
+
+Endpoint authentication is in scope for:
+
+- cross-user access, in addition to the Unix filesystem boundary;
+- same-user sandboxed processes that can reach the local transport but cannot
+  read the Browser Pilot state directory;
+- accidental or confused-deputy calls from same-user software that has no
+  reason to control the Broker;
+- session impersonation based only on guessing a predictable client session
+  identifier.
+
+A malicious process running as the same OS user with access to the Browser
+Pilot state directory is out of scope. Such a process can read any shared
+secret stored there. The endpoint token is therefore not a defense against
+same-user malware. Defending that case would require per-client credentials
+issued through user interaction or an OS- or host-provided isolation boundary.
+
 ## 21. Acceptance Gates
 
 A release is acceptable only when all of the following hold:
