@@ -443,6 +443,13 @@ test('incompatible clients fail without replacing the running Broker', async t =
     clientSessionId: 'client:wrong-token',
     method: 'initialize',
   }, 'wrong-endpoint-token');
+  const tokenlessUnknownRoute = await daemonRequest(
+    socketPath,
+    '/not-an-endpoint',
+    undefined,
+    null,
+  );
+  const unknownRoute = await daemonRequest(socketPath, '/not-an-endpoint');
   const unauthorizedShutdown = await daemonRequest(socketPath, '/shutdown', {
     brokerProcessIdentity: healthBefore.brokerProcessIdentity,
     executableVersion: '999.0.0',
@@ -457,6 +464,10 @@ test('incompatible clients fail without replacing the running Broker', async t =
   assert.equal(tokenlessRpc.error.data.context.reason, 'endpoint_credential_changed');
   assert.equal(wrongTokenRpc.error.data.code, 'protocol_incompatible');
   assert.equal(wrongTokenRpc.error.data.context.reason, 'endpoint_credential_changed');
+  assert.equal(tokenlessUnknownRoute.error.data.code, 'protocol_incompatible');
+  assert.equal(tokenlessUnknownRoute.error.data.context.reason, 'endpoint_credential_changed');
+  assert.equal(unknownRoute.error.data.code, 'invalid_argument');
+  assert.equal(unknownRoute.error.message, 'Not found');
   assert.equal(unauthorizedShutdown.error.data.code, 'protocol_incompatible');
   assert.equal(unauthorizedShutdown.error.data.remediation.code, 'use_matching_executable_or_isolate');
   assert.equal(incompatible.error.data.code, 'protocol_incompatible');
