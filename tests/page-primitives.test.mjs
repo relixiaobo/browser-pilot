@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 import { chromium } from 'playwright';
+import { playwrightChromeLaunchOptions } from '../scripts/playwright-chrome.mjs';
 import {
   CaptureService,
   DropdownService,
@@ -15,7 +16,7 @@ let client;
 let transport;
 
 before(async () => {
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  browser = await chromium.launch(playwrightChromeLaunchOptions());
   page = await browser.newPage({ viewport: { width: 800, height: 500 } });
   client = await page.context().newCDPSession(page);
   transport = {

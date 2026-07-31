@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 import { chromium } from 'playwright';
+import { playwrightChromeLaunchOptions } from '../scripts/playwright-chrome.mjs';
 import {
   ActionService,
   CdpActionContinuityGuard,
@@ -14,7 +15,7 @@ import {
 let browser;
 
 before(async () => {
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  browser = await chromium.launch(playwrightChromeLaunchOptions());
 });
 
 after(async () => {

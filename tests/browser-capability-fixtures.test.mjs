@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import test, { after, before } from 'node:test';
 import { chromium } from 'playwright';
+import { playwrightChromeLaunchOptions } from '../scripts/playwright-chrome.mjs';
 import {
   ActionService,
   FrameService,
@@ -143,11 +144,9 @@ before(async () => {
   const primary = await listen(fixtureHandler(secondaryOrigin));
   primaryServer = primary.server;
   primaryOrigin = primary.origin;
-  browser = await chromium.launch({
-    channel: 'chrome',
-    headless: true,
+  browser = await chromium.launch(playwrightChromeLaunchOptions({
     args: ['--site-per-process', `--isolate-origins=${secondaryOrigin}`],
-  });
+  }));
   browserCdp = await browser.newBrowserCDPSession();
 });
 
