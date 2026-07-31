@@ -934,6 +934,27 @@ test('bp wait fails without creating or selecting a tab when none is selected', 
   assert.equal(daemon.calls.some(call => call.body?.params?.name === 'browser.tabs.switch'), false);
 });
 
+test('bp wait URL patterns are case-insensitive full-value wildcards', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-wait-url-'));
+  const daemon = await startFakeDaemon(root);
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const matched = await runCli(root, [
+    '--timeout', '1000', 'wait', '--url', 'HTTPS://EXAMPLE.TEST/*',
+  ]);
+  assert.equal(matched.condition, 'url');
+  assert.equal(matched.matched.url, 'https://example.test/form');
+
+  const missed = await runCliFailure(root, [
+    '--timeout', '20', 'wait', '--url', 'example.test', '--interval', '100',
+  ]);
+  assert.equal(missed.output.code, 'wait_timeout');
+  assert.deepEqual(missed.output.context, { condition: 'url', timeoutMs: 20 });
+});
+
 test('bp status preserves structured Broker failures while resuming a session', async t => {
   const root = await mkdtemp(testTempPrefix('bp-cli-status-resume-error-'));
   const daemon = await startFakeDaemon(root, {

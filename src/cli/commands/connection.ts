@@ -16,6 +16,7 @@ import type {
   JsonValue,
 } from '../../protocol/model.js';
 import { serializeStructuralText } from '../../structural-text.js';
+import { wildcardMatch } from '../../wildcard.js';
 import type { CliCommandContext } from '../context.js';
 import { parseLimit } from '../parse.js';
 
@@ -40,15 +41,6 @@ function cliCommandOutcome(outcome: CommandOutcome): Record<string, JsonValue> {
     ...(outcome.result !== undefined ? { result: outcome.result } : {}),
     ...(outcome.error !== undefined ? { error: outcome.error as unknown as JsonValue } : {}),
   };
-}
-
-function matchesUrl(url: string, pattern: string): boolean {
-  if (!pattern.includes('*')) return url.includes(pattern);
-  const source = pattern
-    .split('*')
-    .map(part => part.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&'))
-    .join('.*');
-  return new RegExp(`^${source}$`).test(url);
 }
 
 export function register(program: Command, ctx: CliCommandContext): void {
@@ -259,7 +251,7 @@ program.command('wait')
       if (opts.url !== undefined) {
         const tabs = await client.listTabs('all');
         const current = tabs.find(tab => tab.targetId === target!.targetId);
-        if (current && matchesUrl(current.url, String(opts.url))) {
+        if (current && wildcardMatch(current.url, String(opts.url))) {
           matched = {
             title: current.title,
             url: current.url,

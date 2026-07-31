@@ -25,6 +25,10 @@ URL, text, and selector waits require a selected tab. A `no_selected_tab`
 result is side-effect free: list and select an existing tab, or explicitly
 open a new one, before retrying the wait.
 
+URL patterns are case-insensitive and match the full URL. `*` matches any
+sequence of characters. Write `*fragment*` for a contains-style wait; a bare
+`fragment` matches only a URL whose entire value is `fragment`.
+
 Prefer `bp wait` to shell `sleep` and ad hoc polling loops. After a successful
 wait, inspect the relevant tab, dialog, download list, or page state.
 

@@ -9,6 +9,7 @@ import type {
   NetworkRuleId,
 } from '../protocol/model.js';
 import type { Transport } from '../transport.js';
+import { wildcardMatch } from '../wildcard.js';
 import type { PublishBrowserEventInput } from './event-journal.js';
 import { accessBlockedAgentHint } from './agent-hint-service.js';
 
@@ -119,17 +120,6 @@ function boundedString(value: unknown, limit: number): string {
 
 function networkKey(sessionId: string, networkId: string): string {
   return `${sessionId}\u0000${networkId}`;
-}
-
-function wildcardMatch(value: string, pattern: string): boolean {
-  try {
-    const expression = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*/g, '.*');
-    return new RegExp(`^${expression}$`, 'i').test(value);
-  } catch {
-    return false;
-  }
 }
 
 function headersFromCdp(value: unknown): WorkspaceNetworkHeader[] {

@@ -21,6 +21,7 @@ export * from './screenshot-annotation-service.js';
 export * from './frame-service.js';
 export * from './cookie-service.js';
 export * from './workspace-network-controller.js';
+export { wildcardMatch } from '../wildcard.js';
 export * from './browser-control-policy.js';
 export * from './broker-runtime.js';
 export * from './controlled-target-registry.js';
