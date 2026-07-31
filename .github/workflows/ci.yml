@@ -31,6 +31,22 @@ jobs:
       - run: npm run test:distribution
       - run: npm run build:standalone:js
 
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: npm
+
+      - run: npm ci
+      - run: npm run test:unit
+      - run: npx tsc --noEmit
+      - run: npm run test:distribution
+
   browser:
     needs: validate
     runs-on: ubuntu-latest

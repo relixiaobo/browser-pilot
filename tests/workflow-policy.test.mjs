@@ -34,6 +34,18 @@ test('CI runs browser gates after validation and preserves failure diagnostics',
   assert.match(browser, /path: playwright-report\//);
 });
 
+test('CI exercises the portable unit and distribution contracts on Windows', () => {
+  const jobs = workflowJobs(ci);
+  const windows = jobs.get('windows');
+  assert.ok(windows, 'CI must define a Windows job');
+  assert.match(windows, /^    runs-on: windows-latest$/m);
+  assert.match(windows, /uses: actions\/setup-node@v4[\s\S]*node-version: 22\.17\.0/);
+  assert.match(windows, /run: npm run test:unit/);
+  assert.match(windows, /run: npx tsc --noEmit/);
+  assert.match(windows, /run: npm run test:distribution/);
+  assert.doesNotMatch(windows, /playwright|test:browser/);
+});
+
 test('every workflow job has a timeout and cancellation remains CI-only', () => {
   for (const [workflow, source] of [['CI', ci], ['Release', release]]) {
     const jobs = workflowJobs(source);
