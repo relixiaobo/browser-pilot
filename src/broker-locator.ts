@@ -2,18 +2,16 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
-  closeSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   renameSync,
   realpathSync,
   statSync,
   unlinkSync,
   writeFileSync,
-  writeSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
@@ -123,6 +121,20 @@ export interface AcquireDaemonOwnerLockOptions {
   pid?: number;
   processAlive?: (pid: number) => boolean;
   processStartIdentity?: (pid: number) => string | undefined;
+  removeOwnerLock?: (paths: BrowserPilotPaths, expected: DaemonOwnerRecord) => boolean;
+}
+
+export interface WindowsCommandResult {
+  status: number | null;
+  stdout?: string;
+  stderr?: string;
+  error?: Error;
+}
+
+export interface RestrictWindowsBrokerStateOptions {
+  platform?: NodeJS.Platform;
+  systemRoot?: string;
+  runCommand?: (executable: string, args: readonly string[]) => WindowsCommandResult;
 }
 
 export class DaemonOwnerError extends Error {
@@ -165,48 +177,71 @@ export function ensureBrokerDirectoriesSync(paths: BrowserPilotPaths = BROWSER_P
   if (paths.runtimeDir !== paths.stateDir) ensurePrivateDirectorySync(paths.runtimeDir);
 }
 
-function windowsSystemExecutable(name: string): string {
-  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+function windowsSystemExecutable(name: string, systemRoot: string): string {
   return join(systemRoot, 'System32', name);
 }
 
-function currentWindowsUserSidSync(): string {
-  const result = spawnSync(windowsSystemExecutable('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
+function runWindowsCommandSync(executable: string, args: readonly string[]): WindowsCommandResult {
+  const result = spawnSync(executable, [...args], {
     encoding: 'utf8',
     windowsHide: true,
   });
-  const sid = result.status === 0 ? result.stdout.match(/S-\d+(?:-\d+)+/i)?.[0] : undefined;
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...(result.error ? { error: result.error } : {}),
+  };
+}
+
+function currentWindowsUserSidSync(
+  systemRoot: string,
+  runCommand: (executable: string, args: readonly string[]) => WindowsCommandResult,
+): string {
+  const result = runCommand(
+    windowsSystemExecutable('whoami.exe', systemRoot),
+    ['/user', '/fo', 'csv', '/nh'],
+  );
+  const sid = result.status === 0 ? result.stdout?.match(/S-\d+(?:-\d+)+/i)?.[0] : undefined;
   if (!sid) throw new Error('Cannot resolve the current Windows user SID for Broker state protection');
   return sid;
 }
 
-function restrictWindowsPathAclSync(path: string, directory: boolean, userSid: string): void {
+function restrictWindowsPathAclSync(
+  path: string,
+  directory: boolean,
+  userSid: string,
+  systemRoot: string,
+  runCommand: (executable: string, args: readonly string[]) => WindowsCommandResult,
+): void {
   const inherited = directory ? '(OI)(CI)' : '';
-  const result = spawnSync(windowsSystemExecutable('icacls.exe'), [
+  const result = runCommand(windowsSystemExecutable('icacls.exe', systemRoot), [
     path,
     '/inheritance:r',
     '/grant:r',
     `*${userSid}:${inherited}F`,
     `*S-1-5-18:${inherited}F`,
     `*S-1-5-32-544:${inherited}F`,
-  ], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
+  ]);
   if (result.status !== 0) {
-    const detail = result.stderr.trim() || result.stdout.trim() || result.error?.message;
+    const detail = result.stderr?.trim() || result.stdout?.trim() || result.error?.message;
     throw new Error(`Cannot restrict Windows ACL for Browser Pilot path ${path}${detail ? `: ${detail}` : ''}`);
   }
 }
 
 export function restrictWindowsBrokerStateSync(
   paths: BrowserPilotPaths = BROWSER_PILOT_PATHS,
+  options: RestrictWindowsBrokerStateOptions = {},
 ): void {
-  if (process.platform !== 'win32') return;
+  if ((options.platform ?? process.platform) !== 'win32') return;
+  const systemRoot = options.systemRoot ?? process.env.SystemRoot ?? 'C:\\Windows';
+  const runCommand = options.runCommand ?? runWindowsCommandSync;
   ensurePrivateDirectorySync(paths.stateDir);
-  const userSid = currentWindowsUserSidSync();
-  restrictWindowsPathAclSync(paths.stateDir, true, userSid);
-  if (existsSync(paths.locatorFile)) restrictWindowsPathAclSync(paths.locatorFile, false, userSid);
+  const userSid = currentWindowsUserSidSync(systemRoot, runCommand);
+  restrictWindowsPathAclSync(paths.stateDir, true, userSid, systemRoot, runCommand);
+  if (existsSync(paths.locatorFile)) {
+    restrictWindowsPathAclSync(paths.locatorFile, false, userSid, systemRoot, runCommand);
+  }
 }
 
 function parseJsonFile(path: string): unknown {
@@ -383,6 +418,24 @@ function atomicWriteJson(path: string, value: object): void {
     renameSync(temporary, path);
   } finally {
     try { unlinkSync(temporary); } catch { /* renamed or absent */ }
+  }
+}
+
+function createExclusiveJsonFileSync(path: string, value: object): boolean {
+  ensurePrivateDirectorySync(dirname(path));
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: PRIVATE_FILE_MODE, flag: 'wx' });
+    if (process.platform !== 'win32') chmodSync(temporary, PRIVATE_FILE_MODE);
+    try {
+      linkSync(temporary, path);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw error;
+    }
+  } finally {
+    try { unlinkSync(temporary); } catch { /* linked or absent */ }
   }
 }
 
@@ -567,18 +620,7 @@ function createDaemonOwnerLock(
   paths: BrowserPilotPaths,
   record: DaemonOwnerRecord,
 ): DaemonOwnerLock | undefined {
-  let descriptor: number;
-  try {
-    descriptor = openSync(paths.daemonOwnerLockFile, 'wx', PRIVATE_FILE_MODE);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined;
-    throw error;
-  }
-  try {
-    writeSync(descriptor, `${JSON.stringify(record)}\n`);
-  } finally {
-    closeSync(descriptor);
-  }
+  if (!createExclusiveJsonFileSync(paths.daemonOwnerLockFile, record)) return undefined;
 
   let released = false;
   const ownsLock = (): boolean => {
@@ -616,10 +658,10 @@ function createDaemonOwnerLock(
   };
 }
 
-function unverifiableDaemonOwner(message: string): DaemonOwnerError {
+function unverifiableDaemonOwner(message: string, paths: BrowserPilotPaths): DaemonOwnerError {
   return new DaemonOwnerError(
     'daemon_owner_unverifiable',
-    `${message} Inspect or stop the recorded process, or set BROWSER_PILOT_HOME to a separate directory before retrying.`,
+    `${message} Confirm that no Browser Pilot Broker owns this home, then remove the lock file at ${paths.daemonOwnerLockFile} and retry, or set BROWSER_PILOT_HOME to a separate directory.`,
   );
 }
 
@@ -631,11 +673,12 @@ export function acquireDaemonOwnerLockSync(
   const pid = options.pid ?? process.pid;
   const alive = options.processAlive ?? processIsAlive;
   const processStartIdentity = options.processStartIdentity ?? readProcessStartIdentitySync;
+  const removeOwnerLock = options.removeOwnerLock ?? removeDaemonOwnerLock;
   ensureBrokerDirectoriesSync(paths);
 
   const currentStartIdentity = processStartIdentity(pid);
   if (!currentStartIdentity) {
-    throw unverifiableDaemonOwner(`Cannot read the start identity of Browser Pilot daemon pid ${pid}.`);
+    throw unverifiableDaemonOwner(`Cannot read the start identity of Browser Pilot daemon pid ${pid}.`, paths);
   }
 
   for (;;) {
@@ -653,6 +696,7 @@ export function acquireDaemonOwnerLockSync(
     if (!owner) {
       throw unverifiableDaemonOwner(
         `The Browser Pilot daemon owner lock at ${paths.daemonOwnerLockFile} is invalid or inaccessible.`,
+        paths,
       );
     }
     if (alive(owner.pid)) {
@@ -660,6 +704,7 @@ export function acquireDaemonOwnerLockSync(
       if (!actualStartIdentity) {
         throw unverifiableDaemonOwner(
           `Cannot verify the start identity of the live Browser Pilot daemon owner pid ${owner.pid}.`,
+          paths,
         );
       }
       if (actualStartIdentity === owner.processStartIdentity) {
@@ -669,7 +714,12 @@ export function acquireDaemonOwnerLockSync(
         );
       }
     }
-    if (!removeDaemonOwnerLock(paths, owner)) continue;
+    if (!removeOwnerLock(paths, owner)) {
+      throw unverifiableDaemonOwner(
+        `The stale Browser Pilot daemon owner lock at ${paths.daemonOwnerLockFile} could not be removed.`,
+        paths,
+      );
+    }
   }
 }
 
@@ -705,18 +755,7 @@ function removeStartupLock(path: string, expectedToken?: string): boolean {
 }
 
 function createStartupLock(path: string, record: StartupLockRecord): BrokerStartupLock | undefined {
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, 'wx', PRIVATE_FILE_MODE);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined;
-    throw error;
-  }
-  try {
-    writeSync(descriptor, `${JSON.stringify(record)}\n`);
-  } finally {
-    closeSync(descriptor);
-  }
+  if (!createExclusiveJsonFileSync(path, record)) return undefined;
   let released = false;
   return {
     release() {

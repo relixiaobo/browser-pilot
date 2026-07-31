@@ -14,6 +14,7 @@ import {
   readProcessStartIdentitySync,
   readBrokerVersionHistorySync,
   removeBrokerLocatorSync,
+  restrictWindowsBrokerStateSync,
   resolveBrowserPilotPaths,
   updateBrokerVersionHistorySync,
   writeBrokerLocatorSync,
@@ -114,6 +115,51 @@ test('Broker locator files are private, validated, and removed only by their own
   assert.deepEqual(readBrokerLocatorSync(paths), locator);
   removeBrokerLocatorSync(locator.brokerProcessIdentity, paths);
   assert.equal(readBrokerLocatorSync(paths), undefined);
+});
+
+test('Windows Broker ACL enforcement is fail-closed and covers every state path', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-windows-acl-'));
+  const paths = testPaths(root);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  ensureBrokerDirectoriesSync(paths);
+  await writeFile(paths.locatorFile, '{}\n', { mode: 0o600 });
+
+  const calls = [];
+  const success = (executable, args) => {
+    calls.push({ executable, args: [...args] });
+    if (executable.includes('whoami.exe')) {
+      return { status: 0, stdout: '"browser-pilot-test","S-1-5-21-1000"\r\n' };
+    }
+    return { status: 0, stdout: 'processed' };
+  };
+  restrictWindowsBrokerStateSync(paths, {
+    platform: 'win32',
+    systemRoot: 'C:\\Windows',
+    runCommand: success,
+  });
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].executable.includes('whoami.exe'), true);
+  assert.deepEqual(calls.slice(1).map(call => call.args[0]), [paths.stateDir, paths.locatorFile]);
+  assert.equal(calls[1].args.includes('*S-1-5-21-1000:(OI)(CI)F'), true);
+  assert.equal(calls[2].args.includes('*S-1-5-21-1000:F'), true);
+
+  assert.throws(
+    () => restrictWindowsBrokerStateSync(paths, {
+      platform: 'win32',
+      runCommand: () => ({ status: 1, stderr: 'whoami failed' }),
+    }),
+    /Cannot resolve the current Windows user SID/,
+  );
+  assert.throws(
+    () => restrictWindowsBrokerStateSync(paths, {
+      platform: 'win32',
+      runCommand: (executable) => executable.includes('whoami.exe')
+        ? { status: 0, stdout: 'S-1-5-21-1000' }
+        : { status: 5, stderr: 'Access is denied' },
+    }),
+    /Cannot restrict Windows ACL.*Access is denied/,
+  );
 });
 
 test('Broker version history is private, bounded, and excludes transient browser state', async t => {
@@ -254,12 +300,64 @@ test('daemon owner fails closed when a live owner start identity is unreadable',
       ),
     }),
     error => error?.code === 'daemon_owner_unverifiable' &&
-      /Inspect or stop the recorded process/.test(error.message) &&
+      error.message.includes(paths.daemonOwnerLockFile) &&
+      /remove the lock file/.test(error.message) &&
       /BROWSER_PILOT_HOME/.test(error.message),
   );
   assert.equal(readDaemonOwnerSync(paths).token, owner.record.token);
   assert.equal(await readFile(paths.pidFile, 'utf8'), 'owner state\n');
   owner.release();
+});
+
+test('daemon owner lock removal failure stops after one fail-closed attempt', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-stuck-daemon-owner-'));
+  const paths = testPaths(root);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const owner = acquireDaemonOwnerLockSync({
+    paths,
+    pid: 42_101,
+    processStartIdentity: () => 'test:start:owner',
+  });
+  let removalAttempts = 0;
+
+  assert.throws(
+    () => acquireDaemonOwnerLockSync({
+      paths,
+      pid: 42_102,
+      processAlive: () => false,
+      processStartIdentity: () => 'test:start:contender',
+      removeOwnerLock: () => {
+        removalAttempts += 1;
+        return false;
+      },
+    }),
+    error => error?.code === 'daemon_owner_unverifiable' &&
+      /could not be removed/.test(error.message) &&
+      error.message.includes(paths.daemonOwnerLockFile),
+  );
+  assert.equal(removalAttempts, 1);
+  assert.equal(readDaemonOwnerSync(paths).token, owner.record.token);
+  owner.release();
+});
+
+test('invalid daemon owner lock reports the exact manual recovery path', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-invalid-daemon-owner-'));
+  const paths = testPaths(root);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  ensureBrokerDirectoriesSync(paths);
+  await writeFile(paths.daemonOwnerLockFile, '', { mode: 0o600 });
+
+  assert.throws(
+    () => acquireDaemonOwnerLockSync({
+      paths,
+      pid: 42_201,
+      processStartIdentity: () => 'test:start:contender',
+    }),
+    error => error?.code === 'daemon_owner_unverifiable' &&
+      /invalid or inaccessible/.test(error.message) &&
+      error.message.includes(paths.daemonOwnerLockFile) &&
+      /remove the lock file/.test(error.message),
+  );
 });
 
 test('late stale daemon cleanup preserves replacement state and endpoint', async t => {

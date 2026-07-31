@@ -55,9 +55,9 @@ async function main() {
   const brokerProcessIdentity = `${process.pid}:${startedAt}`;
   const daemonToken = randomBytes(32).toString('base64url');
   const daemonOwner = acquireDaemonOwnerLockSync();
-  restrictWindowsBrokerStateSync();
   const cleanup = (): void => { daemonOwner.cleanup(brokerProcessIdentity); };
   process.once('exit', cleanup);
+  restrictWindowsBrokerStateSync();
   daemonOwner.clearStaleBrokerState();
   const cdp = new ManagedTargetJanitorClient({
     onLog: message => process.stderr.write(`Managed browser connection: ${message}\n`),
