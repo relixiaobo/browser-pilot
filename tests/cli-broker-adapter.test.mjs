@@ -270,6 +270,59 @@ async function startFakeDaemon(root, options = {}) {
           elementCount: 1,
         };
       case 'browser.click': return observation({ observationId: 'observation:after-click' });
+      case 'browser.locate':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: 'target:managed',
+          selector: args.selector,
+          x: 50,
+          y: 35,
+          top: 20,
+          left: 10,
+          width: 80,
+          height: 30,
+        };
+      case 'browser.type': return observation({ observationId: 'observation:after-type' });
+      case 'browser.keyboard':
+        return observation({
+          observationId: 'observation:after-keyboard',
+          page: {
+            viewportWidth: 800,
+            viewportHeight: 600,
+            documentWidth: 800,
+            documentHeight: 1200,
+            scrollX: 0,
+            scrollY: 0,
+            pixelsAbove: 0,
+            pixelsBelow: 600,
+            pixelsLeft: 0,
+            pixelsRight: 0,
+            scrollPercentX: 0,
+            scrollPercentY: 0,
+          },
+          hints: [{ code: 'focused', message: 'Keyboard target retained focus' }],
+        });
+      case 'browser.press': return observation({ observationId: 'observation:after-press' });
+      case 'browser.eval':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: 'target:managed',
+          value: { heading: 'Example Form', count: 1 },
+          truncated: false,
+        };
+      case 'browser.read':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: 'target:managed',
+          title: 'Example Form',
+          url: 'https://example.test/form',
+          text: 'Submit this form',
+          length: 16,
+          truncated: false,
+        };
       case 'browser.search':
         return {
           workspaceId: 'workspace:cli', leaseId: 'lease:cli', targetId: 'target:managed',
@@ -310,6 +363,79 @@ async function startFakeDaemon(root, options = {}) {
           url: 'https://example.test/form',
           artifact: artifact('artifact:screenshot', 'screenshot', 'image/png', 'capture.png'),
           ...(args.annotations ? { annotationCount: Array.isArray(args.annotations.refs) ? args.annotations.refs.length : 1 } : {}),
+        };
+      case 'browser.pdf':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: 'target:managed',
+          url: 'https://example.test/form',
+          artifact: artifact('artifact:pdf', 'pdf', 'application/pdf', 'page.pdf'),
+        };
+      case 'browser.cookies.list':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: 'target:managed',
+          cookies: [{
+            name: 'session',
+            value: 'fake-cookie-value',
+            domain: '.example.test',
+            path: '/',
+            expires: -1,
+            httpOnly: true,
+            secure: true,
+            sameSite: 'Lax',
+          }],
+        };
+      case 'browser.frames.list':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: 'target:managed',
+          url: 'https://example.test/form',
+          frames: [
+            { frameId: 'frame:top', url: 'https://example.test/form', name: '' },
+            { frameId: 'frame:child', url: 'https://example.test/frame', name: 'checkout' },
+          ],
+        };
+      case 'browser.frames.switch':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: 'target:managed',
+          frameId: args.frameId ?? 'frame:top',
+        };
+      case 'browser.auth.set':
+      case 'browser.auth.clear':
+        return { workspaceId: 'workspace:cli', leaseId: 'lease:cli', ok: true };
+      case 'browser.dialogs.list':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          dialogs: [{
+            dialogId: 'dialog:contract',
+            targetId: 'target:managed',
+            type: 'prompt',
+            message: 'Enter a label',
+            defaultPrompt: 'draft',
+            openedAt: 123,
+          }],
+        };
+      case 'browser.dialogs.respond':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: 'target:managed',
+          dialogId: args.dialogId,
+          action: args.action,
+        };
+      case 'browser.tabs.switch':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          targetId: args.targetId,
+          selected: true,
         };
       case 'browser.network.requests':
         return {
@@ -353,6 +479,43 @@ async function startFakeDaemon(root, options = {}) {
           mimeType: 'application/octet-stream',
           bodyTruncated: false,
         };
+      case 'browser.network.rules.add':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          ruleId: `rule:${args.type}-11111111-1111-4111-8111-111111111111`,
+        };
+      case 'browser.network.rules.list':
+        return {
+          workspaceId: 'workspace:cli',
+          leaseId: 'lease:cli',
+          rules: [
+            {
+              ruleId: 'rule:block-11111111-1111-4111-8111-111111111111',
+              type: 'block',
+              pattern: '*analytics*',
+              enabled: true,
+            },
+            {
+              ruleId: 'rule:mock-11111111-1111-4111-8111-111111111111',
+              type: 'mock',
+              pattern: '*api/data*',
+              status: 201,
+              body: '{"created":true}',
+              enabled: true,
+            },
+            {
+              ruleId: 'rule:headers-11111111-1111-4111-8111-111111111111',
+              type: 'headers',
+              pattern: '*api*',
+              headers: [{ name: 'X-Test', value: 'contract' }],
+              enabled: true,
+            },
+          ],
+        };
+      case 'browser.network.rules.remove':
+      case 'browser.network.clear':
+        return { workspaceId: 'workspace:cli', leaseId: 'lease:cli', ok: true };
       default: throw new Error(`Unexpected tool: ${name} ${JSON.stringify(args)}`);
     }
   };
@@ -405,6 +568,8 @@ async function startFakeDaemon(root, options = {}) {
           managedTabSets: [{ id: 'managed-tab-set:cli' }],
           eventCursor: 'cursor:7',
         };
+      case 'workspaces/release':
+        return { workspaceId: body.params.workspaceId, released: true };
       case 'leases/create':
         return {
           lease: {
@@ -969,6 +1134,544 @@ test('CLI reuses a mutating idempotency key after dispatch response loss', async
     /^cli-request:retry-open-42:browser\.open:[A-Za-z0-9_-]{32}$/,
   );
   assert.equal(daemon.droppedToolDispatches, 1);
+});
+
+test('CLI JSON output contract covers every command', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-json-contract-'));
+  const daemon = await startFakeDaemon(root);
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const uploadPath = join(root, 'contract-upload.txt');
+  const downloadPath = join(root, 'contract-download.csv');
+  const screenshotPath = join(root, 'contract-screenshot.png');
+  const pdfPath = join(root, 'contract.pdf');
+  await writeFile(uploadPath, 'contract upload');
+
+  const outputs = {};
+  outputs.status = await runCli(root, ['status']);
+  outputs.commands = await runCli(root, ['commands']);
+  outputs.command = await runCli(root, ['command', 'command:recent']);
+  outputs.cancel = await runCli(root, ['cancel', 'command:running']);
+  outputs.wait = await runCli(root, ['--timeout', '1000', 'wait', '--text', 'Submit']);
+  outputs.wait.elapsedMs = '<elapsedMs>';
+  outputs.browsers = await runCli(root, ['browsers']);
+  outputs.connect = await runCli(root, ['connect']);
+  outputs.profiles = await runCli(root, ['profiles', '--identify']);
+  outputs.profile = await runCli(root, ['profile', 'alice@personal.example.test']);
+  outputs.open = await runCli(root, [
+    'open', 'https://contract.example.test/task', '--new', '--profile', '1', '--limit', '12',
+  ]);
+  outputs.snapshot = await runCli(root, ['snapshot', '--limit', '9']);
+  outputs.click = await runCli(root, ['click', '1', '--double', '--limit', '7']);
+  outputs.locate = await runCli(root, ['locate', '.editor']);
+  outputs.type = await runCli(root, ['type', '1', 'contract text', '--clear', '--submit']);
+  outputs.keyboard = await runCli(root, [
+    'keyboard', 'keyboard text', '--clear', '--delay', '5', '--click', '.editor', '--limit', '7',
+  ]);
+  outputs.press = await runCli(root, ['press', 'Control+a', '--limit', '8']);
+  outputs.eval = await runCli(root, ['eval', 'document.title']);
+  outputs.read = await runCli(root, ['read', 'main', '--limit', '200']);
+  outputs.search = await runCli(root, ['search', 'Submit', '--whole-word']);
+  outputs.find = await runCli(root, ['find', 'button', '--attributes', 'id,data-testid']);
+  outputs.scroll = await runCli(root, ['scroll', 'down', '--amount', '0.8']);
+  outputs.dropdown = await runCli(root, ['dropdown', '1']);
+  outputs.select = await runCli(root, ['select', '1', 'China']);
+  outputs.upload = await runCli(root, ['upload', uploadPath]);
+  outputs.downloads = await runCli(root, ['downloads']);
+  outputs.download = await runCli(root, ['download', '1', downloadPath]);
+  outputs.screenshot = await runCli(root, ['screenshot', screenshotPath, '--annotate', '1']);
+  outputs.pdf = await runCli(root, ['pdf', pdfPath, '--landscape']);
+  outputs.cookies = await runCli(root, ['cookies', 'example.test']);
+  outputs.frame = await runCli(root, ['frame']);
+  outputs.auth = await runCli(root, ['auth', 'contract-user', 'contract-password']);
+  outputs.dialogs = await runCli(root, ['dialogs']);
+  outputs.dialog = await runCli(root, ['dialog', 'dialog:contract', '--accept', '--prompt', 'final']);
+  outputs.tabs = await runCli(root, ['tabs']);
+  outputs.tab = await runCli(root, ['tab', '1']);
+  outputs.close = await runCli(root, ['close']);
+  outputs.net = await runCli(root, [
+    'net', '--url', '*api*', '--method', 'GET', '--status', '2xx', '--type', 'xhr,fetch',
+  ]);
+  outputs['net show'] = await runCli(root, ['net', 'show', '4']);
+  outputs['net block'] = await runCli(root, ['net', 'block', '*analytics*']);
+  outputs['net mock'] = await runCli(root, [
+    'net', 'mock', '*api/data*', '--body', '{"created":true}', '--status', '201',
+  ]);
+  outputs['net headers'] = await runCli(root, [
+    'net', 'headers', '*api*', 'X-Test: contract',
+  ]);
+  outputs['net rules'] = await runCli(root, ['net', 'rules']);
+  outputs['net remove'] = await runCli(root, [
+    'net', 'remove', 'rule:block-11111111-1111-4111-8111-111111111111',
+  ]);
+  outputs['net clear'] = await runCli(root, ['net', 'clear']);
+  outputs.disconnect = await runCli(root, ['disconnect']);
+
+  const profileRepresentatives = {
+    work: [{
+      targetId: 'target:managed',
+      title: 'Example Form',
+      url: 'https://example.test/form',
+    }],
+    personal: [{
+      targetId: 'target:personal',
+      title: 'Personal Inbox',
+      url: 'https://mail.example.test/',
+    }],
+  };
+  const unidentifiedProfiles = [
+    {
+      index: 1,
+      profileContextId: 'profile-context:work',
+      label: 'Profile 1',
+      identityStatus: 'unidentified',
+      tabCount: 2,
+      eligibleTabCount: 2,
+      selected: false,
+      representativeTabs: profileRepresentatives.work,
+    },
+    {
+      index: 2,
+      profileContextId: 'profile-context:personal',
+      label: 'Profile 2',
+      identityStatus: 'unidentified',
+      tabCount: 1,
+      eligibleTabCount: 1,
+      selected: false,
+      representativeTabs: profileRepresentatives.personal,
+    },
+  ];
+  const identifiedProfiles = [
+    {
+      ...unidentifiedProfiles[0],
+      identityStatus: 'verified',
+      profileName: 'Work Account',
+      accountName: 'Alice Example',
+      accountEmail: 'alice@work.example.test',
+      profileDirectory: 'Default',
+    },
+    {
+      ...unidentifiedProfiles[1],
+      identityStatus: 'verified',
+      profileName: 'Personal Account',
+      accountName: 'Alice',
+      accountEmail: 'alice@personal.example.test',
+      profileDirectory: 'Profile 1',
+    },
+  ];
+  const observationOutput = {
+    ok: true,
+    title: 'Example Form',
+    url: 'https://example.test/form',
+    elements: [{ ref: 1, role: 'button', name: 'Submit' }],
+    truncated: false,
+    truncationReasons: [],
+    hints: [],
+    profileContextId: 'profile-context:work',
+  };
+  const commandDescriptor = {
+    id: 'command:recent',
+    method: 'browser.click',
+    mutating: true,
+    status: 'completed',
+    acceptedAt: 10,
+    deadlineAt: 60_010,
+    dispatchedAt: 11,
+    completedAt: 12,
+  };
+
+  assert.deepEqual(outputs, {
+    status: {
+      ok: true,
+      service: { state: 'running', version: PACKAGE_VERSION },
+      browser: { id: 'browser:fake', product: 'Chrome', state: 'ready' },
+      session: {
+        state: 'active',
+        expiresAt: 301_000,
+        profile: null,
+        target: {
+          index: 1,
+          title: 'Example Form',
+          url: 'https://example.test/form',
+          origin: 'managed',
+          profileContextId: 'profile-context:work',
+        },
+      },
+      commands: { active: [], uncertain: [] },
+      recovery: { required: false },
+    },
+    commands: { ok: true, commands: [commandDescriptor] },
+    command: {
+      ok: true,
+      command: commandDescriptor,
+      result: { url: 'https://example.test/complete' },
+    },
+    cancel: {
+      ok: true,
+      command: {
+        id: 'command:running',
+        method: 'browser.open',
+        mutating: true,
+        status: 'cancelled',
+        acceptedAt: 10,
+        deadlineAt: 60_010,
+        completedAt: 12,
+      },
+    },
+    wait: {
+      ok: true,
+      condition: 'text',
+      elapsedMs: '<elapsedMs>',
+      matched: {
+        title: 'Example Form',
+        url: 'https://example.test/form',
+        match: {
+          index: 1,
+          text: 'Submit',
+          context: 'Submit this form',
+          tagName: 'button',
+          visible: true,
+          x: 10,
+          y: 20,
+          width: 80,
+          height: 30,
+        },
+      },
+    },
+    browsers: {
+      ok: true,
+      browsers: [{
+        id: 'browser:fake',
+        product: 'Chrome',
+        channel: 'stable',
+        userDataRoot: '/profiles/fake',
+        processState: 'running',
+        remoteDebuggingState: 'enabled',
+        authorizationState: 'authorized',
+        state: 'ready',
+      }],
+    },
+    connect: {
+      ok: true,
+      browser: 'Chrome',
+      profileSelectionRequired: true,
+      profiles: unidentifiedProfiles,
+    },
+    profiles: { ok: true, profiles: identifiedProfiles },
+    profile: {
+      ok: true,
+      profileContextId: 'profile-context:personal',
+      label: 'Profile 2',
+      identityStatus: 'verified',
+      profileName: 'Personal Account',
+      accountName: 'Alice',
+      accountEmail: 'alice@personal.example.test',
+      profileDirectory: 'Profile 1',
+    },
+    open: {
+      ...observationOutput,
+      url: 'https://contract.example.test/task',
+    },
+    snapshot: observationOutput,
+    click: observationOutput,
+    locate: { ok: true, x: 50, y: 35, top: 20, left: 10, width: 80, height: 30 },
+    type: observationOutput,
+    keyboard: {
+      ok: true,
+      typed: 'keyboard text',
+      title: 'Example Form',
+      url: 'https://example.test/form',
+      elements: [{ ref: 1, role: 'button', name: 'Submit' }],
+      truncated: false,
+      truncationReasons: [],
+    },
+    press: observationOutput,
+    eval: {
+      ok: true,
+      value: { heading: 'Example Form', count: 1 },
+      truncated: false,
+    },
+    read: {
+      ok: true,
+      title: 'Example Form',
+      url: 'https://example.test/form',
+      text: 'Submit this form',
+      length: 16,
+      truncated: false,
+    },
+    search: {
+      ok: true,
+      workspaceId: 'workspace:cli',
+      leaseId: 'lease:cli',
+      targetId: 'target:managed',
+      url: 'https://example.test/form',
+      title: 'Example Form',
+      totalMatches: 1,
+      matches: [{
+        index: 1,
+        text: 'Submit',
+        context: 'Submit this form',
+        tagName: 'button',
+        visible: true,
+        x: 10,
+        y: 20,
+        width: 80,
+        height: 30,
+      }],
+      truncated: false,
+    },
+    find: {
+      ok: true,
+      workspaceId: 'workspace:cli',
+      leaseId: 'lease:cli',
+      targetId: 'target:managed',
+      url: 'https://example.test/form',
+      title: 'Example Form',
+      totalMatches: 1,
+      elements: [{
+        index: 1,
+        tagName: 'button',
+        role: 'button',
+        name: 'Submit',
+        text: 'Submit',
+        visible: true,
+        enabled: true,
+        x: 10,
+        y: 20,
+        width: 80,
+        height: 30,
+        attributes: [],
+      }],
+      truncated: false,
+    },
+    scroll: {
+      ...observationOutput,
+      page: {
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1800,
+        scrollX: 0,
+        scrollY: 480,
+        pixelsAbove: 480,
+        pixelsBelow: 720,
+        pixelsLeft: 0,
+        pixelsRight: 0,
+        scrollPercentX: 0,
+        scrollPercentY: 40,
+      },
+      evidence: {
+        action: 'scroll',
+        status: 'verified',
+        mode: 'relative',
+        target: 'page',
+        moved: true,
+        deltaX: 0,
+        deltaY: 480,
+        beforeX: 0,
+        beforeY: 0,
+        afterX: 0,
+        afterY: 480,
+      },
+    },
+    dropdown: {
+      ok: true,
+      workspaceId: 'workspace:cli',
+      leaseId: 'lease:cli',
+      targetId: 'target:managed',
+      url: 'https://example.test/form',
+      kind: 'native',
+      expanded: true,
+      multiple: false,
+      requiresOpen: false,
+      options: [{
+        index: 1,
+        label: 'China',
+        value: 'cn',
+        selected: false,
+        disabled: false,
+      }],
+      truncated: false,
+    },
+    select: {
+      ...observationOutput,
+      evidence: {
+        action: 'select',
+        status: 'verified',
+        kind: 'native',
+        selected: [{
+          index: 1,
+          label: 'China',
+          value: 'cn',
+          selected: true,
+          disabled: false,
+        }],
+      },
+    },
+    upload: observationOutput,
+    downloads: {
+      ok: true,
+      downloads: [{
+        index: 1,
+        id: 'artifact:download',
+        fileName: 'report.csv',
+        mimeType: 'text/csv',
+        sizeBytes: 12,
+        createdAt: 1,
+        expiresAt: 301_000,
+      }],
+    },
+    download: { ok: true, file: downloadPath, mimeType: 'text/csv', sizeBytes: 12 },
+    screenshot: {
+      ok: true,
+      file: screenshotPath,
+      mimeType: 'image/png',
+      sizeBytes: 12,
+      width: 800,
+      height: 600,
+      annotationCount: 1,
+    },
+    pdf: { ok: true, file: pdfPath, mimeType: 'application/pdf', sizeBytes: 12 },
+    cookies: {
+      ok: true,
+      cookies: [{
+        name: 'session',
+        value: 'fake-cookie-value',
+        domain: '.example.test',
+        path: '/',
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: 'Lax',
+      }],
+    },
+    frame: {
+      ok: true,
+      frames: [
+        { index: 0, frameId: 'frame:top', url: 'https://example.test/form', name: '' },
+        { index: 1, frameId: 'frame:child', url: 'https://example.test/frame', name: 'checkout' },
+      ],
+    },
+    auth: { ok: true },
+    dialogs: {
+      ok: true,
+      dialogs: [{
+        dialogId: 'dialog:contract',
+        targetId: 'target:managed',
+        type: 'prompt',
+        message: 'Enter a label',
+        defaultPrompt: 'draft',
+        openedAt: 123,
+      }],
+    },
+    dialog: { ok: true, dialogId: 'dialog:contract', action: 'accept' },
+    tabs: {
+      ok: true,
+      tabs: [{
+        index: 1,
+        profileContextId: 'profile-context:work',
+        title: 'Example Form',
+        url: 'https://example.test/form',
+        origin: 'managed',
+        selected: true,
+        controlState: 'controlled',
+      }],
+    },
+    tab: { ok: true, index: 1 },
+    close: { ok: true, remaining: 1 },
+    net: {
+      ok: true,
+      requests: [{
+        id: 4,
+        method: 'GET',
+        url: 'https://example.test/api',
+        status: 200,
+        type: 'Fetch',
+        size: 12,
+        time: 8,
+      }],
+      total: 1,
+      truncated: false,
+      nextCursor: 4,
+    },
+    'net show': {
+      ok: true,
+      id: 4,
+      requestId: 'network-request:opaque',
+      sequence: 4,
+      method: 'GET',
+      url: 'https://example.test/api',
+      type: 'Fetch',
+      requestHeaders: [],
+      postDataTruncated: false,
+      status: 200,
+      statusText: 'OK',
+      responseHeaders: [],
+      mimeType: 'application/octet-stream',
+      size: 12,
+      durationMs: 8,
+      bodyAvailable: true,
+      responseBody: Buffer.from('network-body').toString('base64'),
+    },
+    'net block': {
+      ok: true,
+      rule: {
+        id: 'rule:block-11111111-1111-4111-8111-111111111111',
+        type: 'block',
+        pattern: '*analytics*',
+      },
+    },
+    'net mock': {
+      ok: true,
+      rule: {
+        id: 'rule:mock-11111111-1111-4111-8111-111111111111',
+        type: 'mock',
+        pattern: '*api/data*',
+        status: 200,
+      },
+    },
+    'net headers': {
+      ok: true,
+      rule: {
+        id: 'rule:headers-11111111-1111-4111-8111-111111111111',
+        type: 'headers',
+        pattern: '*api*',
+        headers: [{ name: 'X-Test', value: 'contract' }],
+      },
+    },
+    'net rules': {
+      ok: true,
+      rules: [
+        {
+          id: 'rule:block-11111111-1111-4111-8111-111111111111',
+          type: 'block',
+          pattern: '*analytics*',
+          enabled: true,
+        },
+        {
+          id: 'rule:mock-11111111-1111-4111-8111-111111111111',
+          type: 'mock',
+          pattern: '*api/data*',
+          status: 201,
+          body: '{"created":true}',
+          enabled: true,
+        },
+        {
+          id: 'rule:headers-11111111-1111-4111-8111-111111111111',
+          type: 'headers',
+          pattern: '*api*',
+          headers: [{ name: 'X-Test', value: 'contract' }],
+          enabled: true,
+        },
+      ],
+    },
+    'net remove': { ok: true },
+    'net clear': { ok: true },
+    disconnect: { ok: true },
+  });
 });
 
 test('CLI uses only canonical Broker and file operations', async t => {
