@@ -336,7 +336,11 @@ test('CLI reuses a Broker while an explicit browser connection is pending', asyn
   assert.equal(broker.stderr(), '');
 });
 
-test('terminating an authorization-pending Broker removes its worker and starting record', async t => {
+test('terminating an authorization-pending Broker removes its worker and starting record', {
+  skip: process.platform === 'win32'
+    ? 'Windows process termination cannot deliver a catchable SIGTERM'
+    : false,
+}, async t => {
   const root = await mkdtemp(testTempPrefix('bp-stopping-broker-'));
   const stateDir = testBrokerPaths(root).stateDir;
   const cdp = await startGatedCdpFixture();

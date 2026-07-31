@@ -172,6 +172,7 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
     ], {
       stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
       serialization: 'advanced',
+      detached: process.platform === 'win32',
       windowsHide: true,
     });
     this.worker = worker;
