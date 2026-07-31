@@ -17,6 +17,7 @@ import {
 import { internalProcessInvocation, type InternalProcessInvocation } from './runtime-layout.js';
 
 const MAX_PENDING_REQUESTS = 1024;
+const MAX_REQUEST_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 7_000;
 
@@ -29,7 +30,7 @@ interface PendingRequest {
 
 interface WorkerRequest {
   id: number;
-  method: 'create' | 'adopt' | 'cdp.send';
+  method: 'create' | 'adopt' | 'cdp.send' | 'shutdown';
   params: Record<string, unknown>;
 }
 
@@ -239,6 +240,15 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
       );
       return;
     }
+    if (message.event === 'protocol_error') {
+      const error = message.error && typeof message.error === 'object' && !Array.isArray(message.error)
+        ? message.error as Record<string, unknown>
+        : undefined;
+      this.onLog?.(typeof error?.message === 'string'
+        ? error.message.slice(0, 1024)
+        : 'Managed browser connection protocol error');
+      return;
+    }
     if (!Number.isSafeInteger(message.id)) return;
     const id = Number(message.id);
     const pending = this.pendingRequests.get(id);
@@ -317,6 +327,12 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
     }
     const id = this.nextRequestId++;
     const request: WorkerRequest = { id, method, params };
+    if (Buffer.byteLength(JSON.stringify(request), 'utf8') > MAX_REQUEST_BYTES) {
+      return Promise.reject(new BrowserPilotError(
+        'result_too_large',
+        'Managed browser connection request exceeds the IPC size limit',
+      ));
+    }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
@@ -360,7 +376,16 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
     if (!worker) return;
     this.expectedExits.add(worker);
     if (cleanup && worker.stdin && !worker.stdin.destroyed) worker.stdin.end();
-    else worker.kill('SIGTERM');
+    else if (worker.connected && this.ready) {
+      const request: WorkerRequest = {
+        id: this.nextRequestId++,
+        method: 'shutdown',
+        params: { cleanup: false },
+      };
+      worker.send?.(request, error => {
+        if (error && worker.exitCode === null && worker.signalCode === null) worker.kill('SIGTERM');
+      });
+    } else worker.kill('SIGTERM');
     await new Promise<void>(resolve => {
       if (worker.exitCode !== null || worker.signalCode !== null) {
         resolve();

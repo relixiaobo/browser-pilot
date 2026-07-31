@@ -471,9 +471,14 @@ export async function resumeCompatibility(
   const daemon = new DaemonClient();
   try {
     await validateDaemon(daemon);
-    return await CompatibilityBrokerClient.create(daemon, executableVersion, clientKey, invocation);
   } catch (error) {
     if (error instanceof BrowserPilotError && error.code === 'protocol_incompatible') throw error;
+    return null;
+  }
+  try {
+    return await CompatibilityBrokerClient.create(daemon, executableVersion, clientKey, invocation);
+  } catch (error) {
+    if (error instanceof BrowserPilotError) throw error;
     return null;
   }
 }

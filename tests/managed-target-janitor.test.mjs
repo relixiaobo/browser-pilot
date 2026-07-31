@@ -23,6 +23,7 @@ async function startCdpFixture() {
     ['user-tab', { targetId: 'user-tab', type: 'page', title: 'User', url: 'https://user.test/' }],
   ]);
   const closed = [];
+  const receivedMethods = [];
   let nextTarget = 1;
   let nextGetTargetsPopup;
   const broadcast = message => {
@@ -34,6 +35,7 @@ async function startCdpFixture() {
   server.on('connection', socket => {
     socket.on('message', bytes => {
       const message = JSON.parse(bytes.toString());
+      receivedMethods.push(message.method);
       const respond = result => socket.send(JSON.stringify({ id: message.id, result }));
       if (message.method === 'Target.setDiscoverTargets') {
         respond({});
@@ -88,6 +90,7 @@ async function startCdpFixture() {
     wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/test`,
     targets,
     closed,
+    receivedMethods,
     addTarget(targetId, openerId) {
       targets.set(targetId, {
         targetId,
@@ -368,4 +371,106 @@ test('janitor client preserves the CDP handshake timeout code during startup', a
     client.connect(cdp.wsUrl),
     error => error instanceof CDPError && error.code === CDP_HANDSHAKE_TIMEOUT_CODE,
   );
+});
+
+test('janitor discards an oversized stdin frame and serves the next request', async t => {
+  const cdp = await startCdpFixture();
+  const worker = startWorker(cdp.wsUrl);
+  t.after(async () => {
+    forceKillChild(worker.child);
+    await cdp.close();
+  });
+
+  await worker.waitFor(message => message.event === 'ready');
+  worker.child.stdin.write('x'.repeat(70 * 1024));
+  const protocolError = await worker.waitFor(message => message.event === 'protocol_error');
+  assert.equal(protocolError.error.code, 'janitor_protocol_error');
+  worker.child.stdin.write(`\n${JSON.stringify({
+    id: 1,
+    method: 'cdp.send',
+    params: { method: 'Runtime.evaluate', params: { expression: '1' } },
+  })}\n`);
+  const response = await worker.waitFor(message => message.id === 1);
+  assert.deepEqual(response.result, {});
+  worker.child.stdin.end();
+  await waitForExit(worker.child);
+});
+
+test('janitor client rejects oversized requests locally and remains connected', async t => {
+  const cdp = await startCdpFixture();
+  const client = new ManagedTargetJanitorClient({ workerPath: WORKER });
+  t.after(async () => {
+    await client.close();
+    await cdp.close();
+  });
+  await client.connect(cdp.wsUrl);
+  const before = cdp.receivedMethods.filter(method => method === 'Runtime.evaluate').length;
+
+  await assert.rejects(
+    client.send('Runtime.evaluate', { expression: 'x'.repeat(70 * 1024) }),
+    error => error?.code === 'result_too_large',
+  );
+  assert.equal(
+    cdp.receivedMethods.filter(method => method === 'Runtime.evaluate').length,
+    before,
+  );
+  assert.deepEqual(await client.send('Runtime.evaluate', { expression: '1' }), {});
+});
+
+test('janitor no-cleanup shutdown preserves owned targets', async t => {
+  const cdp = await startCdpFixture();
+  const client = new ManagedTargetJanitorClient({ workerPath: WORKER });
+  t.after(async () => {
+    await client.close();
+    await cdp.close();
+  });
+  await client.connect(cdp.wsUrl);
+  const created = await client.createTarget({ url: 'about:blank', newWindow: true });
+
+  await client.browserDisconnected();
+
+  assert.equal(cdp.targets.has(created.targetId), true);
+  assert.equal(cdp.closed.includes(created.targetId), false);
+});
+
+test('capacity-full adoption fails without closing the requested target', async t => {
+  const cdp = await startCdpFixture();
+  const targetIds = Array.from({ length: 4096 }, (_, index) => `t${index.toString(36)}`);
+  for (const targetId of targetIds) cdp.addTarget(targetId);
+  const worker = startWorker(cdp.wsUrl);
+  t.after(async () => {
+    forceKillChild(worker.child);
+    await cdp.close();
+  });
+
+  await worker.waitFor(message => message.event === 'ready');
+  const adoptFrame = `${JSON.stringify({
+    id: 1,
+    method: 'adopt',
+    params: { targetIds },
+  })}\n`;
+  assert.ok(Buffer.byteLength(adoptFrame) <= 64 * 1024);
+  worker.child.stdin.write(adoptFrame);
+  const filled = await worker.waitFor(message => message.id === 1, 15_000);
+  assert.equal(filled.result.adopted, targetIds.length);
+
+  cdp.addTarget('overflow-target');
+  worker.child.stdin.write(`${JSON.stringify({
+    id: 2,
+    method: 'adopt',
+    params: { targetIds: ['overflow-target'] },
+  })}\n`);
+  const overflow = await worker.waitFor(message => message.id === 2);
+  assert.equal(overflow.error.code, 'janitor_error');
+  assert.match(overflow.error.message, /capacity reached/);
+  assert.equal(cdp.targets.has('overflow-target'), true);
+  assert.equal(cdp.closed.includes('overflow-target'), false);
+
+  worker.child.stdin.write(`${JSON.stringify({
+    id: 3,
+    method: 'shutdown',
+    params: { cleanup: false },
+  })}\n`);
+  await worker.waitFor(message => message.id === 3);
+  await waitForExit(worker.child);
 });

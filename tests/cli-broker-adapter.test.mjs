@@ -475,18 +475,20 @@ async function startFakeDaemon(root, options = {}) {
           response.end(JSON.stringify({ result }));
           return;
         }
+        const rpcError = options.rpcErrors?.[body?.method];
         const toolError = body?.method === 'tools/call'
           ? options.toolErrors?.[body.params?.name]
           : undefined;
-        if (toolError) {
+        const responseError = rpcError ?? toolError;
+        if (responseError) {
           response.end(JSON.stringify({
             error: {
               code: -32000,
-              message: toolError.message,
+              message: responseError.message,
               data: {
-                code: toolError.code,
-                retryable: toolError.retryable ?? false,
-                ...(toolError.remediation ? { remediation: toolError.remediation } : {}),
+                code: responseError.code,
+                retryable: responseError.retryable ?? false,
+                ...(responseError.remediation ? { remediation: responseError.remediation } : {}),
               },
             },
           }));
@@ -663,6 +665,28 @@ test('bp wait fails without creating or selecting a tab when none is selected', 
   assert.ok(daemon.calls.some(call => call.body?.params?.name === 'browser.tabs.list'));
   assert.equal(daemon.calls.some(call => call.body?.params?.name === 'browser.open'), false);
   assert.equal(daemon.calls.some(call => call.body?.params?.name === 'browser.tabs.switch'), false);
+});
+
+test('bp status preserves structured Broker failures while resuming a session', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-status-resume-error-'));
+  const daemon = await startFakeDaemon(root, {
+    rpcErrors: {
+      'leases/create': {
+        code: 'internal_error',
+        message: 'Lease capacity reached',
+      },
+    },
+  });
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const result = await runCliFailure(root, ['status']);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.stderr, '');
+  assert.equal(result.output.code, 'internal_error');
+  assert.equal(result.output.error, 'Lease capacity reached');
 });
 
 test('CLI rejects an incompatible private Broker transport before sending RPC', async t => {

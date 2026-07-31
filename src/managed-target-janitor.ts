@@ -11,7 +11,7 @@ const CLEANUP_TIMEOUT_MS = 5_000;
 
 interface RequestMessage {
   id: number;
-  method: 'create' | 'adopt' | 'cdp.send';
+  method: 'create' | 'adopt' | 'cdp.send' | 'shutdown';
   params: Record<string, unknown>;
 }
 
@@ -41,6 +41,7 @@ let commandTail = Promise.resolve();
 let finishing = false;
 let shutdownRequested = false;
 let outputAvailable = true;
+let discardingOversizedLine = false;
 
 function emit(value: unknown): void {
   if (typeof process.send === 'function' && process.connected) {
@@ -80,7 +81,10 @@ function validateRequest(value: unknown): RequestMessage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid janitor request');
   const request = value as Record<string, unknown>;
   if (!Number.isSafeInteger(request.id) || Number(request.id) < 1) throw new Error('Invalid janitor request ID');
-  if (request.method !== 'create' && request.method !== 'adopt' && request.method !== 'cdp.send') {
+  if (
+    request.method !== 'create' && request.method !== 'adopt' &&
+    request.method !== 'cdp.send' && request.method !== 'shutdown'
+  ) {
     throw new Error('Invalid janitor method');
   }
   if (!request.params || typeof request.params !== 'object' || Array.isArray(request.params)) {
@@ -98,10 +102,14 @@ function notifyOwned(targetId: string, openerTargetId?: string): void {
   emit({ event: 'owned', targetId, ...(openerTargetId ? { openerTargetId } : {}) });
 }
 
-async function trackTarget(targetId: string, openerTargetId?: string): Promise<boolean> {
+async function trackTarget(
+  targetId: string,
+  openerTargetId?: string,
+  closeOnCapacity = true,
+): Promise<boolean> {
   if (ownedTargets.has(targetId)) return true;
   if (ownedTargets.size >= MAX_TRACKED_TARGETS) {
-    await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
+    if (closeOnCapacity) await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
     return false;
   }
   ownedTargets.set(targetId, openerTargetId);
@@ -154,14 +162,19 @@ async function adoptTargets(
   }
   const before = ownedTargets.size;
   for (const targetId of requested) {
-    if (live.has(targetId)) await trackTarget(targetId, live.get(targetId));
+    if (live.has(targetId) && !(await trackTarget(targetId, live.get(targetId), false))) {
+      throw new Error('Managed target capacity reached');
+    }
   }
   let changed = true;
   while (changed) {
     changed = false;
     for (const [targetId, openerTargetId] of live) {
       if (!openerTargetId || !ownedTargets.has(openerTargetId) || ownedTargets.has(targetId)) continue;
-      if (await trackTarget(targetId, openerTargetId)) changed = true;
+      if (!(await trackTarget(targetId, openerTargetId, false))) {
+        throw new Error('Managed target capacity reached');
+      }
+      changed = true;
     }
   }
   return {
@@ -193,6 +206,13 @@ async function forwardCdp(params: Record<string, unknown>): Promise<unknown> {
 
 async function handle(request: RequestMessage): Promise<void> {
   try {
+    if (request.method === 'shutdown') {
+      if (request.params.cleanup !== false) throw new Error('Invalid janitor shutdown request');
+      shutdownRequested = true;
+      emit({ id: request.id, result: { shuttingDown: true } });
+      await finish(false);
+      return;
+    }
     const result = request.method === 'create'
       ? await createTarget(request.params)
       : request.method === 'adopt'
@@ -206,6 +226,54 @@ async function handle(request: RequestMessage): Promise<void> {
         ? serializeError(error, 'cdp_error')
         : { code: 'janitor_error', message: boundedMessage(error) },
     });
+  }
+}
+
+function reportProtocolError(error: unknown): void {
+  emit({
+    event: 'protocol_error',
+    error: { code: 'janitor_protocol_error', message: boundedMessage(error) },
+  });
+}
+
+function consumeInput(chunk: Buffer, enqueue: (request: RequestMessage) => void): void {
+  let offset = 0;
+  while (offset < chunk.length) {
+    if (discardingOversizedLine) {
+      const newline = chunk.indexOf(0x0a, offset);
+      if (newline < 0) return;
+      discardingOversizedLine = false;
+      offset = newline + 1;
+      continue;
+    }
+
+    const newline = chunk.indexOf(0x0a, offset);
+    if (newline < 0) {
+      const fragment = chunk.subarray(offset);
+      if (pending.length + fragment.length > MAX_LINE_BYTES) {
+        pending = Buffer.alloc(0);
+        discardingOversizedLine = true;
+        reportProtocolError(new Error('Invalid janitor request size'));
+      } else {
+        pending = pending.length === 0 ? fragment : Buffer.concat([pending, fragment]);
+      }
+      return;
+    }
+
+    const fragment = chunk.subarray(offset, newline);
+    offset = newline + 1;
+    if (pending.length + fragment.length > MAX_LINE_BYTES) {
+      pending = Buffer.alloc(0);
+      reportProtocolError(new Error('Invalid janitor request size'));
+      continue;
+    }
+    const line = pending.length === 0 ? fragment : Buffer.concat([pending, fragment]);
+    pending = Buffer.alloc(0);
+    try {
+      enqueue(parseRequest(line));
+    } catch (error) {
+      reportProtocolError(error);
+    }
   }
 }
 
@@ -316,24 +384,7 @@ async function main(): Promise<void> {
   } else {
     process.stdin.on('data', (value: Buffer | string) => {
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      if (pending.length + chunk.length > MAX_LINE_BYTES * 2) {
-        void finish(true, 2);
-        return;
-      }
-      pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
-      let newline = pending.indexOf(0x0a);
-      while (newline >= 0) {
-        const line = pending.subarray(0, newline);
-        pending = pending.subarray(newline + 1);
-        try {
-          enqueue(parseRequest(line));
-        } catch (error) {
-          process.stderr.write(`${boundedMessage(error)}\n`);
-          void finish(true, 2);
-          return;
-        }
-        newline = pending.indexOf(0x0a);
-      }
+      consumeInput(chunk, enqueue);
     });
   }
 }
