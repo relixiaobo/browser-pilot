@@ -38,6 +38,18 @@ test('wildcard matching is case-insensitive and covers the full value', () => {
       expected: true,
     },
     {
+      value: 'https://example.test/complete?source=agent',
+      pattern: '*complete?source=*',
+      legacyWait: true,
+      expected: true,
+    },
+    {
+      value: 'https://example.test/completexsource=agent',
+      pattern: '*complete?source=*',
+      legacyWait: false,
+      expected: false,
+    },
+    {
       value: 'https://example.test/a.c',
       pattern: 'https://example.test/a.c',
       legacyWait: true,
@@ -66,4 +78,9 @@ test('wildcard matching is case-insensitive and covers the full value', () => {
       `shared wildcard: ${JSON.stringify(entry)}`,
     );
   }
+});
+
+test('wildcard matching handles many stars without regular-expression backtracking', () => {
+  assert.equal(wildcardMatch(`${'a'.repeat(2_000)}c`, `${'*a'.repeat(2_000)}*b`), false);
+  assert.equal(wildcardMatch('prefix-suffix', '***prefix***suffix***'), true);
 });

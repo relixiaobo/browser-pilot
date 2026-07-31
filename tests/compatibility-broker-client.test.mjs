@@ -197,6 +197,25 @@ test('different mutating tools sharing a request ID never collide', async () => 
   assert.deepEqual(executions.map(call => call.name), ['browser.auth.set', 'browser.auth.clear']);
 });
 
+test('identical mutating calls have distinct keys that remain stable across invocation retries', async () => {
+  const executions = [];
+  const runtime = requestRecoveryRuntime(executions);
+  const transport = runtimeTransport(runtime);
+  const first = await CompatibilityBrokerClient.create(
+    transport, DAEMON_TOKEN, '0.6.0', 'agent.recovery', { requestId: 'repeat-clear' },
+  );
+  await first.callTool('browser.auth.clear');
+  await first.callTool('browser.auth.clear');
+  assert.equal(executions.length, 2);
+
+  const retried = await CompatibilityBrokerClient.create(
+    transport, DAEMON_TOKEN, '0.6.0', 'agent.recovery', { requestId: 'repeat-clear' },
+  );
+  await retried.callTool('browser.auth.clear');
+  await retried.callTool('browser.auth.clear');
+  assert.equal(executions.length, 2);
+});
+
 test('a mutating retry resolved to a different target does not dedup', async () => {
   const executions = [];
   const runtime = requestRecoveryRuntime(executions);

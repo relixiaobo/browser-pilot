@@ -132,6 +132,7 @@ function commandResult(value: JsonValue, method: string): Record<string, JsonVal
 
 export class CompatibilityBrokerClient {
   private commandSequence = 0;
+  private readonly mutatingOperationCounts = new Map<string, number>();
 
   private constructor(
     private readonly transport: BrokerRpcTransport,
@@ -439,12 +440,20 @@ export class CompatibilityBrokerClient {
     args: Record<string, JsonValue>,
     targetId?: ControlledTargetId,
   ): string {
-    const digest = createHash('sha256')
-      .update('browser-pilot-cli:mutating-tool:v1')
-      .update('\0')
+    const operationDigest = createHash('sha256')
       .update(canonicalJson(args))
       .update('\0')
       .update(targetId ?? '')
+      .digest('base64url');
+    const occurrenceKey = `${name}:${operationDigest}`;
+    const occurrence = (this.mutatingOperationCounts.get(occurrenceKey) ?? 0) + 1;
+    this.mutatingOperationCounts.set(occurrenceKey, occurrence);
+    const digest = createHash('sha256')
+      .update('browser-pilot-cli:mutating-tool:v2')
+      .update('\0')
+      .update(operationDigest)
+      .update('\0')
+      .update(String(occurrence))
       .digest('base64url')
       .slice(0, 32);
     return `cli-request:${requestId}:${name}:${digest}`;
