@@ -87,6 +87,15 @@ test('CLI compatibility range advances from the release version without an exact
   });
 });
 
+test('npm version stages every manifest synchronized by the version hook', () => {
+  assert.equal(
+    packageJson.scripts.version,
+    'node scripts/sync-release-version.mjs && git add -- package-lock.json plugin/package.json '
+      + 'plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json '
+      + 'plugin/skills/browser-pilot/compatibility.json',
+  );
+});
+
 test('release sync advances every active manifest from the root package version', async t => {
   const fixtureRoot = await mkdtemp(testTempPrefix('browser-pilot-version-sync-'));
   t.after(() => rm(fixtureRoot, { recursive: true, force: true }));

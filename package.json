@@ -17,7 +17,7 @@
     "package:release-index": "node scripts/build-release-index.mjs",
     "release:sync-version": "node scripts/sync-release-version.mjs",
     "release:check-version": "node scripts/sync-release-version.mjs --check",
-    "version": "node scripts/sync-release-version.mjs",
+    "version": "node scripts/sync-release-version.mjs && git add -- package-lock.json plugin/package.json plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json plugin/skills/browser-pilot/compatibility.json",
     "verify:standalone": "node scripts/verify-standalone.mjs",
     "dev": "tsup --watch",
     "start": "node dist/cli.js",
