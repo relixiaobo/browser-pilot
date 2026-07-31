@@ -96,7 +96,9 @@ async function createTarget(params: Record<string, unknown>): Promise<{ targetId
   return { targetId: created.targetId };
 }
 
-async function adoptTargets(params: Record<string, unknown>): Promise<{ adopted: number }> {
+async function adoptTargets(
+  params: Record<string, unknown>,
+): Promise<{ adopted: number; owned: Record<string, boolean> }> {
   if (!Array.isArray(params.targetIds) || params.targetIds.length > MAX_TRACKED_TARGETS) {
     throw new Error('Invalid managed target adoption list');
   }
@@ -123,7 +125,10 @@ async function adoptTargets(params: Record<string, unknown>): Promise<{ adopted:
       if (await trackTarget(targetId, openerTargetId)) changed = true;
     }
   }
-  return { adopted: ownedTargets.size - before };
+  return {
+    adopted: ownedTargets.size - before,
+    owned: Object.fromEntries(requested.map(targetId => [targetId, ownedTargets.has(targetId)])),
+  };
 }
 
 async function forwardCdp(params: Record<string, unknown>): Promise<unknown> {

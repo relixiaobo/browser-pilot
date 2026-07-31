@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { ManagedTargetJanitorClient } from '../dist/services.js';
 import { forceKillChild } from './helpers/platform.mjs';
 
 const WORKER = fileURLToPath(new URL('../dist/managed-target-janitor.js', import.meta.url));
@@ -18,6 +19,7 @@ async function startCdpFixture() {
   ]);
   const closed = [];
   let nextTarget = 1;
+  let nextGetTargetsPopup;
   const broadcast = message => {
     const payload = JSON.stringify(message);
     for (const socket of server.clients) {
@@ -33,6 +35,12 @@ async function startCdpFixture() {
         return;
       }
       if (message.method === 'Target.getTargets') {
+        if (nextGetTargetsPopup) {
+          const targetInfo = nextGetTargetsPopup;
+          nextGetTargetsPopup = undefined;
+          targets.set(targetInfo.targetId, targetInfo);
+          broadcast({ method: 'Target.targetCreated', params: { targetInfo } });
+        }
         respond({ targetInfos: [...targets.values()] });
         return;
       }
@@ -64,6 +72,15 @@ async function startCdpFixture() {
     wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/test`,
     targets,
     closed,
+    addTarget(targetId, openerId) {
+      targets.set(targetId, {
+        targetId,
+        ...(openerId ? { openerId } : {}),
+        type: 'page',
+        title: 'Adopted target',
+        url: 'https://adopt.test/',
+      });
+    },
     popup(targetId, openerId) {
       const targetInfo = {
         targetId,
@@ -74,6 +91,15 @@ async function startCdpFixture() {
       };
       targets.set(targetId, targetInfo);
       broadcast({ method: 'Target.targetCreated', params: { targetInfo } });
+    },
+    popupDuringNextGetTargets(targetId, openerId) {
+      nextGetTargetsPopup = {
+        targetId,
+        openerId,
+        type: 'page',
+        title: 'Racing popup',
+        url: 'https://popup.test/race',
+      };
     },
     async close() {
       for (const socket of server.clients) socket.terminate();
@@ -193,9 +219,78 @@ test('a replacement janitor adopts live in-memory target IDs without disk state'
   })}\n`);
   const adopted = await second.waitFor(message => message.id === 2);
   assert.equal(adopted.result.adopted, 2);
+  assert.deepEqual(adopted.result.owned, { [created.result.targetId]: true });
   second.child.stdin.end();
   await waitForExit(second.child);
 
   assert.deepEqual(cdp.closed.sort(), ['managed-1', 'managed-popup']);
+  assert.equal(cdp.targets.has('user-tab'), true);
+});
+
+test('adoption reports requested ownership across auto-track races and missing targets', async t => {
+  const cdp = await startCdpFixture();
+  const worker = startWorker(cdp.wsUrl);
+  t.after(async () => {
+    forceKillChild(worker.child);
+    await cdp.close();
+  });
+
+  await worker.waitFor(message => message.event === 'ready');
+  worker.child.stdin.write(`${JSON.stringify({
+    id: 1,
+    method: 'create',
+    params: { url: 'about:blank', newWindow: true },
+  })}\n`);
+  const created = await worker.waitFor(message => message.id === 1);
+
+  cdp.popupDuringNextGetTargets('managed-racing-popup', created.result.targetId);
+  worker.child.stdin.write(`${JSON.stringify({
+    id: 2,
+    method: 'adopt',
+    params: { targetIds: ['managed-racing-popup'] },
+  })}\n`);
+  const raced = await worker.waitFor(message => message.id === 2);
+  assert.equal(raced.result.adopted, 0);
+  assert.deepEqual(raced.result.owned, { 'managed-racing-popup': true });
+
+  worker.child.stdin.write(`${JSON.stringify({
+    id: 3,
+    method: 'adopt',
+    params: { targetIds: ['missing-target'] },
+  })}\n`);
+  const missing = await worker.waitFor(message => message.id === 3);
+  assert.equal(missing.result.adopted, 0);
+  assert.deepEqual(missing.result.owned, { 'missing-target': false });
+
+  worker.child.stdin.end();
+  await waitForExit(worker.child);
+  assert.deepEqual(cdp.closed.sort(), ['managed-1', 'managed-racing-popup']);
+});
+
+test('janitor client validates requested ownership instead of the adoption count', async t => {
+  const cdp = await startCdpFixture();
+  const client = new ManagedTargetJanitorClient({ workerPath: WORKER });
+  t.after(async () => {
+    await client.close();
+    await cdp.close();
+  });
+
+  cdp.addTarget('adopt-root');
+  cdp.addTarget('adopt-descendant', 'adopt-root');
+  await client.connect(cdp.wsUrl);
+  await client.adoptTarget('adopt-root');
+
+  cdp.popupDuringNextGetTargets('adopt-racing-popup', 'adopt-root');
+  await client.adoptTarget('adopt-racing-popup');
+  await assert.rejects(
+    client.adoptTarget('missing-target'),
+    error => error?.code === 'internal_error' && /could not adopt/.test(error.message),
+  );
+
+  await client.close();
+  assert.deepEqual(
+    cdp.closed.sort(),
+    ['adopt-descendant', 'adopt-racing-popup', 'adopt-root'],
+  );
   assert.equal(cdp.targets.has('user-tab'), true);
 });

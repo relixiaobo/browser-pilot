@@ -125,8 +125,12 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
   async adoptTarget(targetId: string): Promise<void> {
     await this.ensureWorker();
     if (this.ownedTargetIds.has(targetId)) return;
-    const result = await this.request('adopt', { targetIds: [targetId] }) as { adopted?: unknown };
-    if (result?.adopted !== 1) {
+    const result = await this.request('adopt', { targetIds: [targetId] }) as { owned?: unknown };
+    const owned = result?.owned;
+    if (
+      !owned || typeof owned !== 'object' || Array.isArray(owned) ||
+      !Object.hasOwn(owned, targetId) || (owned as Record<string, unknown>)[targetId] !== true
+    ) {
       throw new BrowserPilotError('internal_error', 'Managed browser connection could not adopt the target');
     }
     this.ownedTargetIds.add(targetId);
