@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { discoverBrowserCandidates } from '../dist/services.js';
@@ -21,7 +22,7 @@ async function definition(root, overrides = {}) {
 }
 
 test('browser discovery passively returns stable structured candidates', async t => {
-  const temp = await mkdtemp(join(process.env.TMPDIR ?? '/tmp', 'browser-pilot-discovery-'));
+  const temp = await mkdtemp(join(tmpdir(), 'browser-pilot-discovery-'));
   t.after(async () => {
     await rm(temp, { recursive: true, force: true });
   });
@@ -35,9 +36,9 @@ test('browser discovery passively returns stable structured candidates', async t
   await writeFile(join(ready.dataDir, 'DevToolsActivePort'), '9222\n/devtools/browser/ready\n');
   await writeFile(join(authorization.dataDir, 'DevToolsActivePort'), '9223\n/devtools/browser/auth\n');
   await writeFile(join(stale.dataDir, 'DevToolsActivePort'), '9224\n/devtools/browser/stale\n');
-  await symlink('host-102', join(ready.dataDir, 'SingletonLock'));
-  await symlink('host-101', join(disabled.dataDir, 'SingletonLock'));
-  await symlink('host-103', join(authorization.dataDir, 'SingletonLock'));
+  await writeFile(join(ready.dataDir, 'SingletonLock'), 'host-102');
+  await writeFile(join(disabled.dataDir, 'SingletonLock'), 'host-101');
+  await writeFile(join(authorization.dataDir, 'SingletonLock'), 'host-103');
 
   const first = await discoverBrowserCandidates({
     platform: 'darwin',
@@ -83,7 +84,7 @@ test('browser discovery passively returns stable structured candidates', async t
 });
 
 test('browser discovery omits products that are not installed and rejects malformed port files', async t => {
-  const temp = await mkdtemp(join(process.env.TMPDIR ?? '/tmp', 'browser-pilot-discovery-'));
+  const temp = await mkdtemp(join(tmpdir(), 'browser-pilot-discovery-'));
   t.after(() => rm(temp, { recursive: true, force: true }));
   const malformed = await definition(temp, { key: 'malformed' });
   await writeFile(join(malformed.dataDir, 'DevToolsActivePort'), 'not-a-port\ninvalid\n');
@@ -105,7 +106,7 @@ test('browser discovery omits products that are not installed and rejects malfor
 });
 
 test('browser discovery opens no TCP or WebSocket connection', async t => {
-  const temp = await mkdtemp(join(process.env.TMPDIR ?? '/tmp', 'browser-pilot-discovery-'));
+  const temp = await mkdtemp(join(tmpdir(), 'browser-pilot-discovery-'));
   const server = http.createServer();
   let tcpConnections = 0;
   let upgrades = 0;
@@ -124,7 +125,7 @@ test('browser discovery opens no TCP or WebSocket connection', async t => {
   });
 
   const browser = await definition(temp, { key: 'passive' });
-  await symlink('host-passive', join(browser.dataDir, 'SingletonLock'));
+  await writeFile(join(browser.dataDir, 'SingletonLock'), 'host-passive');
   await writeFile(
     join(browser.dataDir, 'DevToolsActivePort'),
     `${server.address().port}\n/devtools/browser/passive\n`,

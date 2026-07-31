@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, isAbsolute, join, relative } from 'node:path';
 import test from 'node:test';
 import { ArtifactStore, MemoryBrokerRuntime } from '../dist/services.js';
 
@@ -34,8 +34,10 @@ test('Artifact Store protects directories and files and does not derive paths fr
   });
   const record = await store.create(screenshot(workspaceA));
 
-  assert.equal((await stat(directory)).mode & 0o777, 0o700);
-  assert.equal((await stat(record.path)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    assert.equal((await stat(record.path)).mode & 0o777, 0o600);
+  }
   assert.equal(record.path.includes('safe:id'), false);
   assert.deepEqual(await readFile(record.path), Buffer.from([1, 2, 3]));
 });
@@ -50,9 +52,12 @@ test('Artifact Store imports an authorized local file as a protected upload inpu
   assert.equal(record.descriptor.sensitivity, 'user_file');
   assert.equal(record.descriptor.fileName, 'resume.pdf');
   assert.equal(record.descriptor.mimeType, 'application/pdf');
-  assert.equal(record.path.startsWith(`${directory}/`), true);
-  assert.equal(record.path.endsWith('/resume.pdf'), true);
-  assert.equal((await stat(record.path)).mode & 0o777, 0o600);
+  const importedRelativePath = relative(directory, record.path);
+  assert.equal(importedRelativePath.startsWith('..') || isAbsolute(importedRelativePath), false);
+  assert.equal(basename(record.path), 'resume.pdf');
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(record.path)).mode & 0o777, 0o600);
+  }
   assert.deepEqual(await readFile(record.path), Buffer.from('resume contents'));
   assert.deepEqual(await readFile(source), Buffer.from('resume contents'));
 
@@ -70,7 +75,9 @@ test('Artifact Store copies a completed user download and never removes the sour
   assert.equal(record.descriptor.sensitivity, 'user_file');
   assert.equal(record.descriptor.fileName, 'quarterly-report.csv');
   assert.equal(record.descriptor.mimeType, 'text/csv');
-  assert.equal(record.path.startsWith(`${directory}/`), true);
+  const downloadRelativePath = relative(directory, record.path);
+  assert.equal(downloadRelativePath.startsWith('..') || isAbsolute(downloadRelativePath), false);
+  assert.equal(basename(record.path), 'quarterly-report.csv');
   assert.deepEqual(await readFile(record.path), Buffer.from('download contents'));
   assert.deepEqual(await readFile(staging), Buffer.from('download contents'));
 
@@ -93,16 +100,18 @@ test('download copying rejects unsafe sources and quota failures preserve user f
   const source = join(root, 'large-download.bin');
   const sourceLink = join(root, 'download-link.bin');
   await writeFile(source, '12345');
-  await symlink(source, sourceLink);
 
   await assert.rejects(
     () => store.ingestDownloadCopy(workspaceA, 'relative.bin', 'relative.bin'),
     error => error.code === 'invalid_argument',
   );
-  await assert.rejects(
-    () => store.ingestDownloadCopy(workspaceA, sourceLink, 'linked.bin'),
-    error => error.code === 'invalid_argument',
-  );
+  if (process.platform !== 'win32') {
+    await symlink(source, sourceLink);
+    await assert.rejects(
+      () => store.ingestDownloadCopy(workspaceA, sourceLink, 'linked.bin'),
+      error => error.code === 'invalid_argument',
+    );
+  }
   await assert.rejects(
     () => store.ingestDownloadCopy(workspaceA, source, 'large.bin'),
     error => error.code === 'result_too_large',
@@ -110,7 +119,9 @@ test('download copying rejects unsafe sources and quota failures preserve user f
   assert.deepEqual(await readFile(source), Buffer.from('12345'));
 });
 
-test('Artifact import and export reject symbolic-link paths into Broker storage', async t => {
+test('Artifact import and export reject symbolic-link paths into Broker storage', {
+  skip: process.platform === 'win32' ? 'file symlinks require elevated Windows privileges' : false,
+}, async t => {
   const { root, directory, store } = await fixture(t);
   const record = await store.create(screenshot(workspaceA));
   const fileLink = join(root, 'broker-file-link');
@@ -207,7 +218,9 @@ test('Artifact export requires an absolute external path and does not overwrite 
   );
   const exported = await store.export(workspaceA, record.descriptor.id, destination);
   assert.equal(exported.path, destination);
-  assert.equal((await stat(destination)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(destination)).mode & 0o777, 0o600);
+  }
   await writeFile(destination, 'existing');
   await assert.rejects(
     () => store.export(workspaceA, record.descriptor.id, destination),

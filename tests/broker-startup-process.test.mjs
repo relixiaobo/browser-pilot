@@ -6,13 +6,20 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
 import { supportedBrowserProfiles } from '../dist/services.js';
+import {
+  forceKillChild,
+  forceKillProcess,
+  isolatedBrokerEnvironment,
+  testBrokerPaths,
+  testTempPrefix,
+} from './helpers/platform.mjs';
 
 const CLI = join(process.cwd(), 'dist', 'cli.js');
 const DAEMON = join(process.cwd(), 'dist', 'daemon.js');
 
 function runCli(root, args, env = {}, cliPath = CLI) {
   const child = spawn(process.execPath, [cliPath, ...args], {
-    env: { ...process.env, HOME: root, PATH: '', ...env },
+    env: isolatedBrokerEnvironment(root, { PATH: '', ...env }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -80,7 +87,7 @@ async function waitForValue(read, predicate, timeoutMs = 5_000) {
 
 async function startPassiveBroker(root, options = {}) {
   const profile = options.profile ?? join(root, 'profile');
-  const stateDir = options.env?.BROWSER_PILOT_HOME ?? join(root, '.browser-pilot');
+  const stateDir = testBrokerPaths(root, options.env).stateDir;
   await mkdir(profile, { recursive: true });
   const child = spawn(process.execPath, [
     DAEMON,
@@ -88,7 +95,7 @@ async function startPassiveBroker(root, options = {}) {
     options.product ?? 'Chrome',
     profile,
   ], {
-    env: { ...process.env, HOME: root, PATH: '', ...options.env },
+    env: isolatedBrokerEnvironment(root, { PATH: '', ...options.env }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
@@ -104,7 +111,7 @@ async function terminateChild(child) {
     new Promise(resolve => child.once('exit', resolve)),
     new Promise(resolve => setTimeout(resolve, 5_000)),
   ]);
-  if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  forceKillChild(child);
 }
 
 async function initializeClient(socketPath, clientSessionId, options = {}) {
@@ -213,9 +220,10 @@ async function startGatedCdpFixture() {
 }
 
 test('simultaneous CLI processes start and reuse exactly one per-user Broker', async t => {
-  const root = await mkdtemp('/tmp/bp-startup-process-');
-  const stateDir = join(root, '.browser-pilot');
-  const socketPath = join(stateDir, 'daemon.sock');
+  const root = await mkdtemp(testTempPrefix('bp-startup-process-'));
+  const paths = testBrokerPaths(root);
+  const stateDir = paths.stateDir;
+  const socketPath = paths.endpoint;
   t.after(async () => {
     await stopDaemon(socketPath).catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -230,14 +238,14 @@ test('simultaneous CLI processes start and reuse exactly one per-user Broker', a
   assert.equal(health.brokerProcessIdentity, locator.brokerProcessIdentity);
   assert.equal(health.brokerProtocol, 2);
   assert.equal(locator.endpoint, socketPath);
-  assert.equal(locator.transport, 'unix_socket');
+  assert.equal(locator.transport, paths.transport);
   assert.equal(locator.schemaVersion, 2);
   assert.equal(locator.serviceVersion, locator.executable.version);
   assert.deepEqual(locator.protocol, {
     min: { major: 1, minor: 0 }, max: { major: 1, minor: 3 },
   });
 
-  process.kill(locator.pid, 'SIGKILL');
+  forceKillProcess(locator.pid);
   await waitForValue(() => {
     try { process.kill(locator.pid, 0); return false; } catch { return true; }
   }, Boolean);
@@ -248,14 +256,11 @@ test('simultaneous CLI processes start and reuse exactly one per-user Broker', a
 });
 
 test('passive Broker startup and concurrent explicit connects create exactly one authorization request', async t => {
-  const root = await mkdtemp('/tmp/bp-explicit-authorization-');
-  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
-  const browserEnv = {
-    ...process.env,
-    HOME: root,
+  const root = await mkdtemp(testTempPrefix('bp-explicit-authorization-'));
+  const socketPath = testBrokerPaths(root).endpoint;
+  const browserEnv = isolatedBrokerEnvironment(root, {
     PATH: '',
-    LOCALAPPDATA: join(root, 'AppData', 'Local'),
-  };
+  });
   const profile = supportedBrowserProfiles({ homeDir: root, env: browserEnv })[0]?.dataDir;
   assert.ok(profile, `No supported browser profile is defined for ${process.platform}`);
   await mkdir(profile, { recursive: true });
@@ -310,9 +315,10 @@ test('passive Broker startup and concurrent explicit connects create exactly one
 });
 
 test('CLI startup reuses a Broker that is still waiting for browser authorization', async t => {
-  const root = await mkdtemp('/tmp/bp-starting-broker-');
-  const stateDir = join(root, '.browser-pilot');
-  const socketPath = join(stateDir, 'daemon.sock');
+  const root = await mkdtemp(testTempPrefix('bp-starting-broker-'));
+  const paths = testBrokerPaths(root);
+  const stateDir = paths.stateDir;
+  const socketPath = paths.endpoint;
   const cdp = await startGatedCdpFixture();
   const broker = await startPassiveBroker(root, { wsUrl: cdp.wsUrl });
   t.after(async () => {
@@ -339,8 +345,8 @@ test('CLI startup reuses a Broker that is still waiting for browser authorizatio
 });
 
 test('terminating an authorization-pending Broker removes its worker and starting record', async t => {
-  const root = await mkdtemp('/tmp/bp-stopping-broker-');
-  const stateDir = join(root, '.browser-pilot');
+  const root = await mkdtemp(testTempPrefix('bp-stopping-broker-'));
+  const stateDir = testBrokerPaths(root).stateDir;
   const cdp = await startGatedCdpFixture();
   const broker = await startPassiveBroker(root, { wsUrl: cdp.wsUrl });
   t.after(async () => {
@@ -358,8 +364,8 @@ test('terminating an authorization-pending Broker removes its worker and startin
 });
 
 test('incompatible clients fail without replacing the running Broker', async t => {
-  const root = await mkdtemp('/tmp/bp-incompatible-process-');
-  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
+  const root = await mkdtemp(testTempPrefix('bp-incompatible-process-'));
+  const socketPath = testBrokerPaths(root).endpoint;
   const broker = await startPassiveBroker(root);
   t.after(async () => {
     await terminateChild(broker.child);
@@ -386,8 +392,8 @@ test('incompatible clients fail without replacing the running Broker', async t =
 });
 
 test('compatible CLI installations reuse one Broker while shutdown ownership stays exact', async t => {
-  const root = await mkdtemp('/tmp/bp-compatible-install-process-');
-  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
+  const root = await mkdtemp(testTempPrefix('bp-compatible-install-process-'));
+  const socketPath = testBrokerPaths(root).endpoint;
   const alternateRoot = join(root, 'alternate-installation');
   const alternateDist = join(alternateRoot, 'dist');
   const alternateCli = join(alternateDist, 'cli.js');
@@ -404,7 +410,11 @@ test('compatible CLI installations reuse one Broker while shutdown ownership sta
     version: '9.9.9',
     type: 'module',
   }));
-  await symlink(join(process.cwd(), 'node_modules'), join(alternateRoot, 'node_modules'), 'dir');
+  await symlink(
+    join(process.cwd(), 'node_modules'),
+    join(alternateRoot, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
 
   const original = await runCli(root, ['status']);
   const alternate = await runCli(root, ['status'], {}, alternateCli);
@@ -426,8 +436,8 @@ test('compatible CLI installations reuse one Broker while shutdown ownership sta
 });
 
 test('bp disconnect releases its namespace without stopping a Broker used by another Agent', async t => {
-  const root = await mkdtemp('/tmp/bp-live-client-process-');
-  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
+  const root = await mkdtemp(testTempPrefix('bp-live-client-process-'));
+  const socketPath = testBrokerPaths(root).endpoint;
   const broker = await startPassiveBroker(root);
   t.after(async () => {
     await terminateChild(broker.child);
@@ -454,9 +464,9 @@ test('bp disconnect releases its namespace without stopping a Broker used by ano
 });
 
 test('explicit BROWSER_PILOT_HOME isolation starts an independent Broker', async t => {
-  const root = await mkdtemp('/tmp/bp-version-isolation-');
-  const defaultState = join(root, '.browser-pilot');
+  const root = await mkdtemp(testTempPrefix('bp-version-isolation-'));
   const isolatedState = join(root, 'isolated-v2');
+  const defaultState = testBrokerPaths(root).stateDir;
   const sharedBroker = await startPassiveBroker(root);
   const isolatedBroker = await startPassiveBroker(root, {
     profile: join(root, 'isolated-profile'),
@@ -480,15 +490,16 @@ test('explicit BROWSER_PILOT_HOME isolation starts an independent Broker', async
 });
 
 test('a live but unresponsive Broker is reported and never silently replaced', async t => {
-  const root = await mkdtemp('/tmp/bp-unresponsive-process-');
-  const stateDir = join(root, '.browser-pilot');
-  const socketPath = join(stateDir, 'daemon.sock');
+  const root = await mkdtemp(testTempPrefix('bp-unresponsive-process-'));
+  const paths = testBrokerPaths(root);
+  const stateDir = paths.stateDir;
+  const socketPath = paths.endpoint;
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   const locator = {
     schemaVersion: 1,
     pid: process.pid,
     endpoint: socketPath,
-    transport: 'unix_socket',
+    transport: paths.transport,
     startedAt: Date.now(),
     brokerProcessIdentity: 'broker:live-but-unresponsive',
   };

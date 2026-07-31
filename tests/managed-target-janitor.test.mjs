@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { forceKillChild } from './helpers/platform.mjs';
 
-const WORKER = new URL('../dist/managed-target-janitor.js', import.meta.url).pathname;
+const WORKER = fileURLToPath(new URL('../dist/managed-target-janitor.js', import.meta.url));
 
 async function startCdpFixture() {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -136,7 +138,7 @@ test('janitor closes only owned targets and popup descendants after parent EOF',
   const cdp = await startCdpFixture();
   const { child, waitFor } = startWorker(cdp.wsUrl);
   t.after(async () => {
-    if (child.exitCode === null) child.kill('SIGKILL');
+    forceKillChild(child);
     await cdp.close();
   });
 
@@ -165,8 +167,8 @@ test('a replacement janitor adopts live in-memory target IDs without disk state'
   const first = startWorker(cdp.wsUrl);
   let second;
   t.after(async () => {
-    if (first.child.exitCode === null) first.child.kill('SIGKILL');
-    if (second?.child.exitCode === null) second.child.kill('SIGKILL');
+    forceKillChild(first.child);
+    if (second) forceKillChild(second.child);
     await cdp.close();
   });
 
@@ -179,7 +181,7 @@ test('a replacement janitor adopts live in-memory target IDs without disk state'
   const created = await first.waitFor(message => message.id === 1);
   cdp.popup('managed-popup', created.result.targetId);
   await first.waitFor(message => message.event === 'owned' && message.targetId === 'managed-popup');
-  first.child.kill('SIGKILL');
+  forceKillChild(first.child);
   await waitForExit(first.child);
 
   second = startWorker(cdp.wsUrl);

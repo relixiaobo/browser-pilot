@@ -2163,7 +2163,7 @@ test('browser.upload consumes only imported upload_input Artifacts and preserves
   });
   const dispatch = transport.calls.find(call => call.method === 'DOM.setFileInputFiles');
   assert.equal(dispatch.params.files[0] === source, false);
-  assert.equal(dispatch.params.files[0].endsWith('/resume.txt'), true);
+  assert.equal(basename(dispatch.params.files[0]), 'resume.txt');
   assert.deepEqual(await readFile(dispatch.params.files[0]), Buffer.from('resume contents'));
 
   const screenshot = await artifactStore.create({

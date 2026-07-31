@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { releaseVersionMetadata } from '../scripts/release-version-utils.mjs';
+import { testTempPrefix } from './helpers/platform.mjs';
 
 const execFile = promisify(execFileCallback);
 const root = resolve(import.meta.dirname, '..');
@@ -21,7 +22,7 @@ async function writeChecksummedAsset(directory, fileName, content) {
 }
 
 test('release distribution binds tested and compatible CLI versions, skill, protocol, and platforms', async t => {
-  const assets = await mkdtemp('/tmp/browser-pilot-release-assets-');
+  const assets = await mkdtemp(testTempPrefix('browser-pilot-release-assets-'));
   t.after(() => rm(assets, { recursive: true, force: true }));
 
   await execFile(process.execPath, [
@@ -70,7 +71,7 @@ test('release distribution binds tested and compatible CLI versions, skill, prot
 
   const checksum = (await readFile(`${result.index}.sha256`, 'utf8')).trim();
   const digest = createHash('sha256').update(await readFile(result.index)).digest('hex');
-  assert.equal(checksum, `${digest}  ${result.index.split('/').at(-1)}`);
+  assert.equal(checksum, `${digest}  ${basename(result.index)}`);
 });
 
 test('CLI compatibility range advances from the release version without an exact-version lock', () => {
@@ -87,7 +88,7 @@ test('CLI compatibility range advances from the release version without an exact
 });
 
 test('release sync advances every active manifest from the root package version', async t => {
-  const fixtureRoot = await mkdtemp('/tmp/browser-pilot-version-sync-');
+  const fixtureRoot = await mkdtemp(testTempPrefix('browser-pilot-version-sync-'));
   t.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   await Promise.all([
     mkdir(join(fixtureRoot, 'plugin', '.claude-plugin'), { recursive: true }),
@@ -152,7 +153,7 @@ test('release sync advances every active manifest from the root package version'
 });
 
 test('release index rejects an asset whose checksum sidecar does not match', async t => {
-  const assets = await mkdtemp('/tmp/browser-pilot-release-checksum-');
+  const assets = await mkdtemp(testTempPrefix('browser-pilot-release-checksum-'));
   t.after(() => rm(assets, { recursive: true, force: true }));
 
   await execFile(process.execPath, [

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { chmod, lstat, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { testTempPrefix } from './helpers/platform.mjs';
 import {
   acquireBrokerStartupLock,
   createExecutableMetadataSync,
@@ -16,36 +18,39 @@ import {
 
 function testPaths(root) {
   return resolveBrowserPilotPaths({
-    platform: 'darwin',
+    platform: process.platform,
     homeDir: root,
-    tempDir: '/tmp',
+    tempDir: tmpdir(),
     env: { BROWSER_PILOT_HOME: join(root, '.browser-pilot') },
     uid: 501,
+    username: 'browser-pilot-test',
   });
 }
 
 test('platform path resolution uses a private short Unix endpoint and a per-user Windows pipe', () => {
-  const short = resolveBrowserPilotPaths({
-    platform: 'darwin', homeDir: '/Users/alice', tempDir: '/tmp', env: {}, uid: 501,
-  });
-  assert.equal(short.stateDir, '/Users/alice/.browser-pilot');
-  assert.equal(short.endpoint, '/Users/alice/.browser-pilot/daemon.sock');
-  assert.equal(short.transport, 'unix_socket');
+  if (process.platform !== 'win32') {
+    const short = resolveBrowserPilotPaths({
+      platform: 'darwin', homeDir: '/Users/alice', tempDir: '/tmp', env: {}, uid: 501,
+    });
+    assert.equal(short.stateDir, '/Users/alice/.browser-pilot');
+    assert.equal(short.endpoint, '/Users/alice/.browser-pilot/daemon.sock');
+    assert.equal(short.transport, 'unix_socket');
 
-  const longHome = `/Users/${'a'.repeat(100)}`;
-  const long = resolveBrowserPilotPaths({
-    platform: 'darwin', homeDir: longHome, tempDir: '/tmp', env: {}, uid: 501,
-  });
-  assert.match(long.runtimeDir, /^\/tmp\/browser-pilot-501-[a-f0-9]{16}$/);
-  assert.equal(Buffer.byteLength(long.endpoint) < 96, true);
-  assert.equal(long.stateDir, join(longHome, '.browser-pilot'));
+    const longHome = `/Users/${'a'.repeat(100)}`;
+    const long = resolveBrowserPilotPaths({
+      platform: 'darwin', homeDir: longHome, tempDir: '/tmp', env: {}, uid: 501,
+    });
+    assert.match(long.runtimeDir, /^\/tmp\/browser-pilot-501-[a-f0-9]{16}$/);
+    assert.equal(Buffer.byteLength(long.endpoint) < 96, true);
+    assert.equal(long.stateDir, join(longHome, '.browser-pilot'));
 
-  const linux = resolveBrowserPilotPaths({
-    platform: 'linux', homeDir: '/home/alice', tempDir: '/tmp',
-    env: { BROWSER_PILOT_HOME: '/srv/alice/browser-pilot' }, uid: 1000,
-  });
-  assert.equal(linux.stateDir, '/srv/alice/browser-pilot');
-  assert.equal(linux.endpoint, '/srv/alice/browser-pilot/daemon.sock');
+    const linux = resolveBrowserPilotPaths({
+      platform: 'linux', homeDir: '/home/alice', tempDir: '/tmp',
+      env: { BROWSER_PILOT_HOME: '/srv/alice/browser-pilot' }, uid: 1000,
+    });
+    assert.equal(linux.stateDir, '/srv/alice/browser-pilot');
+    assert.equal(linux.endpoint, '/srv/alice/browser-pilot/daemon.sock');
+  }
 
   const windows = resolveBrowserPilotPaths({
     platform: 'win32', homeDir: 'C:\\Users\\Alice', tempDir: 'C:\\Temp',
@@ -68,7 +73,7 @@ test('platform path resolution uses a private short Unix endpoint and a per-user
 });
 
 test('Broker locator files are private, validated, and removed only by their owner', async t => {
-  const root = await mkdtemp('/tmp/bp-locator-');
+  const root = await mkdtemp(testTempPrefix('bp-locator-'));
   const paths = testPaths(root);
   t.after(() => rm(root, { recursive: true, force: true }));
   ensureBrokerDirectoriesSync(paths);
@@ -104,7 +109,7 @@ test('Broker locator files are private, validated, and removed only by their own
 });
 
 test('Broker version history is private, bounded, and excludes transient browser state', async t => {
-  const root = await mkdtemp('/tmp/bp-version-history-');
+  const root = await mkdtemp(testTempPrefix('bp-version-history-'));
   const paths = testPaths(root);
   t.after(() => rm(root, { recursive: true, force: true }));
 
@@ -134,7 +139,7 @@ test('Broker version history is private, bounded, and excludes transient browser
 });
 
 test('startup lock serializes contenders and safely reclaims a dead owner', async t => {
-  const root = await mkdtemp('/tmp/bp-start-lock-');
+  const root = await mkdtemp(testTempPrefix('bp-start-lock-'));
   const paths = testPaths(root);
   t.after(() => rm(root, { recursive: true, force: true }));
 

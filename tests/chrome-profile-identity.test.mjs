@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
+import { testTempPrefix } from './helpers/platform.mjs';
 import {
   ProfileIdentityError,
   readVerifiedChromeProfileIdentity,
 } from '../dist/services.js';
 
 test('Profile identity requires an exact Profile path and reads bounded Local State metadata', async t => {
-  const root = await mkdtemp('/tmp/browser-pilot-profile-identity-');
+  const root = await mkdtemp(testTempPrefix('browser-pilot-profile-identity-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'Profile 4'));
   await writeFile(join(root, 'Local State'), JSON.stringify({
@@ -35,8 +36,8 @@ test('Profile identity requires an exact Profile path and reads bounded Local St
 });
 
 test('Profile identity rejects paths outside the connected browser user-data root', async t => {
-  const root = await mkdtemp('/tmp/browser-pilot-profile-root-');
-  const other = await mkdtemp('/tmp/browser-pilot-profile-other-');
+  const root = await mkdtemp(testTempPrefix('browser-pilot-profile-root-'));
+  const other = await mkdtemp(testTempPrefix('browser-pilot-profile-other-'));
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
     rm(other, { recursive: true, force: true }),
@@ -49,7 +50,7 @@ test('Profile identity rejects paths outside the connected browser user-data roo
 });
 
 test('Profile identity reports missing metadata without guessing from directory order', async t => {
-  const root = await mkdtemp('/tmp/browser-pilot-profile-missing-');
+  const root = await mkdtemp(testTempPrefix('browser-pilot-profile-missing-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'Profile 2'));
   await writeFile(join(root, 'Local State'), JSON.stringify({ profile: { info_cache: {} } }));
@@ -61,7 +62,7 @@ test('Profile identity reports missing metadata without guessing from directory 
 });
 
 test('Profile identity refuses an oversized Local State before reading its contents', async t => {
-  const root = await mkdtemp('/tmp/browser-pilot-profile-oversized-');
+  const root = await mkdtemp(testTempPrefix('browser-pilot-profile-oversized-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'Default'));
   await writeFile(join(root, 'Local State'), Buffer.alloc(16 * 1024 * 1024 + 1));

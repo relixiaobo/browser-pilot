@@ -5,6 +5,11 @@ import http from 'node:http';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import {
+  isolatedBrokerEnvironment,
+  testBrokerPaths,
+  testTempPrefix,
+} from './helpers/platform.mjs';
 
 const execFile = promisify(execFileCallback);
 const CLI = resolve(import.meta.dirname, '../dist/cli.js');
@@ -46,14 +51,18 @@ function observation(overrides = {}) {
 }
 
 async function startFakeDaemon(root, options = {}) {
-  const stateDirectory = join(root, '.browser-pilot');
-  const socketPath = join(stateDirectory, 'daemon.sock');
+  const paths = testBrokerPaths(root);
+  const stateDirectory = paths.stateDir;
+  const socketPath = paths.endpoint;
   const calls = [];
   let selectedProfileContextId;
   let profilesIdentified = false;
   let managedClosed = false;
   let preserveSelectedManagedAfterClose = false;
-  await mkdir(stateDirectory, { recursive: true });
+  await Promise.all([
+    mkdir(stateDirectory, { recursive: true }),
+    mkdir(paths.runtimeDir, { recursive: true }),
+  ]);
   await writeFile(join(stateDirectory, 'daemon.pid'), String(process.pid));
 
   const toolResult = async (name, args) => {
@@ -465,13 +474,26 @@ async function startFakeDaemon(root, options = {}) {
       response.end(JSON.stringify({ error: error.message }));
     });
   });
-  await new Promise((resolveListen, rejectListen) => {
-    server.once('error', rejectListen);
-    server.listen(socketPath, resolveListen);
-  });
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      server.once('error', rejectListen);
+      server.listen(socketPath, resolveListen);
+    });
+  } catch (error) {
+    if (paths.runtimeDir !== paths.stateDir) {
+      await rm(paths.runtimeDir, { recursive: true, force: true });
+    }
+    throw error;
+  }
   return {
     server,
     calls,
+    async close() {
+      await new Promise(resolveClose => server.close(resolveClose));
+      if (paths.runtimeDir !== paths.stateDir) {
+        await rm(paths.runtimeDir, { recursive: true, force: true });
+      }
+    },
     resetTabs(options = {}) {
       managedClosed = false;
       preserveSelectedManagedAfterClose = options.preserveSelectedManagedAfterClose === true;
@@ -481,7 +503,7 @@ async function startFakeDaemon(root, options = {}) {
 
 async function runCli(home, args, extraEnv = {}) {
   const { stdout } = await execFile(process.execPath, [CLI, ...args], {
-    env: { ...process.env, HOME: home, ...extraEnv },
+    env: isolatedBrokerEnvironment(home, extraEnv),
     timeout: 10_000,
   });
   return JSON.parse(stdout.trim());
@@ -490,7 +512,7 @@ async function runCli(home, args, extraEnv = {}) {
 async function runCliFailure(home, args, extraEnv = {}) {
   try {
     await execFile(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: home, BROWSER_PILOT_HOME: join(home, 'state'), ...extraEnv },
+      env: isolatedBrokerEnvironment(home, extraEnv),
       timeout: 10_000,
     });
   } catch (error) {
@@ -505,7 +527,7 @@ async function runCliFailure(home, args, extraEnv = {}) {
 }
 
 test('CLI exposes stable machine errors for parser, input, and connection failures', async t => {
-  const root = await mkdtemp('/tmp/bp-cli-errors-');
+  const root = await mkdtemp(testTempPrefix('bp-cli-errors-'));
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const cases = [
@@ -543,7 +565,7 @@ test('CLI exposes stable machine errors for parser, input, and connection failur
 });
 
 test('CLI preserves specific browser setup remediation without suggesting another blind connect', async t => {
-  const root = await mkdtemp('/tmp/bp-cli-setup-remediation-');
+  const root = await mkdtemp(testTempPrefix('bp-cli-setup-remediation-'));
   const setupError = {
     code: 'browser_disconnected',
     message: 'Browser remote debugging endpoint is unavailable',
@@ -554,14 +576,14 @@ test('CLI preserves specific browser setup remediation without suggesting anothe
       actionRequired: true,
     },
   };
-  const { server } = await startFakeDaemon(root, {
+  const { close } = await startFakeDaemon(root, {
     toolErrors: {
       'browser.connect': setupError,
       'browser.tabs.list': setupError,
     },
   });
   t.after(async () => {
-    await new Promise(resolveClose => server.close(resolveClose));
+    await close();
     await rm(root, { recursive: true, force: true });
   });
   const env = { BROWSER_PILOT_HOME: join(root, '.browser-pilot') };
@@ -586,10 +608,10 @@ test('CLI preserves specific browser setup remediation without suggesting anothe
 });
 
 test('CLI rejects an incompatible private Broker transport before sending RPC', async t => {
-  const root = await mkdtemp('/tmp/bp-cli-private-transport-');
-  const { server, calls } = await startFakeDaemon(root, { brokerProtocol: 1 });
+  const root = await mkdtemp(testTempPrefix('bp-cli-private-transport-'));
+  const { calls, close } = await startFakeDaemon(root, { brokerProtocol: 1 });
   t.after(async () => {
-    await new Promise(resolveClose => server.close(resolveClose));
+    await close();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -605,10 +627,10 @@ test('CLI rejects an incompatible private Broker transport before sending RPC', 
 });
 
 test('CLI uses only canonical Broker and file operations', async t => {
-  const root = await mkdtemp('/tmp/bp-cli-');
-  const { server, calls, resetTabs } = await startFakeDaemon(root);
+  const root = await mkdtemp(testTempPrefix('bp-cli-'));
+  const { calls, close, resetTabs } = await startFakeDaemon(root);
   t.after(async () => {
-    await new Promise(resolveClose => server.close(resolveClose));
+    await close();
     await rm(root, { recursive: true, force: true });
   });
 

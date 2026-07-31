@@ -5,6 +5,12 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
+import {
+  forceKillChild,
+  isolatedBrokerEnvironment,
+  testBrokerPaths,
+  testTempPrefix,
+} from './helpers/platform.mjs';
 
 async function startCdpFixture() {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -101,10 +107,10 @@ async function waitFor(operation, predicate, timeoutMs = 8_000) {
   throw lastError ?? new Error('Timed out waiting for crash cleanup');
 }
 
-test('daemon SIGKILL reclaims managed targets without closing user tabs', async t => {
-  const root = await mkdtemp('/tmp/bp-daemon-crash-');
+test('an abruptly terminated daemon reclaims managed targets without closing user tabs', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-daemon-crash-'));
   const profile = join(root, 'profile');
-  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
+  const socketPath = testBrokerPaths(root).endpoint;
   await mkdir(profile, { recursive: true });
   const cdp = await startCdpFixture();
   const daemon = spawn(process.execPath, [
@@ -113,13 +119,13 @@ test('daemon SIGKILL reclaims managed targets without closing user tabs', async 
     'Chrome',
     profile,
   ], {
-    env: { ...process.env, HOME: root },
+    env: isolatedBrokerEnvironment(root),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   const stderr = [];
   daemon.stderr.on('data', bytes => stderr.push(bytes.toString()));
   t.after(async () => {
-    if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGKILL');
+    forceKillChild(daemon);
     await cdp.close();
     await rm(root, { recursive: true, force: true });
   });
@@ -167,7 +173,7 @@ test('daemon SIGKILL reclaims managed targets without closing user tabs', async 
   assert.equal(cdp.targets.has('managed-crash'), true);
   assert.equal(cdp.connectionCount, 1, 'daemon and crash janitor must share one browser connection');
 
-  daemon.kill('SIGKILL');
+  forceKillChild(daemon);
   await new Promise(resolve => daemon.once('exit', resolve));
   await waitFor(() => Promise.resolve(cdp.closed), value => value.includes('managed-crash'));
 

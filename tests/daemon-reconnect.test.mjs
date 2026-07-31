@@ -5,6 +5,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
+import {
+  isolatedBrokerEnvironment,
+  testBrokerPaths,
+  testTempPrefix,
+} from './helpers/platform.mjs';
 
 async function startCdpFixture() {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -77,10 +82,9 @@ async function waitFor(operation, predicate, timeoutMs = 5_000) {
 }
 
 test('daemon rediscovers the selected profile and publishes one restored generation', async t => {
-  // macOS limits Unix-domain socket paths to roughly 100 bytes.
-  const root = await mkdtemp('/tmp/bp-daemon-reconnect-');
+  const root = await mkdtemp(testTempPrefix('bp-daemon-reconnect-'));
   const profile = join(root, 'profile');
-  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
+  const socketPath = testBrokerPaths(root).endpoint;
   await mkdir(profile, { recursive: true });
   let first = await startCdpFixture();
   let second;
@@ -91,7 +95,7 @@ test('daemon rediscovers the selected profile and publishes one restored generat
     'Chrome',
     profile,
   ], {
-    env: { ...process.env, HOME: root },
+    env: isolatedBrokerEnvironment(root),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   child.stderr.on('data', bytes => stderr.push(bytes.toString()));
@@ -185,9 +189,9 @@ test('daemon rediscovers the selected profile and publishes one restored generat
 });
 
 test('daemon initializes with structured remediation before remote debugging is enabled', async t => {
-  const root = await mkdtemp('/tmp/bp-daemon-discovery-');
-  const profile = join(root, 'Library', 'Application Support', 'Google', 'Chrome');
-  const socketPath = join(root, '.browser-pilot', 'daemon.sock');
+  const root = await mkdtemp(testTempPrefix('bp-daemon-discovery-'));
+  const profile = join(root, 'profile');
+  const socketPath = testBrokerPaths(root).endpoint;
   await mkdir(profile, { recursive: true });
   const stderr = [];
   const child = spawn(process.execPath, [
@@ -196,7 +200,7 @@ test('daemon initializes with structured remediation before remote debugging is 
     'Chrome',
     profile,
   ], {
-    env: { ...process.env, HOME: root, PATH: '' },
+    env: isolatedBrokerEnvironment(root, { PATH: '' }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   child.stderr.on('data', bytes => stderr.push(bytes.toString()));

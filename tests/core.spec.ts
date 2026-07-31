@@ -4,10 +4,16 @@
 import { test, expect } from '@playwright/test';
 import { open, click, type as bpType, press, evaluate, snapshot, findRef, findRefByRole, bp, startBp } from './bp.js';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DaemonClient } from '../src/client.js';
 
 const BASE = 'http://127.0.0.1:18274';
+const testOutputPath = (name: string): string => join(
+  process.env.BROWSER_PILOT_TEST_ROOT ?? tmpdir(),
+  name,
+);
 
 // ── Lifecycle ───────────────────────────────────────
 
@@ -140,21 +146,23 @@ test.describe('screenshot', () => {
 
   test('screenshot saves file', async () => {
     open(`${BASE}/input/types`);
-    const result = bp('screenshot /tmp/bp-compat-ss.png');
-    files.push('/tmp/bp-compat-ss.png');
+    const path = testOutputPath('bp-compat-ss.png');
+    const result = bp(`screenshot ${JSON.stringify(path)}`);
+    files.push(path);
     expect(result.ok).toBe(true);
-    expect(existsSync('/tmp/bp-compat-ss.png')).toBe(true);
+    expect(existsSync(path)).toBe(true);
   });
 
   test('screenshot --full', async () => {
-    const result = bp('screenshot /tmp/bp-compat-full.png --full');
-    files.push('/tmp/bp-compat-full.png');
+    const path = testOutputPath('bp-compat-full.png');
+    const result = bp(`screenshot ${JSON.stringify(path)} --full`);
+    files.push(path);
     expect(result.ok).toBe(true);
-    expect(existsSync('/tmp/bp-compat-full.png')).toBe(true);
+    expect(existsSync(path)).toBe(true);
   });
 
   test('screenshot bad selector fails', async () => {
-    const result = bp('screenshot /tmp/bp-bad.png --selector "#nonexistent"');
+    const result = bp(`screenshot ${JSON.stringify(testOutputPath('bp-bad.png'))} --selector "#nonexistent"`);
     expect(result.ok).toBe(false);
   });
 });
@@ -166,17 +174,19 @@ test.describe('pdf', () => {
   test.afterAll(() => { for (const f of files) try { unlinkSync(f); } catch {} });
 
   test('pdf saves file', async () => {
-    const result = bp('pdf /tmp/bp-compat.pdf');
-    files.push('/tmp/bp-compat.pdf');
+    const path = testOutputPath('bp-compat.pdf');
+    const result = bp(`pdf ${JSON.stringify(path)}`);
+    files.push(path);
     expect(result.ok).toBe(true);
-    expect(existsSync('/tmp/bp-compat.pdf')).toBe(true);
+    expect(existsSync(path)).toBe(true);
   });
 
   test('pdf --landscape', async () => {
-    const result = bp('pdf /tmp/bp-compat-land.pdf --landscape');
-    files.push('/tmp/bp-compat-land.pdf');
+    const path = testOutputPath('bp-compat-land.pdf');
+    const result = bp(`pdf ${JSON.stringify(path)} --landscape`);
+    files.push(path);
     expect(result.ok).toBe(true);
-    expect(existsSync('/tmp/bp-compat-land.pdf')).toBe(true);
+    expect(existsSync(path)).toBe(true);
   });
 });
 
@@ -226,7 +236,7 @@ test.describe('frames', () => {
 // ── Upload ──────────────────────────────────────────
 
 test.describe('upload', () => {
-  const testFile = '/tmp/bp-compat-upload.txt';
+  const testFile = testOutputPath('bp-compat-upload.txt');
   test.beforeAll(() => { writeFileSync(testFile, 'test content'); });
   test.afterAll(() => { try { unlinkSync(testFile); } catch {} });
 
@@ -246,7 +256,7 @@ test.describe('upload', () => {
   });
 
   test('upload nonexistent file fails', async () => {
-    const result = bp('upload /tmp/nonexistent-xyz-abc.txt');
+    const result = bp(`upload ${JSON.stringify(testOutputPath('nonexistent-xyz-abc.txt'))}`);
     expect(result.ok).toBe(false);
   });
 });

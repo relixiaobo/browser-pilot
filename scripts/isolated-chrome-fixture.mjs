@@ -4,6 +4,8 @@ import { access, mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
+const forceKillSignal = process.platform === 'win32' ? 'SIGTERM' : 'SIGKILL';
+
 async function firstExecutable(candidates) {
   for (const candidate of candidates.filter(Boolean)) {
     try {
@@ -100,7 +102,7 @@ async function terminateChild(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGTERM');
   if (await waitForChildExit(child, 5_000)) return;
-  child.kill('SIGKILL');
+  child.kill(forceKillSignal);
   await waitForChildExit(child, 1_000);
 }
 
@@ -131,7 +133,7 @@ async function terminateTestBroker(brokerHome) {
   for (let attempt = 0; attempt < 50 && processAlive(pid); attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  if (processAlive(pid)) process.kill(pid, 'SIGKILL');
+  if (processAlive(pid)) process.kill(pid, forceKillSignal);
 }
 
 export async function startIsolatedChromeFixture(prefix = 'browser-pilot-test-') {
