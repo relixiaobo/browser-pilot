@@ -462,6 +462,37 @@ secret stored there. The endpoint token is therefore not a defense against
 same-user malware. Defending that case would require per-client credentials
 issued through user interaction or an OS- or host-provided isolation boundary.
 
+### 20.2 Windows Named-Pipe Access Control
+
+Windows retains the named-pipe transport and its default DACL. A shared-secret
+endpoint token is the primary Windows boundary for processes that can reach the
+pipe but cannot read the Browser Pilot state directory. At daemon startup,
+Browser Pilot restricts that directory and the locator containing the token to
+the current Windows user and system administrators. The default pipe DACL is
+not treated as an independently verified current-user-only boundary.
+
+This decision follows these platform constraints:
+
+- Node's `net.Server.listen()` API cannot attach a Windows security descriptor
+  to a named pipe. Its `readableAll` and `writableAll` options broaden access
+  and cannot express a current-user-SID ACL.
+- Applying a pipe ACL directly would require a native addon or helper. The
+  standalone distribution is a single Node SEA executable built from bundled
+  CommonJS. A helper would add architecture-specific build output, packaging
+  and checksum entries, process supervision, and an additional binary to sign
+  and verify on each release platform. A native addon would likewise have to
+  remain external to the SEA payload and match the embedded Node ABI. That
+  cost is disproportionate to the boundary defined in 20.1.
+- Loopback TCP would avoid the named-pipe API limitation but would make the
+  endpoint reachable through the host network stack by every local account,
+  introduce port allocation and firewall behavior, and replace the existing
+  stable local-IPC discovery contract. It offers no compensating protection
+  once possession of the token remains the authentication boundary.
+
+The Windows directory and locator ACL are defense in depth around token
+storage, not a claim to defend against a malicious same-user process that can
+already read the state directory.
+
 ## 21. Acceptance Gates
 
 A release is acceptable only when all of the following hold:
