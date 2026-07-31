@@ -25,11 +25,16 @@ test('CI runs browser gates after validation and preserves failure diagnostics',
   const browser = jobs.get('browser');
   assert.ok(browser, 'CI must define a browser job');
   assert.match(browser, /^  browser:\n    needs: validate$/m);
-  assert.match(
-    browser,
-    /npx playwright test --project core --project compat --project network --reporter=dot,html/,
+  const install = browser.indexOf('run: npm ci');
+  const build = browser.indexOf('run: npm run build');
+  const playwright = browser.indexOf(
+    'npx playwright test --project core --project compat --project network --reporter=dot,html',
   );
-  assert.match(browser, /run: npm run test:browser/);
+  const browserTests = browser.indexOf('run: npm run test:browser');
+  assert.ok(install >= 0, 'browser job must install dependencies');
+  assert.ok(build > install, 'browser job must build dist after installing dependencies');
+  assert.ok(playwright > build, 'Playwright gates must run after dist is built');
+  assert.ok(browserTests > playwright, 'browser node tests must run after Playwright gates');
   assert.match(browser, /if: failure\(\)[\s\S]*uses: actions\/upload-artifact@v4/);
   assert.match(browser, /path: playwright-report\//);
 });

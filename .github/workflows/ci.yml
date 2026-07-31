@@ -62,6 +62,7 @@ jobs:
           cache: npm
 
       - run: npm ci
+      - run: npm run build
       - name: Run Playwright browser gates
         run: npx playwright test --project core --project compat --project network --reporter=dot,html
       - run: npm run test:browser
