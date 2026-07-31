@@ -1,5 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { BROKER_RPC_VERSION, DaemonClient, isDaemonRunning } from './client.js';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
+import {
+  BROKER_RPC_VERSION,
+  DaemonClient,
+  endpointCredentialChangedError,
+  isDaemonRunning,
+  isEndpointCredentialError,
+} from './client.js';
 import { connectDaemon } from './session.js';
 import { createExecutableMetadataSync } from './broker-locator.js';
 import { canonicalJson } from './canonical-json.js';
@@ -80,7 +86,11 @@ export interface CompatibilityProfile {
   }>;
 }
 
-function compatibilityIdentity(clientKey: string, executableVersion: string): {
+function compatibilityIdentity(
+  daemonToken: string,
+  clientKey: string,
+  executableVersion: string,
+): {
   clientSessionId: string;
   instanceId: string;
 } {
@@ -88,7 +98,7 @@ function compatibilityIdentity(clientKey: string, executableVersion: string): {
     .update(clientKey)
     .digest('base64url')
     .slice(0, 24);
-  const sessionDigest = createHash('sha256')
+  const sessionDigest = createHmac('sha256', daemonToken)
     .update(clientKey)
     .update('\0')
     .update(executableVersion)
@@ -134,11 +144,13 @@ export class CompatibilityBrokerClient {
 
   static async create(
     transport: BrokerRpcTransport,
+    daemonToken: string,
     executableVersion: string,
     clientKey = CLIENT_KEY,
     invocation: CompatibilityInvocationOptions = {},
+    expectedBrokerProcessIdentity?: string,
   ): Promise<CompatibilityBrokerClient> {
-    const identity = compatibilityIdentity(clientKey, executableVersion);
+    const identity = compatibilityIdentity(daemonToken, clientKey, executableVersion);
     const initialized = asRecord(await transport.brokerCall(identity.clientSessionId, 'initialize', {
       client: {
         id: 'org.browser-pilot.cli',
@@ -149,6 +161,14 @@ export class CompatibilityBrokerClient {
       protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 3 } },
       requestedCapabilities: [...CAPABILITIES],
     }), 'initialize') as unknown as InitializeResult;
+    if (
+      expectedBrokerProcessIdentity &&
+      initialized.brokerProcessIdentity !== expectedBrokerProcessIdentity
+    ) {
+      throw endpointCredentialChangedError(
+        'The Browser Pilot Broker changed while the client session was initializing',
+      );
+    }
     const created = asRecord(await transport.brokerCall(identity.clientSessionId, 'workspaces/create', {
       clientKey,
     }), 'workspaces/create') as unknown as WorkspaceCreateResult;
@@ -431,24 +451,70 @@ export class CompatibilityBrokerClient {
   }
 }
 
-async function validateDaemon(client: DaemonClient): Promise<void> {
+type DaemonHealth = Awaited<ReturnType<DaemonClient['healthInfo']>>;
+
+async function validateDaemon(client: DaemonClient): Promise<DaemonHealth> {
   const health = await client.healthInfo();
   if (!health.ok) throw new BrowserPilotError('browser_disconnected', 'Browser Pilot daemon is unavailable');
   if (health.brokerProtocol !== BROKER_RPC_VERSION) {
+    const owner = client.brokerOwnerHint();
+    const stopGuidance = owner.executablePath
+      ? `Run '${owner.executablePath} disconnect' with the executable that started it`
+      : owner.pid
+        ? `Stop the recorded Broker pid ${owner.pid}`
+        : 'Stop the Broker with the executable that started it';
     throw new BrowserPilotError('protocol_incompatible', 'Running Browser Pilot Broker uses an incompatible private transport', {
       context: {
         brokerRpcVersion: health.brokerProtocol,
         requiredBrokerRpcVersion: BROKER_RPC_VERSION,
         serviceVersion: health.serviceVersion,
         executableVersion: health.executableVersion,
+        ...(owner.executablePath ? { brokerExecutablePath: owner.executablePath } : {}),
+        ...(owner.pid ? { brokerPid: owner.pid } : {}),
       },
       remediation: {
         code: 'stop_incompatible_broker_or_isolate',
-        message: 'Stop the running Broker with the Browser Pilot executable that started it, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.',
+        message: `${stopGuidance}, or set BROWSER_PILOT_HOME for a deliberately isolated Broker.`,
         actionRequired: true,
       },
     });
   }
+  if (!client.matchesBrokerIdentity(health.brokerProcessIdentity)) {
+    throw endpointCredentialChangedError(
+      'The Browser Pilot Broker locator changed before client initialization',
+    );
+  }
+  return health;
+}
+
+async function createCompatibilityClient(
+  initialDaemon: DaemonClient,
+  executableVersion: string,
+  clientKey: string,
+  invocation: CompatibilityInvocationOptions,
+): Promise<{ daemon: DaemonClient; client: CompatibilityBrokerClient }> {
+  let daemon = initialDaemon;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const health = await validateDaemon(daemon);
+      const client = await CompatibilityBrokerClient.create(
+        daemon,
+        daemon.endpointToken(),
+        executableVersion,
+        clientKey,
+        invocation,
+        health.brokerProcessIdentity,
+      );
+      return { daemon, client };
+    } catch (error) {
+      if (attempt === 0 && isEndpointCredentialError(error)) {
+        daemon = new DaemonClient();
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw endpointCredentialChangedError('The Browser Pilot Broker credentials changed repeatedly');
 }
 
 export async function connectCompatibility(
@@ -458,8 +524,7 @@ export async function connectCompatibility(
   invocation: CompatibilityInvocationOptions = {},
 ): Promise<CompatibilityBrokerClient> {
   const daemon = await connectDaemon(browserFilter);
-  await validateDaemon(daemon);
-  return CompatibilityBrokerClient.create(daemon, executableVersion, clientKey, invocation);
+  return (await createCompatibilityClient(daemon, executableVersion, clientKey, invocation)).client;
 }
 
 export async function resumeCompatibility(
@@ -470,15 +535,15 @@ export async function resumeCompatibility(
   if (!isDaemonRunning()) return null;
   const daemon = new DaemonClient();
   try {
-    await validateDaemon(daemon);
+    return (await createCompatibilityClient(
+      daemon,
+      executableVersion,
+      clientKey,
+      invocation,
+    )).client;
   } catch (error) {
     if (error instanceof BrowserPilotError && error.code === 'protocol_incompatible') throw error;
-    return null;
-  }
-  try {
-    return await CompatibilityBrokerClient.create(daemon, executableVersion, clientKey, invocation);
-  } catch (error) {
-    if (error instanceof BrowserPilotError) throw error;
+    if (error instanceof BrowserPilotError && error.code !== 'browser_disconnected') throw error;
     return null;
   }
 }
@@ -488,10 +553,11 @@ export async function shutdownCompatibility(
   clientKey = CLIENT_KEY,
 ): Promise<void> {
   if (!isDaemonRunning()) return;
-  const daemon = new DaemonClient();
-  await validateDaemon(daemon);
+  let daemon = new DaemonClient();
   try {
-    const client = await CompatibilityBrokerClient.create(daemon, executableVersion, clientKey);
+    const created = await createCompatibilityClient(daemon, executableVersion, clientKey, {});
+    daemon = created.daemon;
+    const client = created.client;
     await client.releaseWorkspace();
   } catch (error) {
     // With no ready browser there cannot be a compatibility Workspace to release.

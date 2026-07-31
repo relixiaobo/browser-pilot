@@ -23,7 +23,25 @@ export interface DaemonShutdownExpectation {
 }
 
 const BROKER_SHUTDOWN_TIMEOUT_MS = 15_000;
-export const BROKER_RPC_VERSION = 2;
+export const BROKER_RPC_VERSION = 3;
+export const ENDPOINT_CREDENTIAL_CHANGED_REASON = 'endpoint_credential_changed';
+
+export function endpointCredentialChangedError(message: string): BrowserPilotError {
+  return new BrowserPilotError('protocol_incompatible', message, {
+    retryable: true,
+    context: { reason: ENDPOINT_CREDENTIAL_CHANGED_REASON },
+    remediation: {
+      code: 'reload_broker_credentials',
+      message: 'Reload the current Browser Pilot Broker locator and retry client initialization once.',
+      actionRequired: false,
+    },
+  });
+}
+
+export function isEndpointCredentialError(error: unknown): error is BrowserPilotError {
+  return error instanceof BrowserPilotError &&
+    error.context?.reason === ENDPOINT_CREDENTIAL_CHANGED_REASON;
+}
 
 export function isDaemonRunning(): boolean {
   const locator = readBrokerLocatorSync();
@@ -45,9 +63,37 @@ export function isDaemonRunning(): boolean {
 
 export class DaemonClient {
   private readonly endpoint: string;
+  private readonly token: string | undefined;
+  private readonly locatorBrokerProcessIdentity: string | undefined;
+  private readonly locatorPid: number | undefined;
+  private readonly locatorExecutablePath: string | undefined;
 
   constructor() {
-    this.endpoint = readBrokerLocatorSync()?.endpoint ?? BROWSER_PILOT_PATHS.endpoint;
+    const locator = readBrokerLocatorSync();
+    this.endpoint = locator?.endpoint ?? BROWSER_PILOT_PATHS.endpoint;
+    this.token = locator?.schemaVersion === 2 ? locator.token : undefined;
+    this.locatorBrokerProcessIdentity = locator?.brokerProcessIdentity;
+    this.locatorPid = locator?.pid;
+    this.locatorExecutablePath = locator?.schemaVersion === 2 ? locator.executable.path : undefined;
+  }
+
+  endpointToken(): string {
+    if (!this.token) {
+      throw endpointCredentialChangedError('The Browser Pilot Broker locator does not contain endpoint credentials');
+    }
+    return this.token;
+  }
+
+  matchesBrokerIdentity(identity: string | undefined): boolean {
+    return this.locatorBrokerProcessIdentity === undefined ||
+      identity === this.locatorBrokerProcessIdentity;
+  }
+
+  brokerOwnerHint(): { pid?: number; executablePath?: string } {
+    return {
+      ...(this.locatorPid ? { pid: this.locatorPid } : {}),
+      ...(this.locatorExecutablePath ? { executablePath: this.locatorExecutablePath } : {}),
+    };
   }
 
   private request(
@@ -62,7 +108,10 @@ export class DaemonClient {
           socketPath: this.endpoint,
           path,
           method: body !== undefined ? 'POST' : 'GET',
-          headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+          headers: {
+            ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+            ...(path !== '/health' && this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          },
           timeout: timeoutMs,
           signal,
         },
@@ -109,17 +158,11 @@ export class DaemonClient {
 
   async healthInfo(): Promise<{
     ok: boolean;
-    wsUrl?: string;
     brokerProtocol?: number;
     brokerProcessIdentity?: string;
     serviceVersion?: string;
     executableVersion?: string;
     executableIdentity?: string;
-    shuttingDown?: boolean;
-    protocol?: {
-      min: { major: number; minor: number };
-      max: { major: number; minor: number };
-    };
     clients?: BrokerClientSummary;
     browser?: {
       id?: string;

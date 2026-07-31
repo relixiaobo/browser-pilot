@@ -6,6 +6,8 @@ import {
   MemoryBrokerRuntime,
 } from '../dist/services.js';
 
+const DAEMON_TOKEN = 'test-daemon-token-for-compatibility-client';
+
 function runtimeTransport(runtime) {
   return {
     brokerCall(clientSessionId, method, params) {
@@ -90,9 +92,9 @@ test('CLI clients reuse Broker Workspace and Lease state', async () => {
     }],
   });
   const transport = runtimeTransport(runtime);
-  const first = await CompatibilityBrokerClient.create(transport, '0.1.6');
+  const first = await CompatibilityBrokerClient.create(transport, DAEMON_TOKEN, '0.1.6');
   now = 2_000;
-  const second = await CompatibilityBrokerClient.create(transport, '0.1.6');
+  const second = await CompatibilityBrokerClient.create(transport, DAEMON_TOKEN, '0.1.6');
 
   assert.equal(second.initialized.connectionId, first.initialized.connectionId);
   assert.equal(second.workspace.id, first.workspace.id);
@@ -130,9 +132,9 @@ test('stable CLI client keys isolate Agents while repeated calls reuse their own
     }],
   });
   const transport = runtimeTransport(runtime);
-  const firstA = await CompatibilityBrokerClient.create(transport, '0.4.0', 'agent.alpha');
-  const secondA = await CompatibilityBrokerClient.create(transport, '0.4.0', 'agent.alpha');
-  const agentB = await CompatibilityBrokerClient.create(transport, '0.4.0', 'agent.beta');
+  const firstA = await CompatibilityBrokerClient.create(transport, DAEMON_TOKEN, '0.4.0', 'agent.alpha');
+  const secondA = await CompatibilityBrokerClient.create(transport, DAEMON_TOKEN, '0.4.0', 'agent.alpha');
+  const agentB = await CompatibilityBrokerClient.create(transport, DAEMON_TOKEN, '0.4.0', 'agent.beta');
 
   assert.equal(secondA.initialized.connectionId, firstA.initialized.connectionId);
   assert.equal(secondA.workspace.id, firstA.workspace.id);
@@ -154,6 +156,7 @@ test('mutating retry dedup survives different preamble counts and argument key o
   const transport = runtimeTransport(runtime);
   const first = await CompatibilityBrokerClient.create(
     transport,
+    DAEMON_TOKEN,
     '0.6.0',
     'agent.recovery',
     { requestId: 'tool-call-123' },
@@ -166,6 +169,7 @@ test('mutating retry dedup survives different preamble counts and argument key o
 
   const retried = await CompatibilityBrokerClient.create(
     transport,
+    DAEMON_TOKEN,
     '0.6.0',
     'agent.recovery',
     { requestId: 'tool-call-123' },
@@ -183,11 +187,11 @@ test('different mutating tools sharing a request ID never collide', async () => 
   const runtime = requestRecoveryRuntime(executions);
   const transport = runtimeTransport(runtime);
   const setClient = await CompatibilityBrokerClient.create(
-    transport, '0.6.0', 'agent.recovery', { requestId: 'shared-request' },
+    transport, DAEMON_TOKEN, '0.6.0', 'agent.recovery', { requestId: 'shared-request' },
   );
   await setClient.callTool('browser.auth.set', { username: 'agent', password: 'secret' });
   const clearClient = await CompatibilityBrokerClient.create(
-    transport, '0.6.0', 'agent.recovery', { requestId: 'shared-request' },
+    transport, DAEMON_TOKEN, '0.6.0', 'agent.recovery', { requestId: 'shared-request' },
   );
   await clearClient.callTool('browser.auth.clear');
   assert.deepEqual(executions.map(call => call.name), ['browser.auth.set', 'browser.auth.clear']);
@@ -198,11 +202,11 @@ test('a mutating retry resolved to a different target does not dedup', async () 
   const runtime = requestRecoveryRuntime(executions);
   const transport = runtimeTransport(runtime);
   const first = await CompatibilityBrokerClient.create(
-    transport, '0.6.0', 'agent.recovery', { requestId: 'close-request' },
+    transport, DAEMON_TOKEN, '0.6.0', 'agent.recovery', { requestId: 'close-request' },
   );
   await first.callTool('browser.tabs.close', {}, 'target:first');
   const second = await CompatibilityBrokerClient.create(
-    transport, '0.6.0', 'agent.recovery', { requestId: 'close-request' },
+    transport, DAEMON_TOKEN, '0.6.0', 'agent.recovery', { requestId: 'close-request' },
   );
   await second.callTool('browser.tabs.close', {}, 'target:second');
   assert.deepEqual(
@@ -228,8 +232,12 @@ test('compatible CLI versions share one Agent namespace through protocol negotia
       },
     }],
   });
-  const oldClient = await CompatibilityBrokerClient.create(runtimeTransport(runtime), '0.1.5');
-  const newerClient = await CompatibilityBrokerClient.create(runtimeTransport(runtime), '0.1.6');
+  const oldClient = await CompatibilityBrokerClient.create(
+    runtimeTransport(runtime), DAEMON_TOKEN, '0.1.5',
+  );
+  const newerClient = await CompatibilityBrokerClient.create(
+    runtimeTransport(runtime), DAEMON_TOKEN, '0.1.6',
+  );
   assert.notEqual(newerClient.initialized.connectionId, oldClient.initialized.connectionId);
   assert.equal(newerClient.workspace.id, oldClient.workspace.id);
   assert.notEqual(newerClient.lease.id, oldClient.lease.id);

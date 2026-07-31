@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
+import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import { join, resolve } from 'node:path';
@@ -16,6 +17,16 @@ const CLI = resolve(import.meta.dirname, '../dist/cli.js');
 const PACKAGE_VERSION = JSON.parse(
   await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8'),
 ).version;
+
+function expectedClientSessionId(token, clientKey = 'browser-pilot-cli') {
+  const digest = createHmac('sha256', token)
+    .update(clientKey)
+    .update('\0')
+    .update(PACKAGE_VERSION)
+    .digest('base64url')
+    .slice(0, 24);
+  return `client:browser-pilot-cli:${digest}`;
+}
 
 function artifact(id, kind, mimeType, fileName) {
   return {
@@ -61,11 +72,41 @@ async function startFakeDaemon(root, options = {}) {
   let preserveSelectedManagedAfterClose = false;
   let droppedToolCall;
   let droppedToolDispatches = 0;
+  let credentialErrorDispatches = 0;
+  let credentialsRotated = false;
+  let daemonToken = options.daemonToken ?? randomBytes(32).toString('base64url');
+  const initialDaemonToken = daemonToken;
+  let brokerProcessIdentity = options.brokerProcessIdentity ?? 'broker:fake';
+  const executableIdentity = `executable:${'0'.repeat(64)}`;
   await Promise.all([
     mkdir(stateDirectory, { recursive: true }),
     mkdir(paths.runtimeDir, { recursive: true }),
   ]);
   await writeFile(join(stateDirectory, 'daemon.pid'), String(process.pid));
+
+  const writeLocator = () => writeFile(paths.locatorFile, `${JSON.stringify({
+    schemaVersion: 2,
+    pid: process.pid,
+    endpoint: socketPath,
+    transport: paths.transport,
+    startedAt: Date.now(),
+    brokerProcessIdentity,
+    serviceVersion: PACKAGE_VERSION,
+    executable: {
+      version: PACKAGE_VERSION,
+      path: CLI,
+      identity: executableIdentity,
+    },
+    protocol: { min: { major: 1, minor: 0 }, max: { major: 1, minor: 3 } },
+    token: daemonToken,
+  })}\n`, { mode: 0o600 });
+  const rotateCredentials = async () => {
+    daemonToken = randomBytes(32).toString('base64url');
+    brokerProcessIdentity = `${brokerProcessIdentity}:rotated`;
+    credentialsRotated = true;
+    await writeLocator();
+  };
+  await writeLocator();
 
   const toolResult = async (name, args) => {
     if (Object.hasOwn(options.toolResults ?? {}, name)) {
@@ -325,7 +366,7 @@ async function startFakeDaemon(root, options = {}) {
           protocol: { major: 1, minor: 3 },
           supportedCapabilities: [],
           capabilities: { granted: [], unsupported: [] },
-          brokerProcessIdentity: 'broker:fake',
+          brokerProcessIdentity,
           connectionId: 'connection:cli',
           browsers: [{ id: 'browser:fake', product: 'Chrome', state: 'ready' }],
           limits: {
@@ -444,18 +485,68 @@ async function startFakeDaemon(root, options = {}) {
     void (async () => {
       if (request.method === 'GET' && request.url === '/health') {
         calls.push({ path: request.url });
-        response.end(JSON.stringify({
+        const health = {
           ok: true,
-          brokerProtocol: options.brokerProtocol ?? 2,
+          brokerProtocol: options.brokerProtocol ?? 3,
+          brokerProcessIdentity,
+          serviceVersion: PACKAGE_VERSION,
+          executableVersion: PACKAGE_VERSION,
+          executableIdentity,
+          clients: { connections: 1, activeWorkspaces: 1, activeLeases: 1 },
           browser: { product: 'Chrome', userDataRoot: '/profiles/fake', state: 'connected' },
-        }));
+        };
+        if (options.rotateCredentialsAfterHealthOnce && !credentialsRotated) {
+          await rotateCredentials();
+        }
+        response.end(JSON.stringify(health));
         return;
       }
       let raw = '';
       for await (const chunk of request) raw += chunk;
       const body = raw ? JSON.parse(raw) : undefined;
-      calls.push({ path: request.url, body });
+      calls.push({ path: request.url, body, authorization: request.headers.authorization });
+      if (request.headers.authorization !== `Bearer ${daemonToken}`) {
+        response.statusCode = 401;
+        response.end(JSON.stringify({
+          error: {
+            code: -32000,
+            message: 'Browser Pilot Broker endpoint authentication failed',
+            data: {
+              code: 'protocol_incompatible',
+              retryable: true,
+              context: { reason: 'endpoint_credential_changed' },
+              remediation: {
+                code: 'upgrade_or_reload_broker_client',
+                message: 'Reload the Broker locator.',
+                actionRequired: true,
+              },
+            },
+          },
+        }));
+        return;
+      }
       if (request.method === 'POST' && request.url === '/broker/rpc') {
+        if (
+          body?.method === 'tools/call' &&
+          body.params?.name === options.credentialErrorAfterDispatchOnce &&
+          credentialErrorDispatches === 0
+        ) {
+          credentialErrorDispatches += 1;
+          await rpcResult(body);
+          await rotateCredentials();
+          response.end(JSON.stringify({
+            error: {
+              code: -32000,
+              message: 'Broker credentials changed after dispatch',
+              data: {
+                code: 'protocol_incompatible',
+                retryable: true,
+                context: { reason: 'endpoint_credential_changed' },
+              },
+            },
+          }));
+          return;
+        }
         if (
           body?.method === 'tools/call' &&
           body.params?.name === options.dropAfterDispatchOnce
@@ -521,6 +612,13 @@ async function startFakeDaemon(root, options = {}) {
     get droppedToolDispatches() {
       return droppedToolDispatches;
     },
+    get credentialErrorDispatches() {
+      return credentialErrorDispatches;
+    },
+    get token() {
+      return daemonToken;
+    },
+    initialToken: initialDaemonToken,
     async close() {
       await new Promise(resolveClose => server.close(resolveClose));
       if (paths.runtimeDir !== paths.stateDir) {
@@ -703,9 +801,81 @@ test('CLI rejects an incompatible private Broker transport before sending RPC', 
   assert.equal(result.exitCode, 1, result.stderr);
   assert.equal(result.output.code, 'protocol_incompatible');
   assert.equal(result.output.context.brokerRpcVersion, 1);
-  assert.equal(result.output.context.requiredBrokerRpcVersion, 2);
+  assert.equal(result.output.context.requiredBrokerRpcVersion, 3);
   assert.equal(result.output.remediation.code, 'stop_incompatible_broker_or_isolate');
+  assert.match(result.output.remediation.message, new RegExp(`${CLI.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} disconnect`));
+  assert.doesNotMatch(result.output.remediation.message, /\bbp disconnect\b/);
   assert.equal(calls.some(call => call.path === '/broker/rpc'), false);
+});
+
+test('HMAC client sessions remain stable across short-lived CLI processes', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-hmac-session-'));
+  const daemon = await startFakeDaemon(root);
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await runCli(root, ['status']);
+  await runCli(root, ['status']);
+  const initializeCalls = daemon.calls.filter(call => call.body?.method === 'initialize');
+  assert.equal(initializeCalls.length, 2);
+  assert.deepEqual(
+    [...new Set(initializeCalls.map(call => call.body.clientSessionId))],
+    [expectedClientSessionId(daemon.token)],
+  );
+});
+
+test('credential change during initialize rebuilds the complete client once', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-credential-refresh-'));
+  const daemon = await startFakeDaemon(root, { rotateCredentialsAfterHealthOnce: true });
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const result = await runCli(root, ['status']);
+  assert.equal(result.ok, true);
+  const initializeCalls = daemon.calls.filter(call => call.body?.method === 'initialize');
+  assert.equal(initializeCalls.length, 2);
+  const oldSessionId = expectedClientSessionId(daemon.initialToken);
+  const newSessionId = expectedClientSessionId(daemon.token);
+  assert.notEqual(newSessionId, oldSessionId);
+  assert.deepEqual(initializeCalls.map(call => [
+    call.authorization,
+    call.body.clientSessionId,
+  ]), [
+    [`Bearer ${daemon.initialToken}`, oldSessionId],
+    [`Bearer ${daemon.token}`, newSessionId],
+  ]);
+  assert.equal(
+    daemon.calls.some(call => (
+      call.authorization === `Bearer ${daemon.token}` &&
+      call.body?.clientSessionId === oldSessionId
+    )),
+    false,
+  );
+});
+
+test('credential error after mutating dispatch is surfaced without replay', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-credential-no-replay-'));
+  const daemon = await startFakeDaemon(root, {
+    credentialErrorAfterDispatchOnce: 'browser.open',
+  });
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const result = await runCliFailure(root, ['open', 'https://example.test/mutating']);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.output.code, 'protocol_incompatible');
+  assert.equal(result.output.context.reason, 'endpoint_credential_changed');
+  assert.equal(daemon.credentialErrorDispatches, 1);
+  assert.equal(
+    daemon.calls.filter(call => call.body?.params?.name === 'browser.open').length,
+    1,
+  );
 });
 
 test('CLI human structural output escapes page text while JSON keeps raw values', async t => {

@@ -16,6 +16,7 @@ import {
 
 const CLI = join(process.cwd(), 'dist', 'cli.js');
 const DAEMON = join(process.cwd(), 'dist', 'daemon.js');
+const endpointTokens = new Map();
 
 function runCli(root, args, env = {}, cliPath = CLI) {
   const child = spawn(process.execPath, [cliPath, ...args], {
@@ -32,13 +33,16 @@ function runCli(root, args, env = {}, cliPath = CLI) {
   });
 }
 
-function daemonRequest(socketPath, path, body) {
+function daemonRequest(socketPath, path, body, token = endpointTokens.get(socketPath)) {
   return new Promise((resolve, reject) => {
     const request = http.request({
       socketPath,
       path,
       method: body === undefined ? 'GET' : 'POST',
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      headers: {
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...(path !== '/health' && token ? { Authorization: `Bearer ${token}` } : {}),
+      },
     }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
@@ -99,7 +103,10 @@ async function startPassiveBroker(root, options = {}) {
   });
   let stderr = '';
   child.stderr.on('data', bytes => { stderr += bytes.toString(); });
-  await waitForFile(join(stateDir, 'broker-locator.json'));
+  const locatorFile = join(stateDir, 'broker-locator.json');
+  await waitForFile(locatorFile);
+  const locator = JSON.parse(await readFile(locatorFile, 'utf8'));
+  endpointTokens.set(testBrokerPaths(root, options.env).endpoint, locator.token);
   return { child, profile, stderr: () => stderr };
 }
 
@@ -239,11 +246,26 @@ test('simultaneous CLI processes start and reuse exactly one per-user Broker', a
   ]);
   const health = await daemonRequest(socketPath, '/health');
   const locator = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
+  endpointTokens.set(socketPath, locator.token);
   assert.equal(health.brokerProcessIdentity, locator.brokerProcessIdentity);
-  assert.equal(health.brokerProtocol, 2);
+  assert.equal(health.brokerProtocol, 3);
+  assert.deepEqual(Object.keys(health).sort(), [
+    'brokerProcessIdentity',
+    'brokerProtocol',
+    'browser',
+    'clients',
+    'executableIdentity',
+    'executableVersion',
+    'ok',
+    'serviceVersion',
+  ]);
+  assert.equal(health.clients.connections, 1);
   assert.equal(locator.endpoint, socketPath);
   assert.equal(locator.transport, paths.transport);
   assert.equal(locator.schemaVersion, 2);
+  assert.match(locator.token, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal('token' in health, false);
+  assert.equal('wsUrl' in health, false);
   assert.equal(locator.serviceVersion, locator.executable.version);
   assert.deepEqual(locator.protocol, {
     min: { major: 1, minor: 0 }, max: { major: 1, minor: 3 },
@@ -256,7 +278,9 @@ test('simultaneous CLI processes start and reuse exactly one per-user Broker', a
 
   await runCli(root, ['connect']);
   const recovered = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
+  endpointTokens.set(socketPath, recovered.token);
   assert.notEqual(recovered.brokerProcessIdentity, locator.brokerProcessIdentity);
+  assert.notEqual(recovered.token, locator.token);
 });
 
 test('passive Broker startup and concurrent explicit connects create exactly one authorization request', async t => {
@@ -411,6 +435,14 @@ test('incompatible clients fail without replacing the running Broker', async t =
   });
 
   const healthBefore = await daemonRequest(socketPath, '/health');
+  const tokenlessRpc = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId: 'client:old-cli',
+    method: 'initialize',
+  }, null);
+  const wrongTokenRpc = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId: 'client:wrong-token',
+    method: 'initialize',
+  }, 'wrong-endpoint-token');
   const unauthorizedShutdown = await daemonRequest(socketPath, '/shutdown', {
     brokerProcessIdentity: healthBefore.brokerProcessIdentity,
     executableVersion: '999.0.0',
@@ -421,6 +453,10 @@ test('incompatible clients fail without replacing the running Broker', async t =
   });
   const healthAfter = await daemonRequest(socketPath, '/health');
 
+  assert.equal(tokenlessRpc.error.data.code, 'protocol_incompatible');
+  assert.equal(tokenlessRpc.error.data.context.reason, 'endpoint_credential_changed');
+  assert.equal(wrongTokenRpc.error.data.code, 'protocol_incompatible');
+  assert.equal(wrongTokenRpc.error.data.context.reason, 'endpoint_credential_changed');
   assert.equal(unauthorizedShutdown.error.data.code, 'protocol_incompatible');
   assert.equal(unauthorizedShutdown.error.data.remediation.code, 'use_matching_executable_or_isolate');
   assert.equal(incompatible.error.data.code, 'protocol_incompatible');

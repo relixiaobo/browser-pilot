@@ -43,6 +43,7 @@ export interface CurrentBrokerLocator extends BrokerLocatorBase {
   serviceVersion: string;
   executable: BrokerExecutableMetadata;
   protocol: BrokerProtocolRange;
+  token?: string;
   previousExecutable?: BrokerExecutableMetadata;
 }
 
@@ -164,6 +165,50 @@ export function ensureBrokerDirectoriesSync(paths: BrowserPilotPaths = BROWSER_P
   if (paths.runtimeDir !== paths.stateDir) ensurePrivateDirectorySync(paths.runtimeDir);
 }
 
+function windowsSystemExecutable(name: string): string {
+  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+  return join(systemRoot, 'System32', name);
+}
+
+function currentWindowsUserSidSync(): string {
+  const result = spawnSync(windowsSystemExecutable('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  const sid = result.status === 0 ? result.stdout.match(/S-\d+(?:-\d+)+/i)?.[0] : undefined;
+  if (!sid) throw new Error('Cannot resolve the current Windows user SID for Broker state protection');
+  return sid;
+}
+
+function restrictWindowsPathAclSync(path: string, directory: boolean, userSid: string): void {
+  const inherited = directory ? '(OI)(CI)' : '';
+  const result = spawnSync(windowsSystemExecutable('icacls.exe'), [
+    path,
+    '/inheritance:r',
+    '/grant:r',
+    `*${userSid}:${inherited}F`,
+    `*S-1-5-18:${inherited}F`,
+    `*S-1-5-32-544:${inherited}F`,
+  ], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || result.error?.message;
+    throw new Error(`Cannot restrict Windows ACL for Browser Pilot path ${path}${detail ? `: ${detail}` : ''}`);
+  }
+}
+
+export function restrictWindowsBrokerStateSync(
+  paths: BrowserPilotPaths = BROWSER_PILOT_PATHS,
+): void {
+  if (process.platform !== 'win32') return;
+  ensurePrivateDirectorySync(paths.stateDir);
+  const userSid = currentWindowsUserSidSync();
+  restrictWindowsPathAclSync(paths.stateDir, true, userSid);
+  if (existsSync(paths.locatorFile)) restrictWindowsPathAclSync(paths.locatorFile, false, userSid);
+}
+
 function parseJsonFile(path: string): unknown {
   validateOwnedPath(path, false);
   const stats = statSync(path);
@@ -203,6 +248,10 @@ function validProtocolRange(value: unknown): value is BrokerProtocolRange {
     (record.min.major === record.max.major && record.min.minor <= record.max.minor);
 }
 
+function validEndpointToken(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{32,256}$/.test(value);
+}
+
 function validLocator(value: unknown, paths: BrowserPilotPaths): value is BrokerLocator {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
@@ -218,6 +267,7 @@ function validLocator(value: unknown, paths: BrowserPilotPaths): value is Broker
   return typeof record.serviceVersion === 'string' && record.serviceVersion.length > 0 &&
     record.serviceVersion.length <= 128 && validExecutable(record.executable) &&
     validProtocolRange(record.protocol) &&
+    (record.token === undefined || validEndpointToken(record.token)) &&
     (record.previousExecutable === undefined || validExecutable(record.previousExecutable));
 }
 

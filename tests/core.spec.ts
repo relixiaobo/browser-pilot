@@ -4,10 +4,10 @@
 import { test, expect } from '@playwright/test';
 import { open, click, type as bpType, press, evaluate, snapshot, bp, startBp } from './bp.js';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DaemonClient } from '../dist/services.js';
 
 const BASE = 'http://127.0.0.1:18274';
 const testOutputPath = (name: string): string => join(
@@ -349,11 +349,20 @@ test.describe('tabs', () => {
   test('user tab is controllable and survives managed bulk close', async () => {
     const marker = `user-tab-${Date.now()}`;
     const url = `${BASE}/input/types?marker=${marker}`;
-    const health = await new DaemonClient().healthInfo();
-    expect(health.wsUrl).toBeDefined();
-    const browserEndpoint = new URL(health.wsUrl!);
+    const browsers = bp('browsers').browsers as Array<{
+      userDataRoot?: string;
+      profile?: string;
+      state?: string;
+    }>;
+    const browser = browsers.find(candidate => candidate.state === 'ready') ?? browsers[0];
+    const userDataRoot = browser?.userDataRoot ?? browser?.profile;
+    expect(userDataRoot).toBeDefined();
+    const [debuggingPort] = (await readFile(join(userDataRoot!, 'DevToolsActivePort'), 'utf8'))
+      .trim()
+      .split(/\r?\n/);
+    const browserEndpoint = `127.0.0.1:${debuggingPort}`;
     const created = await fetch(
-      `http://${browserEndpoint.host}/json/new?${encodeURIComponent(url)}`,
+      `http://${browserEndpoint}/json/new?${encodeURIComponent(url)}`,
       { method: 'PUT' },
     );
     expect(created.ok).toBe(true);
@@ -375,7 +384,7 @@ test.describe('tabs', () => {
       expect(bp('close').ok).toBe(true);
       expect(bp('connect').ok).toBe(true);
     } finally {
-      await fetch(`http://${browserEndpoint.host}/json/close/${target.id}`).catch(() => {});
+      await fetch(`http://${browserEndpoint}/json/close/${target.id}`).catch(() => {});
     }
   });
 

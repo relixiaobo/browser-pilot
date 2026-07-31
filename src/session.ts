@@ -29,10 +29,10 @@ async function startDaemon(browser: DiscoveredBrowser | null): Promise<DaemonCli
   });
   child.unref();
 
-  const client = new DaemonClient();
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
-    if (await client.health()) return client;
+    const client = new DaemonClient();
+    if (await client.health()) return new DaemonClient();
     await new Promise(r => setTimeout(r, 200));
   }
   if (child.pid && processIsAlive(child.pid)) {

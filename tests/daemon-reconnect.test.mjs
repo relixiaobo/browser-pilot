@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
@@ -11,6 +11,8 @@ import {
   testBrokerPaths,
   testTempPrefix,
 } from './helpers/platform.mjs';
+
+const endpointTokens = new Map();
 
 async function startCdpFixture(options = {}) {
   const server = new WebSocketServer({
@@ -91,6 +93,7 @@ test('daemon disconnects a half-open CDP connection after two missed default kee
     await rm(root, { recursive: true, force: true });
   });
 
+  await registerEndpointToken(root);
   const client = await initializeClient(socketPath, 'bridge:keepalive');
   await connectBrowser(socketPath, client, 'command:keepalive-connect');
   await waitFor(() => daemonRequest(socketPath, '/health'), value => (
@@ -136,6 +139,7 @@ test('daemon distinguishes stale endpoints from authorization handshake timeouts
     await rm(root, { recursive: true, force: true });
   });
 
+  await registerEndpointToken(root);
   const initialized = await waitFor(
     () => daemonRequest(socketPath, '/broker/rpc', {
       clientSessionId: 'bridge:connect-diagnosis',
@@ -203,11 +207,15 @@ test('daemon distinguishes stale endpoints from authorization handshake timeouts
 
 function daemonRequest(socketPath, path, body) {
   return new Promise((resolve, reject) => {
+    const token = endpointTokens.get(socketPath);
     const request = http.request({
       socketPath,
       path,
       method: body === undefined ? 'GET' : 'POST',
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      headers: {
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...(path !== '/health' && token ? { Authorization: `Bearer ${token}` } : {}),
+      },
     }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
@@ -220,6 +228,18 @@ function daemonRequest(socketPath, path, body) {
     if (body !== undefined) request.end(JSON.stringify(body));
     else request.end();
   });
+}
+
+async function registerEndpointToken(root) {
+  const paths = testBrokerPaths(root);
+  const locator = await waitFor(
+    async () => {
+      try { return JSON.parse(await readFile(paths.locatorFile, 'utf8')); }
+      catch { return undefined; }
+    },
+    value => typeof value?.token === 'string',
+  );
+  endpointTokens.set(paths.endpoint, locator.token);
 }
 
 async function initializeClient(socketPath, clientSessionId, capabilities = [
@@ -331,6 +351,7 @@ test('daemon rediscovers the selected profile and publishes one restored generat
     await rm(root, { recursive: true, force: true });
   });
 
+  await registerEndpointToken(root);
   const client = await initializeClient(socketPath, 'bridge:daemon-test', [
     'browser.control',
     'workspace.manage',
@@ -383,7 +404,7 @@ test('daemon rediscovers the selected profile and publishes one restored generat
     value => value.browser?.state === 'connected' && value.browser.connectionGeneration === 2,
     10_000,
   );
-  assert.equal(restored.wsUrl, `ws://127.0.0.1:${second.port}/devtools/browser/second`);
+  assert.equal('wsUrl' in restored, false);
 
   const replayed = await daemonRequest(socketPath, '/broker/rpc', {
     clientSessionId: client.clientSessionId,
@@ -425,6 +446,7 @@ test('daemon initializes with structured remediation before remote debugging is 
     await rm(root, { recursive: true, force: true });
   });
 
+  await registerEndpointToken(root);
   const health = await waitFor(
     () => daemonRequest(socketPath, '/health'),
     value => value.ok === true,

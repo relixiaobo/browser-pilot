@@ -1,11 +1,12 @@
 import http from 'node:http';
 import { chmodSync } from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { BROKER_TRANSPORT, SOCKET_PATH } from './paths.js';
 import {
   acquireDaemonOwnerLockSync,
   createExecutableMetadataSync,
   DaemonOwnerError,
+  restrictWindowsBrokerStateSync,
   updateBrokerVersionHistorySync,
   writeBrokerLocatorSync,
   writeBrokerStartingSync,
@@ -34,7 +35,7 @@ import { CDPError, CDP_HANDSHAKE_TIMEOUT_CODE } from './cdp.js';
 import { ManagedTargetJanitorClient } from './managed-target-janitor-client.js';
 import { publicExecutablePath } from './runtime-layout.js';
 import { BROWSER_PILOT_VERSION as PKG_VERSION } from './version.js';
-import { BROKER_RPC_VERSION } from './client.js';
+import { BROKER_RPC_VERSION, ENDPOINT_CREDENTIAL_CHANGED_REASON } from './client.js';
 
 const CLI_EXECUTABLE_PATH = publicExecutablePath(import.meta.url);
 const PROTOCOL_RANGE = {
@@ -68,12 +69,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function endpointAuthorized(req: http.IncomingMessage, daemonToken: string): boolean {
+  const authorization = req.headers.authorization;
+  if (typeof authorization !== 'string') return false;
+  const actual = Buffer.from(authorization);
+  const expected = Buffer.from(`Bearer ${daemonToken}`);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function endpointAuthenticationError(): BrowserPilotError {
+  return new BrowserPilotError(
+    'protocol_incompatible',
+    'Browser Pilot Broker endpoint authentication failed; upgrade the client or reload its locator',
+    {
+      retryable: true,
+      context: {
+        reason: ENDPOINT_CREDENTIAL_CHANGED_REASON,
+        requiredBrokerRpcVersion: BROKER_RPC_VERSION,
+      },
+      remediation: {
+        code: 'upgrade_or_reload_broker_client',
+        message: 'Upgrade Browser Pilot, or reload the current Broker locator before initializing a new client session.',
+        actionRequired: true,
+      },
+    },
+  );
+}
+
 // ── Main ────────────────────────────────────────────
 
 async function main() {
+  if (BROKER_TRANSPORT === 'unix_socket') process.umask(0o077);
   const startedAt = Date.now();
   const brokerProcessIdentity = `${process.pid}:${startedAt}`;
+  const daemonToken = randomBytes(32).toString('base64url');
   const daemonOwner = acquireDaemonOwnerLockSync();
+  restrictWindowsBrokerStateSync();
   const cleanup = (): void => { daemonOwner.cleanup(brokerProcessIdentity); };
   process.once('exit', cleanup);
   daemonOwner.clearStaleBrokerState();
@@ -93,7 +124,6 @@ async function main() {
   process.on('SIGINT', requestTermination);
   daemonOwner.assertOwnership();
   writeBrokerStartingSync({ pid: process.pid, startedAt, brokerProcessIdentity });
-  let currentWsUrl: string | undefined;
   let shutdownReserved = false;
   const executable = createExecutableMetadataSync(PKG_VERSION, CLI_EXECUTABLE_PATH);
   const discoveredBrowsers = await discoverBrowserCandidates();
@@ -257,7 +287,6 @@ async function main() {
       try {
         await controller.cdp.connect(chrome.wsUrl);
         await controller.cdp.send('Target.setDiscoverTargets', { discover: true });
-        if (controller === selectedController) currentWsUrl = chrome.wsUrl;
         broker.updateBrowserConnection(controller.binding.instance.id, {
           state: 'connected',
           connectionGeneration: controller.binding.instance.connectionGeneration + 1,
@@ -349,9 +378,6 @@ async function main() {
           `Managed browser connection reset (${controller.binding.instance.product}): ${error instanceof Error ? error.message : String(error)}\n`,
         );
       });
-      if (controller === selectedController) {
-        currentWsUrl = undefined;
-      }
       if (controller.binding.instance.state !== 'connected') return;
       try {
         broker.updateBrowserConnection(controller.binding.instance.id, {
@@ -413,15 +439,12 @@ async function main() {
         const clients = broker.lifecycleSummary();
         res.writeHead(200); res.end(JSON.stringify({
           ok: true,
-          wsUrl: currentWsUrl,
           brokerProtocol: BROKER_RPC_VERSION,
           brokerProcessIdentity,
           serviceVersion: PKG_VERSION,
           executableVersion: executable.version,
           executableIdentity: executable.identity,
-          protocol: PROTOCOL_RANGE,
           clients,
-          shuttingDown: shutdownReserved || terminating,
           ...(selectedBrowser ? { browser: {
             id: browserBinding.candidate.id,
             product: selectedProduct,
@@ -431,6 +454,11 @@ async function main() {
             connectionGeneration: browserBinding.instance.connectionGeneration,
           } } : {}),
         })); return;
+      }
+      if (!endpointAuthorized(req, daemonToken)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: endpointAuthenticationError().toJsonRpcError() }));
+        return;
       }
       if (req.method === 'POST' && url.pathname === '/broker/rpc') {
         try {
@@ -545,12 +573,14 @@ async function main() {
       serviceVersion: PKG_VERSION,
       executable,
       protocol: PROTOCOL_RANGE,
+      token: daemonToken,
       ...(history.previous ? { previousExecutable: {
         version: history.previous.version,
         path: history.previous.path,
         identity: history.previous.identity,
       } } : {}),
     });
+    restrictWindowsBrokerStateSync();
   });
   terminate = async () => {
     if (terminating) return;

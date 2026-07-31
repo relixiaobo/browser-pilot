@@ -468,8 +468,9 @@ Windows retains the named-pipe transport and its default DACL. A shared-secret
 endpoint token is the primary Windows boundary for processes that can reach the
 pipe but cannot read the Browser Pilot state directory. At daemon startup,
 Browser Pilot restricts that directory and the locator containing the token to
-the current Windows user and system administrators. The default pipe DACL is
-not treated as an independently verified current-user-only boundary.
+the current Windows user, local administrators, and the system account. The
+default pipe DACL is not treated as an independently verified current-user-only
+boundary.
 
 This decision follows these platform constraints:
 
@@ -492,6 +493,32 @@ This decision follows these platform constraints:
 The Windows directory and locator ACL are defense in depth around token
 storage, not a claim to defend against a malicious same-user process that can
 already read the state directory.
+
+### 20.3 Broker Endpoint Authentication
+
+Each Broker process generates a new random endpoint token and stores it only in
+the private Broker locator. Every endpoint except `GET /health` requires that
+token as a Bearer credential. Authentication happens before request parsing or
+Broker dispatch, and a rejected request returns a structured error.
+
+The unauthenticated health response is read-only and contains only `ok`,
+`brokerProtocol`, `serviceVersion`, `executableVersion`, `executableIdentity`,
+`brokerProcessIdentity`, `browser`, and `clients`. Optional fields may be absent,
+but no other state is exposed. In particular, the token and browser CDP
+WebSocket URL are never health fields.
+
+The CLI derives its stable internal client session identifier as an HMAC of the
+client key and executable version, keyed by the endpoint token. A token or
+Broker identity change during client initialization discards the entire client
+construction, reloads the locator once, recomputes the HMAC, and starts again
+from `initialize`. A dispatched tool call is never replayed by this recovery
+path.
+
+The authenticated private transport is Broker RPC version 3. Mixed versions
+fail closed after discovery through the open health endpoint. A live
+incompatible Broker is never replaced automatically; the user must stop it with
+the executable that started it, stop its recorded process explicitly, or use a
+separate `BROWSER_PILOT_HOME`.
 
 ## 21. Acceptance Gates
 

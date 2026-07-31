@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
@@ -11,6 +11,8 @@ import {
   testBrokerPaths,
   testTempPrefix,
 } from './helpers/platform.mjs';
+
+let endpointToken;
 
 async function startCdpFixture() {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -77,7 +79,10 @@ function daemonRequest(socketPath, path, body) {
       socketPath,
       path,
       method: body === undefined ? 'GET' : 'POST',
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      headers: {
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...(path !== '/health' && endpointToken ? { Authorization: `Bearer ${endpointToken}` } : {}),
+      },
     }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
@@ -133,6 +138,16 @@ test('an abruptly terminated daemon reclaims managed targets without closing use
     await cdp.close();
     await rm(root, { recursive: true, force: true });
   });
+
+  endpointToken = await waitFor(
+    async () => {
+      try {
+        const locator = JSON.parse(await readFile(testBrokerPaths(root).locatorFile, 'utf8'));
+        return locator.token;
+      } catch { return undefined; }
+    },
+    value => typeof value === 'string',
+  );
 
   const clientSessionId = 'bridge:crash-cleanup';
   const initialized = await waitFor(
