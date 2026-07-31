@@ -164,6 +164,55 @@ function domSnapshotFixture(elements, frameId = 'frame:test') {
   };
 }
 
+test.todo('same-process iframe DOM-only controls appear in top-frame snapshots', async () => {
+  const domSnapshot = domSnapshotFixture([{
+    backendNodeId: 501,
+    nodeName: 'BUTTON',
+    text: 'Frame Action',
+    clickable: true,
+  }], 'frame:child');
+  const intern = value => {
+    const existing = domSnapshot.strings.indexOf(value);
+    if (existing >= 0) return existing;
+    domSnapshot.strings.push(value);
+    return domSnapshot.strings.length - 1;
+  };
+  const empty = intern('');
+  domSnapshot.documents.unshift({
+    frameId: intern('frame:top'),
+    documentURL: intern('https://example.test/frame-host'),
+    baseURL: intern('https://example.test/'),
+    nodes: {
+      parentIndex: [-1, 0, 1, 2],
+      nodeType: [9, 1, 1, 1],
+      nodeName: ['#document', 'html', 'body', 'iframe'].map(intern),
+      nodeValue: [empty, empty, empty, empty],
+      backendNodeId: [8_000, 8_001, 8_002, 8_003],
+      attributes: [[], [], [], [intern('id'), intern('same-frame')]],
+      isClickable: { index: [] },
+      contentDocumentIndex: { index: [3], value: [1] },
+    },
+    layout: {
+      nodeIndex: [3],
+      styles: [[intern('block'), intern('visible'), intern('1'), intern('auto')]],
+      bounds: [[100, 60, 400, 300]],
+      paintOrders: [1],
+    },
+  });
+
+  const result = await new ObservationService(
+    snapshotTransport(
+      { title: 'Frame Host', url: 'https://example.test/frame-host', guidance: {} },
+      axTree([]),
+      domSnapshot,
+    ),
+    'session:same-process-frame',
+    'target:same-process-frame',
+  ).observe();
+
+  assert.ok(result.data.elements.some(element => element.name === 'Frame Action'));
+});
+
 function storeInput(overrides = {}) {
   return {
     workspaceId: 'workspace:test',

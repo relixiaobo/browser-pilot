@@ -279,6 +279,35 @@ test('ActionService applies the selected frame offset to pointer coordinates', a
   );
 });
 
+test.todo('selector targets resolve in the selected subframe execution context', async () => {
+  const transport = new FakeTransport((method, _params) => {
+    if (method === 'Runtime.evaluate') {
+      return { result: { objectId: 'object:frame-button' } };
+    }
+    if (method === 'Runtime.callFunctionOn') {
+      return { result: { value: {
+        status: 'ready',
+        x: 25,
+        y: 30,
+        targetState: { connected: true, kind: 'control', focused: false },
+      } } };
+    }
+    return {};
+  });
+  const service = new ActionService(transport, 'session:frame-root', 'target:frame-root', {
+    executionContextId: 77,
+    readbackDelayMs: 0,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  await service.click({ kind: 'ref', ref: '.frame-button' });
+
+  const resolution = transport.calls.find(call => (
+    call.method === 'Runtime.evaluate' && call.params.expression.includes('document.querySelector')
+  ));
+  assert.equal(resolution.params.contextId, 77);
+});
+
 test('ActionService resolves a ref, clicks its current coordinates, and releases it', async () => {
   const refs = new MemoryRefStore();
   refs.save('target-4', [{ backendNodeId: 99, role: 'link', name: 'Details' }]);
