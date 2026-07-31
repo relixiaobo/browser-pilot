@@ -249,6 +249,17 @@ const PAGES = {
 <input type="email" id="email" aria-label="Email">
 <textarea id="textarea" aria-label="Textarea"></textarea>`,
 
+  '/hardening/observation-world': `<title>Observation World</title>
+<main><p>Isolated observation needle</p><button data-testid="isolated-button">Observe safely</button></main>
+<script>
+  JSON.stringify = () => { throw new Error('main-world JSON.stringify called'); };
+  document.querySelector = () => { throw new Error('main-world querySelector called'); };
+  Object.defineProperty(document, 'title', {
+    configurable: true,
+    get() { throw new Error('main-world document.title called'); },
+  });
+</script>`,
+
   '/input/number': `<title>Number Input</title>
 <input type="number" id="input" aria-label="Number" min="0" max="100">
 <script>

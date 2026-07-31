@@ -1110,7 +1110,7 @@ program.command('press <key>')
 
 program.command('eval [expression]')
   .description('Execute JavaScript (pass via argument or stdin)')
-  .addHelpText('after', '\nThis is the escape hatch — anything JS can do, eval can do.\n\nExamples:\n  bp eval "document.title"\n  bp eval "history.back()"\n  bp eval "window.scrollBy(0, 500)"\n  bp eval "document.querySelector(\'h1\').textContent"\n  echo \'complex js\' | bp eval')
+  .addHelpText('after', '\nThis is the escape hatch — anything JS can do, eval can do. It runs in the page\'s main JavaScript world, where page scripts may modify globals.\n\nExamples:\n  bp eval "document.title"\n  bp eval "history.back()"\n  bp eval "window.scrollBy(0, 500)"\n  bp eval "document.querySelector(\'h1\').textContent"\n  echo \'complex js\' | bp eval')
   .action(action(async (expression) => {
     if (!expression) {
       expression = await readStdin();

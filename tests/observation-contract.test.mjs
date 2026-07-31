@@ -31,6 +31,27 @@ function snapshotTransport(pageInfo, nodes, domSnapshot = { documents: [], strin
   };
 }
 
+test('Observation snapshot maps PAGE_INFO exceptions to a structured error', async () => {
+  const transport = {
+    async send(method) {
+      assert.equal(method, 'Runtime.evaluate');
+      return {
+        result: {},
+        exceptionDetails: {
+          text: 'Uncaught',
+          exception: { description: 'Error: poisoned page metadata' },
+        },
+      };
+    },
+    close() {},
+  };
+
+  await assert.rejects(
+    () => new ObservationService(transport, 'session:error', 'target:error').observe(10),
+    error => error.code === 'internal_error' && /poisoned page metadata/.test(error.message),
+  );
+});
+
 function axTree(elements) {
   return [
     {

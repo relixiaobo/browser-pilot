@@ -17,7 +17,7 @@ import {
   type ObservationTruncationReason,
   type PageGeometry,
 } from './protocol/model.js';
-import { BrowserPilotError } from './protocol/errors.js';
+import { BrowserPilotError, invalidArgument } from './protocol/errors.js';
 import { serializeStructuralText } from './structural-text.js';
 import type { Transport } from './transport.js';
 
@@ -144,8 +144,19 @@ export async function takeSnapshot(
     expression: PAGE_INFO, returnByValue: true,
   };
   if (context.executionContextId) infoParams.contextId = context.executionContextId;
-  const { result: info } = await transport.send('Runtime.evaluate', infoParams, sessionId);
-  const pageInfo = JSON.parse(info.value);
+  const { result: info, exceptionDetails } = await transport.send('Runtime.evaluate', infoParams, sessionId);
+  if (exceptionDetails) {
+    throw new BrowserPilotError(
+      'internal_error',
+      exceptionDetails.exception?.description || exceptionDetails.text || 'Page observation evaluation failed',
+    );
+  }
+  let pageInfo: any;
+  try {
+    pageInfo = JSON.parse(info?.value);
+  } catch (cause) {
+    throw new BrowserPilotError('internal_error', 'Chrome returned invalid page observation metadata', { cause });
+  }
   const truncation = new Set<ObservationTruncationReason>();
   let textCharacters = 0;
 
@@ -445,9 +456,15 @@ export async function resolveTargetIdentity(
     return { objectId, ref, entry };
   }
 
-  const { result } = await transport.send('Runtime.evaluate', {
+  const { result, exceptionDetails } = await transport.send('Runtime.evaluate', {
     expression: `document.querySelector(${JSON.stringify(target)})`,
   }, sessionId);
+  if (exceptionDetails) {
+    throw invalidArgument(
+      exceptionDetails.exception?.description || exceptionDetails.text || 'Element query failed',
+      'selector',
+    );
+  }
   if (!result.objectId) throw new Error(`Element not found: ${target}`);
   return { objectId: result.objectId };
 }

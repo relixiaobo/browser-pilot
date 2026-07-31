@@ -138,6 +138,29 @@ test.describe('eval', () => {
   });
 });
 
+test.describe('isolated observations', () => {
+  test('snapshot, read, search, and find ignore poisoned main-world globals', async () => {
+    const opened = open(`${BASE}/hardening/observation-world`);
+    expect(opened.ok).toBe(true);
+
+    const observed = snapshot();
+    expect(observed.ok).toBe(true);
+    expect(observed.elements?.some(element => element.name === 'Observe safely')).toBe(true);
+
+    const read = bp('read');
+    expect(read.ok).toBe(true);
+    expect(read.text).toContain('Isolated observation needle');
+
+    const search = bp('search "observation needle"');
+    expect(search.ok).toBe(true);
+    expect(search.totalMatches).toBe(1);
+
+    const found = bp('find "[data-testid=isolated-button]"');
+    expect(found.ok).toBe(true);
+    expect(found.totalMatches).toBe(1);
+  });
+});
+
 // ── Screenshot ──────────────────────────────────────
 
 test.describe('screenshot', () => {

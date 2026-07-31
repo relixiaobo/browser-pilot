@@ -70,6 +70,7 @@ import {
 } from './frame-service.js';
 import { MemoryObservationStore, type StoredObservation } from './observation-store.js';
 import { ObservationService } from './observation-service.js';
+import { ObservationWorldService } from './observation-world-service.js';
 import { PageContentService } from './page-content-service.js';
 import { PageInspectionService } from './page-inspection-service.js';
 import { RefRevalidationService } from './ref-revalidation-service.js';
@@ -211,6 +212,13 @@ interface ObservationContextIdentity {
   documentGeneration: string;
 }
 
+interface ObservationExecutionContext {
+  cdpSessionId: string;
+  frameId: string;
+  loaderId: string;
+  executionContextId: number;
+}
+
 interface ActionServiceHarness {
   service: ActionService;
   observation(): CreatedObservation | undefined;
@@ -348,6 +356,7 @@ export class BrowserToolService implements BrowserToolExecutor {
 
   private readonly registry = new MemoryControlledTargetRegistry();
   private readonly observations: MemoryObservationStore;
+  private readonly observationWorlds: ObservationWorldService;
   private readonly inventory: TargetInventoryService;
   private readonly profileContexts: MemoryProfileContextRegistry;
   private readonly sessions = new Map<string, TargetSession>();
@@ -383,6 +392,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     options: BrowserToolServiceOptions = {},
   ) {
     this.observations = options.observations ?? new MemoryObservationStore();
+    this.observationWorlds = new ObservationWorldService(transport);
     this.artifactStore = options.artifactStore;
     this.managedTargets = options.managedTargets ?? new TransportManagedTargetLifecycle(transport);
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS;
@@ -1024,6 +1034,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.selectWorkspaceProfile(context, activeTarget.profileContextId);
     const session = await this.ensureSession(inventoryContext, targetId, resolved.cdpTargetId);
     session.activeFrame = undefined;
+    this.observationWorlds.invalidateSession(session.sessionId);
     await Promise.all(
       [...(this.childFrameSessions.get(session.sessionId)?.values() ?? [])]
         .map(child => this.detachFrameTargetSession(session, child, true, 'navigation')),
@@ -1137,16 +1148,15 @@ export class BrowserToolService implements BrowserToolExecutor {
   ): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const observationContext = await this.observationExecutionContext(session);
     const location = await new ObservationService(
       this.transport,
-      this.activeCdpSessionId(session),
+      observationContext.cdpSessionId,
       targetId,
       {
         refStore: new MemoryRefStore(),
-        ...(session.activeFrame?.executionContextId !== undefined
-          ? { executionContextId: session.activeFrame.executionContextId }
-          : {}),
-        ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
+        executionContextId: observationContext.executionContextId,
+        frameId: observationContext.frameId,
       },
     ).locate(args.selector as string);
     const record = this.registry.get(this.inventoryContext(context), targetId);
@@ -1156,12 +1166,11 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async read(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
-    const result = await new PageContentService(this.transport, this.activeCdpSessionId(session)).read(
+    const observationContext = await this.observationExecutionContext(session);
+    const result = await new PageContentService(this.transport, observationContext.cdpSessionId).read(
       args.selector as string | undefined,
       Number(args.limit ?? 100_000),
-      session.activeFrame?.executionContextId !== undefined
-        ? { executionContextId: session.activeFrame.executionContextId }
-        : {},
+      { executionContextId: observationContext.executionContextId },
     );
     return asJson({
       ...this.targetResult(context, targetId, result.url),
@@ -1175,17 +1184,16 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async search(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const observationContext = await this.observationExecutionContext(session);
     const result = await new PageInspectionService(
       this.transport,
-      this.activeCdpSessionId(session),
+      observationContext.cdpSessionId,
     ).search(args.query as string, {
       selector: args.selector as string | undefined,
       caseSensitive: args.caseSensitive as boolean | undefined,
       wholeWord: args.wholeWord as boolean | undefined,
       limit: args.limit as number | undefined,
-      context: session.activeFrame?.executionContextId !== undefined
-        ? { executionContextId: session.activeFrame.executionContextId }
-        : {},
+      context: { executionContextId: observationContext.executionContextId },
     });
     return asJson({
       ...this.targetResult(context, targetId, result.url),
@@ -1199,16 +1207,15 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async findElements(context: BrokerToolCallContext, args: Record<string, JsonValue>): Promise<JsonValue> {
     const targetId = this.requireTargetId(context);
     const session = await this.resolveTargetSession(context, targetId, 'page.observe');
+    const observationContext = await this.observationExecutionContext(session);
     const result = await new PageInspectionService(
       this.transport,
-      this.activeCdpSessionId(session),
+      observationContext.cdpSessionId,
     ).find(args.selector as string, {
       limit: args.limit as number | undefined,
       attributeNames: args.attributeNames as string[] | undefined,
       pierceShadow: args.pierceShadow as boolean | undefined,
-      context: session.activeFrame?.executionContextId !== undefined
-        ? { executionContextId: session.activeFrame.executionContextId }
-        : {},
+      context: { executionContextId: observationContext.executionContextId },
     });
     return asJson({
       ...this.targetResult(context, targetId, result.url),
@@ -2349,25 +2356,23 @@ export class BrowserToolService implements BrowserToolExecutor {
     afterAction: boolean,
   ): Promise<CreatedObservation> {
     const refs = new MemoryRefStore();
-    const cdpSessionId = this.activeCdpSessionId(session);
-    const service = new ObservationService(this.transport, cdpSessionId, targetId, {
+    const observationContext = await this.observationExecutionContext(session);
+    const service = new ObservationService(this.transport, observationContext.cdpSessionId, targetId, {
       refStore: refs,
-      ...(session.activeFrame?.executionContextId !== undefined
-        ? { executionContextId: session.activeFrame.executionContextId }
-        : {}),
-      ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
+      executionContextId: observationContext.executionContextId,
+      frameId: observationContext.frameId,
     });
     const snapshot = afterAction
       ? await service.observeAfterAction(limit)
       : await service.observe(limit);
-    const identity = await this.observationContextIdentity(session);
+    const identity = await this.observationContextIdentity(observationContext);
     const record = this.observations.create({
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
       targetId,
       browserProcessIdentity: context.browser.instance.processIdentity,
       browserConnectionGeneration: context.browser.instance.connectionGeneration,
-      sessionId: cdpSessionId,
+      sessionId: observationContext.cdpSessionId,
       frameId: identity.frameId,
       loaderId: identity.loaderId,
       documentGeneration: identity.documentGeneration,
@@ -2394,8 +2399,8 @@ export class BrowserToolService implements BrowserToolExecutor {
     observationId: ObservationId,
     ref?: number,
   ): Promise<StoredObservation> {
-    const cdpSessionId = this.activeCdpSessionId(session);
-    const identity = await this.observationContextIdentity(session);
+    const observationContext = await this.observationExecutionContext(session);
+    const identity = await this.observationContextIdentity(observationContext);
     const observation = this.observations.resolve({
       workspaceId: context.workspace!.id,
       leaseId: context.lease!.id,
@@ -2403,7 +2408,7 @@ export class BrowserToolService implements BrowserToolExecutor {
       observationId,
       browserProcessIdentity: context.browser.instance.processIdentity,
       browserConnectionGeneration: context.browser.instance.connectionGeneration,
-      sessionId: cdpSessionId,
+      sessionId: observationContext.cdpSessionId,
       frameId: identity.frameId,
       loaderId: identity.loaderId,
       documentGeneration: identity.documentGeneration,
@@ -2799,24 +2804,24 @@ export class BrowserToolService implements BrowserToolExecutor {
     let next: CreatedObservation | undefined;
     const cdpSessionId = this.activeCdpSessionId(session);
     const refStore = observation ? fixedRefStore(targetId, observation) : new MemoryRefStore();
-    const observationOptions = {
-      refStore,
-      ...(session.activeFrame?.executionContextId !== undefined
-        ? { executionContextId: session.activeFrame.executionContextId }
-        : {}),
-      ...(session.activeFrame ? { frameId: session.activeFrame.cdpFrameId } : {}),
-    };
     const expectedConnectionGeneration = this.binding.instance.connectionGeneration;
     const expectedFrameId = session.activeFrame?.cdpFrameId;
     const expectedExecutionContextId = session.activeFrame?.executionContextId;
     const observationService = {
       refs: refStore,
-      locate: (selector: string) => new ObservationService(
-        this.transport,
-        cdpSessionId,
-        targetId,
-        observationOptions,
-      ).locate(selector),
+      locate: async (selector: string) => {
+        const observationContext = await this.observationExecutionContext(session);
+        return new ObservationService(
+          this.transport,
+          observationContext.cdpSessionId,
+          targetId,
+          {
+            refStore,
+            executionContextId: observationContext.executionContextId,
+            frameId: observationContext.frameId,
+          },
+        ).locate(selector);
+      },
       observeAfterAction: async (limit = OBSERVATION_V1_LIMITS.defaultElements) => {
         next = await this.createObservation(context, targetId, session, limit, true);
         return next.snapshot;
@@ -3116,17 +3121,35 @@ export class BrowserToolService implements BrowserToolExecutor {
     return { frameId: frame.id, loaderId: frame.loaderId };
   }
 
-  private async observationContextIdentity(session: TargetSession): Promise<ObservationContextIdentity> {
+  private async observationExecutionContext(session: TargetSession): Promise<ObservationExecutionContext> {
+    const cdpSessionId = this.activeCdpSessionId(session);
     const frame = await this.frameLoaderIdentity(session);
+    return {
+      cdpSessionId,
+      ...frame,
+      executionContextId: await this.observationWorlds.contextId(cdpSessionId, frame.frameId),
+    };
+  }
+
+  private async observationContextIdentity(
+    context: ObservationExecutionContext,
+  ): Promise<ObservationContextIdentity> {
     const params: Record<string, unknown> = {
       expression: 'document',
       returnByValue: false,
+      contextId: context.executionContextId,
     };
-    if (session.activeFrame?.executionContextId !== undefined) {
-      params.contextId = session.activeFrame.executionContextId;
+    const { result, exceptionDetails } = await this.transport.send(
+      'Runtime.evaluate',
+      params,
+      context.cdpSessionId,
+    );
+    if (exceptionDetails) {
+      throw new BrowserPilotError(
+        'internal_error',
+        exceptionDetails.exception?.description || exceptionDetails.text || 'Document identity evaluation failed',
+      );
     }
-    const cdpSessionId = this.activeCdpSessionId(session);
-    const { result } = await this.transport.send('Runtime.evaluate', params, cdpSessionId);
     if (typeof result?.objectId !== 'string' || result.objectId.length === 0) {
       throw new BrowserPilotError('internal_error', 'Chrome returned an invalid Document identity');
     }
@@ -3134,18 +3157,19 @@ export class BrowserToolService implements BrowserToolExecutor {
       const { node } = await this.transport.send('DOM.describeNode', {
         objectId: result.objectId,
         depth: 0,
-      }, cdpSessionId);
+      }, context.cdpSessionId);
       if (!Number.isSafeInteger(node?.backendNodeId) || node.backendNodeId <= 0) {
         throw new BrowserPilotError('internal_error', 'Chrome returned an invalid Document identity');
       }
       return {
-        ...frame,
+        frameId: context.frameId,
+        loaderId: context.loaderId,
         documentGeneration: `document:${node.backendNodeId}`,
       };
     } finally {
       await this.transport.send('Runtime.releaseObject', {
         objectId: result.objectId,
-      }, cdpSessionId).catch(() => {});
+      }, context.cdpSessionId).catch(() => {});
     }
   }
 
@@ -3267,6 +3291,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
     this.transport.on?.('Page.frameDetached', (params: any, sessionId?: string) => {
       if (!sessionId || typeof params?.frameId !== 'string') return;
+      this.observationWorlds.invalidateFrame(sessionId, params.frameId);
       const session = this.targetSessionForCdpSession(sessionId);
       const frames = session ? this.framesBySession.get(session.sessionId) : undefined;
       const detached = frames?.byCdpId.get(params.frameId);
@@ -3278,6 +3303,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
     this.transport.on?.('Page.frameNavigated', (params: any, sessionId?: string) => {
       if (!sessionId || typeof params?.frame?.id !== 'string') return;
+      this.observationWorlds.invalidateFrame(sessionId, params.frame.id);
       const session = this.targetSessionForCdpSession(sessionId);
       if (session) this.watchdogs.resetTarget(session.leaseId, session.targetId);
       if (
@@ -3290,6 +3316,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
     this.transport.on?.('Runtime.executionContextDestroyed', (params: any, sessionId?: string) => {
       if (!sessionId || !Number.isSafeInteger(params?.executionContextId)) return;
+      this.observationWorlds.invalidateContext(sessionId, params.executionContextId);
       const session = this.targetSessionForCdpSession(sessionId);
       if (
         session?.activeFrame &&
@@ -3301,6 +3328,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     });
     this.transport.on?.('Runtime.executionContextsCleared', (_params: any, sessionId?: string) => {
       if (!sessionId) return;
+      this.observationWorlds.invalidateSession(sessionId);
       const session = this.targetSessionForCdpSession(sessionId);
       if (session?.activeFrame?.sessionId === sessionId) session.activeFrame.executionContextId = undefined;
     });
@@ -3510,6 +3538,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     children.delete(child.targetId);
     if (children?.size === 0) this.childFrameSessions.delete(session.sessionId);
     this.observations.invalidateSession(child.sessionId, reason);
+    this.observationWorlds.invalidateSession(child.sessionId);
     this.network.detachSession(child.sessionId);
     this.ownedSessionIds.delete(child.sessionId);
     this.dialogOpenSequenceBySession.delete(child.sessionId);
@@ -3538,6 +3567,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async retireSessionAndWait(key: string, session: TargetSession): Promise<void> {
     if (this.sessions.get(key) === session) this.sessions.delete(key);
     this.guidanceBySession.delete(session.sessionId);
+    this.observationWorlds.invalidateSession(session.sessionId);
     this.downloads?.detachSession(session.sessionId, 'session_replaced');
     await Promise.all(
       [...(this.childFrameSessions.get(session.sessionId)?.values() ?? [])]
@@ -3548,6 +3578,7 @@ export class BrowserToolService implements BrowserToolExecutor {
   }
 
   private forgetSession(sessionId: string): void {
+    this.observationWorlds.invalidateSession(sessionId);
     const child = this.childFrameSessionById(sessionId);
     if (child) {
       void this.detachFrameTargetSession(child.session, child.child, false, 'frame_detached');

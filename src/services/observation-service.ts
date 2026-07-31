@@ -81,7 +81,13 @@ export class ObservationService {
       returnByValue: true,
     };
     if (this.executionContextId) params.contextId = this.executionContextId;
-    const { result } = await this.transport.send('Runtime.evaluate', params, this.sessionId);
+    const { result, exceptionDetails } = await this.transport.send('Runtime.evaluate', params, this.sessionId);
+    if (exceptionDetails) {
+      throw invalidArgument(
+        exceptionDetails.exception?.description || exceptionDetails.text || 'Element query failed',
+        'selector',
+      );
+    }
     if (!result.value || result.value === 'null') {
       throw invalidArgument(`Element not found: ${selector}`, 'selector');
     }

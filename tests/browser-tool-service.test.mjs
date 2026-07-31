@@ -1365,6 +1365,44 @@ test('latest Observation and locate are available through canonical Browser tool
   );
 });
 
+test('observation worlds are cached and invalidated by CDP lifecycle events', async () => {
+  const transport = new BrowserFixtureTransport();
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:test',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding),
+  });
+  const client = await createClient(runtime, 'bridge:observation-worlds', 'com.example.agent', 'instance:worlds');
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+
+  await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  await tool(runtime, client, 'browser.search', { query: 'Submit' }, targetId);
+  const observationWorldCalls = () => transport.calls.filter(call => (
+    call.method === 'Page.createIsolatedWorld' &&
+    call.params.worldName === 'browser-pilot.observation.v1'
+  ));
+  assert.equal(observationWorldCalls().length, 1);
+  assert.equal(observationWorldCalls()[0].params.frameId, 'frame:user-form');
+  const sessionId = observationWorldCalls()[0].sessionId;
+
+  transport.emit('Page.frameNavigated', { frame: { id: 'frame:user-form' } }, sessionId);
+  await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(observationWorldCalls().length, 2);
+
+  transport.emit('Runtime.executionContextDestroyed', { executionContextId: 77 }, sessionId);
+  await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(observationWorldCalls().length, 3);
+
+  transport.emit('Runtime.executionContextsCleared', {}, sessionId);
+  await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(observationWorldCalls().length, 4);
+
+  transport.emit('Page.frameDetached', { frameId: 'frame:user-form' }, sessionId);
+  await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(observationWorldCalls().length, 5);
+});
+
 test('page search, element queries, scrolling, and native dropdowns work through public tools', async () => {
   const transport = new BrowserFixtureTransport();
   transport.extraAxNodes = [{

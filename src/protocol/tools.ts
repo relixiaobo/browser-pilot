@@ -1273,7 +1273,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tool({
     name: 'browser.eval',
     title: 'Evaluate JavaScript',
-    description: 'Evaluate JavaScript in a controlled target when the Agent host exposes developer capability.',
+    description: 'Evaluate JavaScript in the controlled target main world when the Agent host exposes developer capability.',
     context: 'target',
     inputSchema: objectSchema({ expression: boundedText, awaitPromise: booleanSchema() }, ['expression']),
     outputSchema: resultSchema('target', {

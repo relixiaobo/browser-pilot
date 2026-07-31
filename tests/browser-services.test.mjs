@@ -10,6 +10,7 @@ import {
   MemoryRefStore,
   NetworkService,
   ObservationService,
+  ObservationWorldService,
   PageLoadTimeoutError,
   PageContentService,
   RefRevalidationService,
@@ -126,6 +127,56 @@ test('ObservationService locates and validates an element', async () => {
 
   assert.deepEqual(await service.locate('.editor'), location);
   assert.match(transport.calls[0].params.expression, /\.editor/);
+});
+
+test('ObservationService maps locate evaluation exceptions to a structured selector error', async () => {
+  const transport = new FakeTransport(() => ({
+    result: {},
+    exceptionDetails: { text: 'Uncaught', exception: { description: 'Error: poisoned selector' } },
+  }));
+  const service = new ObservationService(transport, 'session:locate-error', 'target:locate-error');
+
+  await assert.rejects(
+    () => service.locate('.editor'),
+    error => error.code === 'invalid_argument' && error.context?.field === 'selector' &&
+      /poisoned selector/.test(error.message),
+  );
+});
+
+test('ObservationWorldService caches worlds and invalidates by frame, context, and session', async () => {
+  let nextContextId = 70;
+  const transport = new FakeTransport(method => {
+    assert.equal(method, 'Page.createIsolatedWorld');
+    nextContextId += 1;
+    return { executionContextId: nextContextId };
+  });
+  const worlds = new ObservationWorldService(transport);
+
+  assert.deepEqual(await Promise.all([
+    worlds.contextId('session-a', 'frame-a'),
+    worlds.contextId('session-a', 'frame-a'),
+  ]), [71, 71]);
+  assert.equal(transport.calls.length, 1);
+  assert.deepEqual(transport.calls[0], {
+    method: 'Page.createIsolatedWorld',
+    params: {
+      frameId: 'frame-a',
+      worldName: 'browser-pilot.observation.v1',
+      grantUniveralAccess: false,
+    },
+    sessionId: 'session-a',
+  });
+
+  worlds.invalidateFrame('session-a', 'frame-a');
+  assert.equal(await worlds.contextId('session-a', 'frame-a'), 72);
+  worlds.invalidateContext('session-a', 72);
+  assert.equal(await worlds.contextId('session-a', 'frame-a'), 73);
+  await worlds.contextId('session-a', 'frame-b');
+  worlds.invalidateSession('session-a');
+  assert.equal(await worlds.contextId('session-a', 'frame-a'), 75);
+  assert.equal(await worlds.contextId('session-b', 'frame-a'), 76);
+  worlds.invalidateSession('session-a');
+  assert.equal(await worlds.contextId('session-b', 'frame-a'), 76);
 });
 
 test('RefRevalidationService accepts unchanged AX semantics without a full DOM snapshot', async () => {

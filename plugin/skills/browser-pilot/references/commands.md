@@ -156,7 +156,8 @@ Select and verify an option. Use `--by label|value|index`, `--contains`, and
 ### `bp eval [expression]`
 
 Evaluate JavaScript in the selected page/frame. Pass complex code through
-stdin. Use only when a dedicated command is insufficient.
+stdin. It runs in the page's main JavaScript world, where page scripts may
+modify globals. Use only when a dedicated command is insufficient.
 
 ## Frames and Dialogs
 
