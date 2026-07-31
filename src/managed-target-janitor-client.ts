@@ -375,7 +375,8 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
     const worker = this.worker;
     if (!worker) return;
     this.expectedExits.add(worker);
-    if (cleanup && worker.stdin && !worker.stdin.destroyed) worker.stdin.end();
+    if (cleanup && this.ready && worker.stdin && !worker.stdin.destroyed) worker.stdin.end();
+    else if (cleanup) worker.kill('SIGTERM');
     else if (worker.connected && this.ready) {
       const request: WorkerRequest = {
         id: this.nextRequestId++,

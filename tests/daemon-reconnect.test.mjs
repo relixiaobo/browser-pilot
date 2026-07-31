@@ -68,12 +68,15 @@ test('daemon disconnects a half-open CDP connection after two missed default kee
   const socketPath = testBrokerPaths(root).endpoint;
   await mkdir(profile, { recursive: true });
   const cdp = await startCdpFixture({ autoPong: false });
+  await writeFile(
+    join(profile, 'DevToolsActivePort'),
+    `${cdp.port}\n/devtools/browser/half-open\n`,
+  );
   let pingCount = 0;
   cdp.server.on('connection', socket => socket.on('ping', () => { pingCount += 1; }));
   const stderr = [];
   const child = spawn(process.execPath, [
     join(process.cwd(), 'dist', 'daemon.js'),
-    `ws://127.0.0.1:${cdp.port}/devtools/browser/half-open`,
     'Chrome',
     profile,
   ], {
@@ -88,10 +91,11 @@ test('daemon disconnects a half-open CDP connection after two missed default kee
     await rm(root, { recursive: true, force: true });
   });
 
-  await waitFor(
-    () => daemonRequest(socketPath, '/health'),
-    value => value.browser?.state === 'connected',
-  );
+  const client = await initializeClient(socketPath, 'bridge:keepalive');
+  await connectBrowser(socketPath, client, 'command:keepalive-connect');
+  await waitFor(() => daemonRequest(socketPath, '/health'), value => (
+    value.browser?.state === 'connected'
+  ));
   const startedAt = Date.now();
   const disconnected = await waitFor(
     () => daemonRequest(socketPath, '/health'),
@@ -116,7 +120,6 @@ test('daemon distinguishes stale endpoints from authorization handshake timeouts
   await mkdir(profile, { recursive: true });
   const child = spawn(process.execPath, [
     join(process.cwd(), 'dist', 'daemon.js'),
-    '',
     'Chrome',
     profile,
   ], {
@@ -127,7 +130,7 @@ test('daemon distinguishes stale endpoints from authorization handshake timeouts
   child.stderr.on('data', bytes => stderr.push(bytes.toString()));
   let hanging;
   t.after(async () => {
-    await stopDaemon(socketPath, 'bridge:connect-diagnosis').catch(() => {});
+    await stopDaemon(socketPath).catch(() => {});
     if (child.exitCode === null) child.kill('SIGTERM');
     await hanging?.close().catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -219,10 +222,63 @@ function daemonRequest(socketPath, path, body) {
   });
 }
 
-async function stopDaemon(socketPath, clientSessionId) {
-  if (clientSessionId) {
-    await daemonRequest(socketPath, '/broker/disconnect', { clientSessionId }).catch(() => {});
-  }
+async function initializeClient(socketPath, clientSessionId, capabilities = [
+  'browser.control',
+  'workspace.manage',
+]) {
+  const initialized = await waitFor(
+    () => daemonRequest(socketPath, '/broker/rpc', {
+      clientSessionId,
+      method: 'initialize',
+      params: {
+        client: {
+          id: 'com.example.daemon-test',
+          name: 'Daemon Test',
+          version: '1.0.0',
+          instanceId: `instance:${clientSessionId}`,
+        },
+        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
+        requestedCapabilities: capabilities,
+      },
+    }),
+    value => value.result?.browsers?.length > 0,
+  );
+  const browserId = initialized.result.browsers[0].id;
+  const created = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId,
+    method: 'workspaces/create',
+    params: { browserId },
+  });
+  const leased = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId,
+    method: 'leases/create',
+    params: { workspaceId: created.result.workspace.id },
+  });
+  return {
+    initialized,
+    clientSessionId,
+    browserId,
+    workspaceId: created.result.workspace.id,
+    leaseId: leased.result.lease.id,
+    eventCursor: created.result.eventCursor,
+  };
+}
+
+function connectBrowser(socketPath, client, commandId) {
+  return daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId: client.clientSessionId,
+    method: 'tools/call',
+    params: {
+      name: 'browser.connect',
+      arguments: { browserId: client.browserId },
+      workspaceId: client.workspaceId,
+      leaseId: client.leaseId,
+      commandId,
+    },
+  });
+}
+
+async function stopDaemon(socketPath) {
   const health = await daemonRequest(socketPath, '/health');
   return daemonRequest(socketPath, '/shutdown', {
     brokerProcessIdentity: health.brokerProcessIdentity,
@@ -252,11 +308,14 @@ test('daemon rediscovers the selected profile and publishes one restored generat
   const socketPath = testBrokerPaths(root).endpoint;
   await mkdir(profile, { recursive: true });
   let first = await startCdpFixture();
+  await writeFile(
+    join(profile, 'DevToolsActivePort'),
+    `${first.port}\n/devtools/browser/first\n`,
+  );
   let second;
   const stderr = [];
   const child = spawn(process.execPath, [
     join(process.cwd(), 'dist', 'daemon.js'),
-    `ws://127.0.0.1:${first.port}/devtools/browser/first`,
     'Chrome',
     profile,
   ], {
@@ -265,44 +324,34 @@ test('daemon rediscovers the selected profile and publishes one restored generat
   });
   child.stderr.on('data', bytes => stderr.push(bytes.toString()));
   t.after(async () => {
-    await stopDaemon(socketPath, 'bridge:daemon-test').catch(() => {});
+    await stopDaemon(socketPath).catch(() => {});
     if (child.exitCode === null) child.kill('SIGTERM');
     await first?.close().catch(() => {});
     await second?.close().catch(() => {});
     await rm(root, { recursive: true, force: true });
   });
 
-  const initial = await waitFor(
-    () => daemonRequest(socketPath, '/health'),
-    value => value.browser?.state === 'connected',
+  const client = await initializeClient(socketPath, 'bridge:daemon-test', [
+    'browser.control',
+    'workspace.manage',
+    'event.read',
+  ]);
+  const initialConnect = await connectBrowser(
+    socketPath,
+    client,
+    'command:initial-connect',
   );
+  assert.equal(initialConnect.result.result.state, 'connected');
+  const initial = await waitFor(() => daemonRequest(socketPath, '/health'), value => (
+    value.browser?.state === 'connected'
+  ));
   assert.equal(initial.browser.connectionGeneration, 1);
-
-  const initialize = await daemonRequest(socketPath, '/broker/rpc', {
-    clientSessionId: 'bridge:daemon-test',
-    method: 'initialize',
-    params: {
-      client: {
-        id: 'com.example.daemon-test',
-        name: 'Daemon Test',
-        version: '1.0.0',
-        instanceId: 'instance:daemon-test',
-      },
-      protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
-      requestedCapabilities: ['browser.control', 'workspace.manage', 'event.read'],
-    },
+  const baseline = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId: client.clientSessionId,
+    method: 'events/poll',
+    params: { workspaceId: client.workspaceId, cursor: client.eventCursor },
   });
-  assert.equal(initialize.result.browsers[0].state, 'ready');
-  const created = await daemonRequest(socketPath, '/broker/rpc', {
-    clientSessionId: 'bridge:daemon-test',
-    method: 'workspaces/create',
-    params: {},
-  });
-  const leased = await daemonRequest(socketPath, '/broker/rpc', {
-    clientSessionId: 'bridge:daemon-test',
-    method: 'leases/create',
-    params: { workspaceId: created.result.workspace.id },
-  });
+  client.eventCursor = baseline.result.nextCursor;
 
   await first.close();
   first = undefined;
@@ -318,13 +367,13 @@ test('daemon rediscovers the selected profile and publishes one restored generat
     `${second.port}\n/devtools/browser/second\n`,
   );
   const connected = await daemonRequest(socketPath, '/broker/rpc', {
-    clientSessionId: 'bridge:daemon-test',
+    clientSessionId: client.clientSessionId,
     method: 'tools/call',
     params: {
       name: 'browser.connect',
-      arguments: { browserId: initialize.result.browsers[0].id },
-      workspaceId: created.result.workspace.id,
-      leaseId: leased.result.lease.id,
+      arguments: { browserId: client.browserId },
+      workspaceId: client.workspaceId,
+      leaseId: client.leaseId,
       commandId: 'command:explicit-reconnect',
     },
   });
@@ -337,11 +386,11 @@ test('daemon rediscovers the selected profile and publishes one restored generat
   assert.equal(restored.wsUrl, `ws://127.0.0.1:${second.port}/devtools/browser/second`);
 
   const replayed = await daemonRequest(socketPath, '/broker/rpc', {
-    clientSessionId: 'bridge:daemon-test',
+    clientSessionId: client.clientSessionId,
     method: 'events/poll',
     params: {
-      workspaceId: created.result.workspace.id,
-      cursor: created.result.eventCursor,
+      workspaceId: client.workspaceId,
+      cursor: client.eventCursor,
     },
   });
   assert.deepEqual(replayed.result.events
@@ -361,7 +410,6 @@ test('daemon initializes with structured remediation before remote debugging is 
   const stderr = [];
   const child = spawn(process.execPath, [
     join(process.cwd(), 'dist', 'daemon.js'),
-    '',
     'Chrome',
     profile,
   ], {
@@ -371,7 +419,7 @@ test('daemon initializes with structured remediation before remote debugging is 
   child.stderr.on('data', bytes => stderr.push(bytes.toString()));
   let cdp;
   t.after(async () => {
-    await stopDaemon(socketPath, 'bridge:discovery-test').catch(() => {});
+    await stopDaemon(socketPath).catch(() => {});
     if (child.exitCode === null) child.kill('SIGTERM');
     await cdp?.close().catch(() => {});
     await rm(root, { recursive: true, force: true });

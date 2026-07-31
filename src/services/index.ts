@@ -4,7 +4,6 @@ export * from './download-controller.js';
 export * from './command-runtime.js';
 export * from './broker-request-timeout.js';
 export * from './event-journal.js';
-export * from './compatibility-dialog-service.js';
 export * from './observation-service.js';
 export * from './observation-world-service.js';
 export * from './observation-store.js';
@@ -19,11 +18,8 @@ export * from './page-inspection-service.js';
 export * from './scroll-service.js';
 export * from './dropdown-service.js';
 export * from './screenshot-annotation-service.js';
-export * from './target-service.js';
 export * from './frame-service.js';
 export * from './cookie-service.js';
-export * from './auth-service.js';
-export * from './network-service.js';
 export * from './workspace-network-controller.js';
 export * from './browser-control-policy.js';
 export * from './broker-runtime.js';
@@ -62,6 +58,7 @@ export {
   type DiscoveredBrowser,
 } from '../chrome.js';
 export * from '../broker-locator.js';
+export { DaemonClient } from '../client.js';
 export {
   resolveBrowserPilotPaths,
   type BrowserPilotPathOptions,

@@ -21,7 +21,6 @@ async function startDaemon(browser: DiscoveredBrowser | null): Promise<DaemonCli
   const invocation = internalProcessInvocation('daemon', import.meta.url);
   const child = spawn(invocation.command, [
     ...invocation.argumentsPrefix,
-    '',
     browser?.candidate.product ?? '',
     browser?.dataDir ?? '',
   ], {

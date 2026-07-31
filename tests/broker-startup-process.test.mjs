@@ -91,7 +91,6 @@ async function startPassiveBroker(root, options = {}) {
   await mkdir(profile, { recursive: true });
   const child = spawn(process.execPath, [
     DAEMON,
-    options.wsUrl ?? '',
     options.product ?? 'Chrome',
     profile,
   ], {
@@ -100,7 +99,7 @@ async function startPassiveBroker(root, options = {}) {
   });
   let stderr = '';
   child.stderr.on('data', bytes => { stderr += bytes.toString(); });
-  if (!options.wsUrl) await waitForFile(join(stateDir, 'broker-locator.json'));
+  await waitForFile(join(stateDir, 'broker-locator.json'));
   return { child, profile, stderr: () => stderr };
 }
 
@@ -176,10 +175,15 @@ async function startGatedCdpFixture() {
   server.on('upgrade', (request, socket, head) => {
     upgradeCount += 1;
     const upgrade = { request, socket, head };
-    socket.once('close', () => {
+    const remove = () => {
       const index = upgrades.indexOf(upgrade);
       if (index >= 0) upgrades.splice(index, 1);
+    };
+    socket.once('end', () => {
+      remove();
+      socket.destroy();
     });
+    socket.once('close', remove);
     if (released) accept(upgrade);
     else upgrades.push(upgrade);
   });
@@ -314,31 +318,47 @@ test('passive Broker startup and concurrent explicit connects create exactly one
   assert.equal(cdp.upgradeCount, 1, 'a dropped browser connection must not start an authorization loop');
 });
 
-test('CLI startup reuses a Broker that is still waiting for browser authorization', async t => {
+test('CLI reuses a Broker while an explicit browser connection is pending', async t => {
   const root = await mkdtemp(testTempPrefix('bp-starting-broker-'));
   const paths = testBrokerPaths(root);
   const stateDir = paths.stateDir;
   const cdp = await startGatedCdpFixture();
-  const broker = await startPassiveBroker(root, { wsUrl: cdp.wsUrl });
+  const profile = join(root, 'profile');
+  const endpoint = new URL(cdp.wsUrl);
+  await mkdir(profile, { recursive: true });
+  await writeFile(
+    join(profile, 'DevToolsActivePort'),
+    `${endpoint.port}\n${endpoint.pathname}\n`,
+  );
+  const broker = await startPassiveBroker(root, { profile });
   t.after(async () => {
     await terminateChild(broker.child);
     await cdp.close();
     await rm(root, { recursive: true, force: true });
   });
 
-  const pidFile = join(stateDir, 'daemon.pid');
-  await waitForFile(pidFile);
-  const starting = JSON.parse(await readFile(pidFile, 'utf8'));
-  assert.equal(starting.state, 'starting');
-  assert.equal(starting.pid, broker.child.pid);
-
+  const client = await initializeClient(paths.endpoint, 'client:pending-browser-connect');
+  const pendingConnect = daemonRequest(paths.endpoint, '/broker/rpc', {
+    clientSessionId: client.clientSessionId,
+    method: 'tools/call',
+    params: {
+      name: 'browser.connect',
+      arguments: { browserId: client.browserId },
+      workspaceId: client.workspaceId,
+      leaseId: client.leaseId,
+      commandId: 'command:pending-browser-connect',
+    },
+  });
+  await waitForValue(() => cdp.pendingUpgradeCount, value => value === 1);
   const command = runCli(root, ['connect']);
-  await waitForFile(join(stateDir, 'startup.lock'));
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(cdp.upgradeCount, 1);
   cdp.release();
-  await command;
+  const [connected] = await Promise.all([pendingConnect, command]);
 
   const locator = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
   assert.equal(locator.pid, broker.child.pid);
+  assert.equal(connected.result.result.state, 'connected');
   assert.equal(cdp.connectionCount, 1);
   assert.equal(broker.stderr(), '');
 });
@@ -347,7 +367,14 @@ test('terminating an authorization-pending Broker removes its worker and startin
   const root = await mkdtemp(testTempPrefix('bp-stopping-broker-'));
   const stateDir = testBrokerPaths(root).stateDir;
   const cdp = await startGatedCdpFixture();
-  const broker = await startPassiveBroker(root, { wsUrl: cdp.wsUrl });
+  const profile = join(root, 'profile');
+  const endpoint = new URL(cdp.wsUrl);
+  await mkdir(profile, { recursive: true });
+  await writeFile(
+    join(profile, 'DevToolsActivePort'),
+    `${endpoint.port}\n${endpoint.pathname}\n`,
+  );
+  const broker = await startPassiveBroker(root, { profile });
   t.after(async () => {
     await terminateChild(broker.child);
     await cdp.close();
@@ -355,7 +382,19 @@ test('terminating an authorization-pending Broker removes its worker and startin
   });
 
   const pidFile = join(stateDir, 'daemon.pid');
-  await waitForFile(pidFile);
+  const client = await initializeClient(testBrokerPaths(root).endpoint, 'client:stopping-connect');
+  void daemonRequest(testBrokerPaths(root).endpoint, '/broker/rpc', {
+    clientSessionId: client.clientSessionId,
+    method: 'tools/call',
+    params: {
+      name: 'browser.connect',
+      arguments: { browserId: client.browserId },
+      workspaceId: client.workspaceId,
+      leaseId: client.leaseId,
+      commandId: 'command:stopping-connect',
+    },
+  }).catch(() => {});
+  await waitForValue(() => cdp.pendingUpgradeCount, value => value === 1);
   await terminateChild(broker.child);
   await waitForValue(() => cdp.pendingUpgradeCount, value => value === 0);
   await assert.rejects(access(pidFile));

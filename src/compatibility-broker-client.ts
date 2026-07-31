@@ -483,18 +483,6 @@ export async function resumeCompatibility(
   }
 }
 
-export async function withCompatibilityTarget<T>(
-  executableVersion: string,
-  operation: (client: CompatibilityBrokerClient, target: CompatibilityTarget) => Promise<T>,
-  clientKey = CLIENT_KEY,
-  invocation: CompatibilityInvocationOptions = {},
-): Promise<T> {
-  const client = await resumeCompatibility(executableVersion, clientKey, invocation);
-  if (!client) throw new Error('Not connected');
-  const target = await client.ensureTarget();
-  return operation(client, target);
-}
-
 export async function shutdownCompatibility(
   executableVersion: string,
   clientKey = CLIENT_KEY,

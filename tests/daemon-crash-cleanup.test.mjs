@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
@@ -113,9 +113,13 @@ test('an abruptly terminated daemon reclaims managed targets without closing use
   const socketPath = testBrokerPaths(root).endpoint;
   await mkdir(profile, { recursive: true });
   const cdp = await startCdpFixture();
+  const endpoint = new URL(cdp.wsUrl);
+  await writeFile(
+    join(profile, 'DevToolsActivePort'),
+    `${endpoint.port}\n${endpoint.pathname}\n`,
+  );
   const daemon = spawn(process.execPath, [
     join(process.cwd(), 'dist', 'daemon.js'),
-    cdp.wsUrl,
     'Chrome',
     profile,
   ], {
@@ -130,25 +134,24 @@ test('an abruptly terminated daemon reclaims managed targets without closing use
     await rm(root, { recursive: true, force: true });
   });
 
-  const health = await waitFor(
-    () => daemonRequest(socketPath, '/health'),
-    value => value.browser?.state === 'connected',
-  );
   const clientSessionId = 'bridge:crash-cleanup';
-  const initialized = await daemonRequest(socketPath, '/broker/rpc', {
-    clientSessionId,
-    method: 'initialize',
-    params: {
-      client: {
-        id: 'com.example.crash-test',
-        name: 'Crash Test',
-        version: '1.0.0',
-        instanceId: 'instance:crash-test',
+  const initialized = await waitFor(
+    () => daemonRequest(socketPath, '/broker/rpc', {
+      clientSessionId,
+      method: 'initialize',
+      params: {
+        client: {
+          id: 'com.example.crash-test',
+          name: 'Crash Test',
+          version: '1.0.0',
+          instanceId: 'instance:crash-test',
+        },
+        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
+        requestedCapabilities: ['browser.control', 'workspace.manage', 'observation.read'],
       },
-      protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
-      requestedCapabilities: ['browser.control', 'workspace.manage', 'observation.read'],
-    },
-  });
+    }),
+    value => value.result?.browsers?.length > 0,
+  );
   const created = await daemonRequest(socketPath, '/broker/rpc', {
     clientSessionId,
     method: 'workspaces/create',
@@ -159,6 +162,21 @@ test('an abruptly terminated daemon reclaims managed targets without closing use
     method: 'leases/create',
     params: { workspaceId: created.result.workspace.id },
   });
+  const connected = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId,
+    method: 'tools/call',
+    params: {
+      name: 'browser.connect',
+      arguments: { browserId: initialized.result.browsers[0].id },
+      workspaceId: created.result.workspace.id,
+      leaseId: leased.result.lease.id,
+      commandId: 'command:crash-connect',
+    },
+  });
+  const health = await waitFor(
+    () => daemonRequest(socketPath, '/health'),
+    value => value.browser?.state === 'connected',
+  );
 
   await daemonRequest(socketPath, '/broker/rpc', {
     clientSessionId,
@@ -181,5 +199,5 @@ test('an abruptly terminated daemon reclaims managed targets without closing use
   assert.equal(cdp.targets.has('user-tab'), true);
   assert.equal(stderr.join(''), '');
   assert.equal(health.browser.state, 'connected');
-  assert.equal(initialized.result.browsers[0].state, 'ready');
+  assert.equal(connected.result.result.state, 'connected');
 });

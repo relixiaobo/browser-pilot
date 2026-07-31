@@ -7,7 +7,7 @@ import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DaemonClient } from '../src/client.js';
+import { DaemonClient } from '../dist/services.js';
 
 const BASE = 'http://127.0.0.1:18274';
 const testOutputPath = (name: string): string => join(
@@ -347,10 +347,17 @@ test.describe('tabs', () => {
   });
 
   test('user tab is controllable and survives managed bulk close', async () => {
-    const daemon = new DaemonClient();
     const marker = `user-tab-${Date.now()}`;
     const url = `${BASE}/input/types?marker=${marker}`;
-    const { targetId } = await daemon.send('Target.createTarget', { url });
+    const health = await new DaemonClient().healthInfo();
+    expect(health.wsUrl).toBeDefined();
+    const browserEndpoint = new URL(health.wsUrl!);
+    const created = await fetch(
+      `http://${browserEndpoint.host}/json/new?${encodeURIComponent(url)}`,
+      { method: 'PUT' },
+    );
+    expect(created.ok).toBe(true);
+    const target = await created.json() as { id: string };
 
     try {
       let userTab: any;
@@ -368,7 +375,7 @@ test.describe('tabs', () => {
       expect(bp('close').ok).toBe(true);
       expect(bp('connect').ok).toBe(true);
     } finally {
-      await daemon.send('Target.closeTarget', { targetId }).catch(() => {});
+      await fetch(`http://${browserEndpoint.host}/json/close/${target.id}`).catch(() => {});
     }
   });
 

@@ -2,20 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   ActionService,
-  AuthService,
   CdpActionContinuityGuard,
   CDPError,
   CookieService,
   FrameService,
   InputDispatcher,
   MemoryRefStore,
-  NetworkService,
   ObservationService,
   ObservationWorldService,
   PageLoadTimeoutError,
   PageContentService,
   RefRevalidationService,
-  TargetService,
   UploadService,
 } from '../dist/services.js';
 
@@ -1083,86 +1080,6 @@ test('PageContentService returns a stable selector error', async () => {
   );
 });
 
-test('TargetService adopts only popups with a complete owned opener chain', async () => {
-  const transport = new FakeTransport(method => {
-    assert.equal(method, 'Target.getTargets');
-    return {
-      targetInfos: [
-        { targetId: 'pilot', type: 'page', url: 'https://app.test', title: 'Pilot' },
-        { targetId: 'popup', type: 'page', url: 'https://popup.test', title: 'Popup' },
-        { targetId: 'nested', type: 'page', url: 'https://nested.test', title: 'Nested' },
-        { targetId: 'ordinary', type: 'page', url: 'https://private.test', title: 'Private' },
-        { targetId: 'unrelated-popup', type: 'page', url: 'https://unrelated.test', title: 'Unrelated' },
-        { targetId: 'settings', type: 'page', url: 'chrome://settings/', title: 'Settings' },
-        { targetId: 'worker', type: 'service_worker', url: 'https://app.test/sw.js', title: '' },
-      ],
-    };
-  });
-  const discovery = {
-    async discoveredTargets() {
-      return [
-        { targetId: 'popup', url: 'https://popup.test', openerTargetId: 'pilot' },
-        { targetId: 'nested', url: 'https://nested.test', openerTargetId: 'popup' },
-        { targetId: 'unrelated-popup', url: 'https://unrelated.test', openerTargetId: 'ordinary' },
-      ];
-    },
-  };
-
-  const result = await new TargetService(transport, discovery).list(['pilot'], 'pilot');
-
-  assert.deepEqual(result.managedTargetIds, ['pilot', 'popup', 'nested']);
-  assert.deepEqual(result.adoptedTargetIds, ['popup', 'nested']);
-  assert.deepEqual(
-    result.tabs.map(tab => [tab.targetId, tab.origin]),
-    [
-      ['pilot', 'managed'],
-      ['popup', 'managed'],
-      ['nested', 'managed'],
-      ['ordinary', 'user_tab'],
-      ['unrelated-popup', 'user_tab'],
-    ],
-  );
-  assert.equal(result.tabs[0].active, true);
-});
-
-test('TargetService refuses to close a target outside the visible inventory before CDP dispatch', async () => {
-  const transport = new FakeTransport();
-  const service = new TargetService(transport, { async discoveredTargets() { return []; } });
-
-  await assert.rejects(
-    () => service.close(['pilot'], 'ordinary'),
-    error => error.code === 'target_not_owned' && error.context?.targetId === 'ordinary',
-  );
-  assert.equal(transport.calls.length, 0);
-});
-
-test('TargetService explicitly closes a visible user tab', async () => {
-  const transport = new FakeTransport();
-  const service = new TargetService(transport, { async discoveredTargets() { return []; } });
-
-  await service.close(['pilot', 'user-form'], 'user-form');
-
-  assert.deepEqual(transport.calls, [{
-    method: 'Target.closeTarget',
-    params: { targetId: 'user-form' },
-    sessionId: undefined,
-  }]);
-});
-
-test('TargetService bulk close operates only on the managed IDs supplied by the caller', async () => {
-  const transport = new FakeTransport();
-  const service = new TargetService(transport, { async discoveredTargets() { return []; } });
-
-  assert.deepEqual(await service.closeManaged(['pilot', 'popup']), {
-    closed: ['pilot', 'popup'],
-    failed: [],
-  });
-  assert.deepEqual(
-    transport.calls.map(call => call.params.targetId),
-    ['pilot', 'popup'],
-  );
-});
-
 test('FrameService lists nested frames and creates a selected context', async () => {
   const transport = new FakeTransport(method => {
     if (method === 'Page.getFrameTree') {
@@ -1298,49 +1215,4 @@ test('CookieService scopes cookie reads to the current URL or explicit domain', 
   transport.calls.length = 0;
   await service.list('example.com');
   assert.deepEqual(transport.calls[0].params.urls, ['https://example.com', 'http://example.com']);
-});
-
-test('AuthService forwards credentials without retaining them', async () => {
-  const calls = [];
-  const controller = {
-    async setAuth(username, password) { calls.push(['set', username, password]); },
-    async clearAuth() { calls.push(['clear']); },
-  };
-  const service = new AuthService(controller);
-
-  await service.set('admin', 'secret');
-  await service.clear();
-  assert.deepEqual(calls, [['set', 'admin', 'secret'], ['clear']]);
-  assert.deepEqual(Object.keys(service), ['controller']);
-});
-
-test('NetworkService validates rules before forwarding to the daemon', async () => {
-  const calls = [];
-  const controller = {
-    async enableNetwork(sessionId) { calls.push(['enable', sessionId]); },
-    async netRequests(options) { calls.push(['requests', options]); return { requests: [], total: 0 }; },
-    async netRequestDetail(id) { return { id, method: 'GET', url: 'https://app.test' }; },
-    async netBody(id) { return { id, body: 'ok', mimeType: 'text/plain' }; },
-    async netClear() { calls.push(['clear']); },
-    async netAddRule(rule) { calls.push(['rule', rule]); return { rule: { id: 1, ...rule } }; },
-    async netRules() { return { rules: [] }; },
-    async netRemoveRule(id) { calls.push(['remove', id]); },
-  };
-  const service = new NetworkService(controller, 'session-16');
-
-  await service.enable();
-  await service.addHeaders('*api*', [{ name: 'X-Test', value: 'yes' }]);
-  assert.deepEqual(calls, [
-    ['enable', 'session-16'],
-    ['rule', { type: 'headers', pattern: '*api*', headers: [{ name: 'X-Test', value: 'yes' }] }],
-  ]);
-  await assert.rejects(
-    () => service.addHeaders('*api*', [{ name: 'Bad\nHeader', value: 'x' }]),
-    error => error.code === 'invalid_argument',
-  );
-  await assert.rejects(
-    () => service.addMock('*api*', 42, '{}'),
-    error => error.code === 'invalid_argument',
-  );
-  assert.equal(calls.length, 2);
 });

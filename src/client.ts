@@ -2,7 +2,6 @@ import http from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { readBrokerLocatorSync, processIsAlive } from './broker-locator.js';
 import { BROWSER_PILOT_PATHS } from './paths.js';
-import type { Transport } from './transport.js';
 import { BrowserPilotError, browserPilotErrorFromJsonRpc } from './protocol/errors.js';
 import type { JsonRpcErrorObject, JsonValue } from './protocol/model.js';
 import {
@@ -44,7 +43,7 @@ export function isDaemonRunning(): boolean {
   }
 }
 
-export class DaemonClient implements Transport {
+export class DaemonClient {
   private readonly endpoint: string;
 
   constructor() {
@@ -102,10 +101,6 @@ export class DaemonClient implements Transport {
       if (body !== undefined) req.write(JSON.stringify(body));
       req.end();
     });
-  }
-
-  async send(method: string, params?: Record<string, any>, sessionId?: string): Promise<any> {
-    return this.request('/cdp', { method, params, sessionId });
   }
 
   async health(): Promise<boolean> {
@@ -175,85 +170,5 @@ export class DaemonClient implements Transport {
       method,
       ...(params !== undefined ? { params } : {}),
     }, undefined, brokerRequestTimeoutMs(method, params));
-  }
-
-  async discoveredTargets(): Promise<Array<{ targetId: string; url: string; openerTargetId?: string }>> {
-    const res = await this.request('/discovered');
-    return res.targets ?? [];
-  }
-
-  async dialogs(): Promise<Array<{
-    dialogId: string;
-    type: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
-    message: string;
-    defaultPrompt: string;
-    url: string;
-    openedAt: number;
-  }>> {
-    const result = await this.request('/dialogs');
-    return result.dialogs ?? [];
-  }
-
-  async respondToDialog(
-    dialogId: string,
-    action: 'accept' | 'dismiss',
-    prompt?: string,
-  ): Promise<any> {
-    const result = await this.request('/dialogs/respond', {
-      dialogId,
-      action,
-      ...(prompt !== undefined ? { prompt } : {}),
-    });
-    return result.dialog;
-  }
-
-  async setAuth(username: string, password: string): Promise<void> {
-    await this.request('/auth', { username, password });
-  }
-
-  async clearAuth(): Promise<void> {
-    await this.request('/auth', { username: '', password: '' });
-  }
-
-  // ── Network methods ──────────────────────────────
-
-  async enableNetwork(sessionId: string): Promise<void> {
-    await this.request('/net/enable', { sessionId });
-  }
-
-  async netRequests(opts?: { limit?: number; url?: string; method?: string; status?: string; type?: string; after?: number }): Promise<{ requests: any[]; total: number }> {
-    const p = new URLSearchParams();
-    if (opts?.limit) p.set('limit', String(opts.limit));
-    if (opts?.url) p.set('url', opts.url);
-    if (opts?.method) p.set('method', opts.method);
-    if (opts?.status) p.set('status', opts.status);
-    if (opts?.type) p.set('type', opts.type);
-    if (opts?.after) p.set('after', String(opts.after));
-    const qs = p.toString();
-    return this.request(`/net/requests${qs ? '?' + qs : ''}`);
-  }
-
-  async netRequestDetail(id: number): Promise<any> {
-    return this.request(`/net/request/${id}`);
-  }
-
-  async netBody(id: number): Promise<{ id: number; body: string; mimeType: string }> {
-    return this.request(`/net/body/${id}`);
-  }
-
-  async netClear(): Promise<void> { await this.request('/net/clear', {}); }
-
-  async netAddRule(rule: { type: string; pattern: string; status?: number; body?: string; headers?: Array<{ name: string; value: string }> }): Promise<any> {
-    return this.request('/net/rules', rule);
-  }
-
-  async netRules(): Promise<{ rules: any[] }> { return this.request('/net/rules'); }
-
-  async netRemoveRule(id?: number): Promise<void> {
-    await this.request('/net/rules/remove', id !== undefined ? { id } : { all: true });
-  }
-
-  close(): void {
-    // No-op — daemon manages the connection
   }
 }

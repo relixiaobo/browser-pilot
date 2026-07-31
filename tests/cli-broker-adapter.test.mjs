@@ -1045,5 +1045,4 @@ test('CLI uses only canonical Broker and file operations', async t => {
     call.body.params.clientKey === 'browser-pilot-cli' &&
     call.body.params.ttlMs === 300_000
   )));
-  assert.equal(calls.some(call => call.path === '/cdp'), false);
 });
