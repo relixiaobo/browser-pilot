@@ -156,6 +156,13 @@ unless the request requires closing them.
 Use `bp frame`, `bp frame <index>`, and `bp frame 0` to list, select, and leave
 frames. Refresh the snapshot after changing frames.
 
+Known limitations: snapshots can omit controls inside same-process iframes,
+and selector-based commands can resolve against the top frame after selecting
+a subframe. Prefer fresh semantic refs when they are present. Otherwise use
+`bp eval` in the selected frame or a visual coordinate action, verify the
+result, and do not assume an empty snapshot proves that the iframe has no
+controls.
+
 JavaScript dialogs remain pending until explicitly handled:
 
 ```bash

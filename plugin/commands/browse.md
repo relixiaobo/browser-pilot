@@ -1,15 +1,16 @@
 ---
 name: browse
 description: Browse a website using browser-pilot CLI
-user-invocable: true
+argument-hint: "[URL or task]"
 ---
 
 Use the `bp` CLI tool to browse $ARGUMENTS.
 
 Steps:
-1. Read `skills/browser-pilot/compatibility.json`, run `bp --version`, and use
-   the CLI when it satisfies `browserPilotCli.supportedVersionRange`. Otherwise
-   stop and resolve a compatible executable.
+1. Read `${CLAUDE_PLUGIN_ROOT}/skills/browser-pilot/compatibility.json`, run
+   `bp --version`, and use the CLI when it satisfies
+   `browserPilotCli.supportedVersionRange`. Otherwise stop and resolve a
+   compatible executable.
 2. Check `bp tabs` first when the request may refer to a page the user already
    opened. Select it with `bp tab <index>`.
 3. If a new URL is needed, run `bp open "$ARGUMENTS" --new` unless replacing the

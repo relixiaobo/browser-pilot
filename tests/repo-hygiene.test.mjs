@@ -77,3 +77,20 @@ test('release artifact pruning is a no-op before the release directory exists', 
   assert.deepEqual(result.removed, []);
   assert.deepEqual(result.retainedVersions, []);
 });
+
+test('plugin command metadata and architecture limitations stay explicit', async () => {
+  const [browseCommand, platformSpec, commandReference] = await Promise.all([
+    readFile(join(root, 'plugin', 'commands', 'browse.md'), 'utf8'),
+    readFile(join(root, 'docs', 'architecture', 'browser-pilot-platform-spec.md'), 'utf8'),
+    readFile(join(root, 'plugin', 'skills', 'browser-pilot', 'references', 'commands.md'), 'utf8'),
+  ]);
+  assert.match(browseCommand, /^argument-hint: "\[URL or task\]"$/mu);
+  assert.doesNotMatch(browseCommand, /^user-invocable:/mu);
+  assert.match(
+    browseCommand,
+    /\$\{CLAUDE_PLUGIN_ROOT\}\/skills\/browser-pilot\/compatibility\.json/u,
+  );
+  assert.match(platformSpec, /not a defense against\s+same-user malware/u);
+  assert.match(commandReference, /same-process iframe/u);
+  assert.match(commandReference, /selected subframe/u);
+});

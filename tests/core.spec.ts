@@ -1,4 +1,4 @@
-// Core functionality tests — migrated from tests/run.sh
+// Core Browser Pilot CLI functionality tests.
 // Covers lifecycle, navigation, click, type, press, eval, screenshot, pdf,
 // cookies, frames, upload, auth, tabs, dialogs, and output format.
 import { test, expect } from '@playwright/test';

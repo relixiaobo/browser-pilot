@@ -1,7 +1,7 @@
 # Universal Agent CLI Integration Plan
 
-Status: implementation and local release verification complete for the
-CLI-only architecture; formal publication remains.
+Status: implemented and published through v0.5.1. This plan is retained as the
+historical design record for the CLI-only architecture.
 
 ## Goal
 
@@ -102,7 +102,7 @@ Pilot tools, a persistent adapter, or Agent-specific runtime code.
 - [x] Verify global, local, and product-bundled npm use.
 - [x] Verify native archives do not need system Node.
 - [x] Bump the next release version and produce local release artifacts.
-- [ ] Publish the npm package, plugin archive, native archives, checksums, and
+- [x] Publish the npm package, plugin archive, native archives, checksums, and
   release index.
 
 ## Acceptance Criteria
