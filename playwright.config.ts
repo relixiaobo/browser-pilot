@@ -1,4 +1,26 @@
 import { defineConfig } from '@playwright/test';
+import { createServer } from 'node:net';
+
+async function allocatePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Failed to allocate test server port');
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  return address.port;
+}
+
+const testServerPort = process.env.BROWSER_PILOT_TEST_SERVER_PORT
+  ? Number(process.env.BROWSER_PILOT_TEST_SERVER_PORT)
+  : await allocatePort();
+if (!Number.isInteger(testServerPort) || testServerPort <= 0) {
+  throw new Error('BROWSER_PILOT_TEST_SERVER_PORT must be a positive integer');
+}
+process.env.BROWSER_PILOT_TEST_SERVER_PORT = String(testServerPort);
+const testServerUrl = `http://127.0.0.1:${testServerPort}`;
 
 export default defineConfig({
   testDir: './tests',
@@ -8,11 +30,11 @@ export default defineConfig({
   workers: 1, // bp uses a single browser session — must be serial
   globalSetup: './tests/global-setup.ts',
   use: {
-    baseURL: 'http://127.0.0.1:18274',
+    baseURL: testServerUrl,
   },
   webServer: {
-    command: 'node tests/server.mjs 18274',
-    port: 18274,
+    command: 'node tests/server.mjs',
+    url: `${testServerUrl}/health`,
     reuseExistingServer: false,
   },
   projects: [

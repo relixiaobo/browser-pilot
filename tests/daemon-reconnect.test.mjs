@@ -4,41 +4,19 @@ import http from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { WebSocketServer } from 'ws';
 import { supportedBrowserProfiles } from '../dist/services.js';
+import { waitFor } from './helpers/async.mjs';
+import { startCdpFixture } from './helpers/cdp.mjs';
+import {
+  daemonRequest,
+  setDaemonToken,
+  stopDaemon,
+} from './helpers/daemon.mjs';
 import {
   isolatedBrokerEnvironment,
   testBrokerPaths,
   testTempPrefix,
 } from './helpers/platform.mjs';
-
-const endpointTokens = new Map();
-
-async function startCdpFixture(options = {}) {
-  const server = new WebSocketServer({
-    host: '127.0.0.1',
-    port: 0,
-    autoPong: options.autoPong ?? true,
-  });
-  await new Promise((resolve, reject) => {
-    server.once('listening', resolve);
-    server.once('error', reject);
-  });
-  server.on('connection', socket => {
-    socket.on('message', bytes => {
-      const message = JSON.parse(bytes.toString());
-      if (message.id !== undefined) socket.send(JSON.stringify({ id: message.id, result: {} }));
-    });
-  });
-  return {
-    server,
-    port: server.address().port,
-    async close() {
-      for (const socket of server.clients) socket.terminate();
-      await new Promise(resolve => server.close(resolve));
-    },
-  };
-}
 
 async function startHangingHandshakeFixture() {
   const sockets = new Set();
@@ -205,31 +183,6 @@ test('daemon distinguishes stale endpoints from authorization handshake timeouts
   assert.equal(stderr.join(''), '');
 });
 
-function daemonRequest(socketPath, path, body) {
-  return new Promise((resolve, reject) => {
-    const token = endpointTokens.get(socketPath);
-    const request = http.request({
-      socketPath,
-      path,
-      method: body === undefined ? 'GET' : 'POST',
-      headers: {
-        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-        ...(path !== '/health' && token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-    }, response => {
-      const chunks = [];
-      response.on('data', chunk => chunks.push(chunk));
-      response.on('end', () => {
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-        catch (error) { reject(error); }
-      });
-    });
-    request.on('error', reject);
-    if (body !== undefined) request.end(JSON.stringify(body));
-    else request.end();
-  });
-}
-
 async function registerEndpointToken(root) {
   const paths = testBrokerPaths(root);
   const locator = await waitFor(
@@ -239,7 +192,7 @@ async function registerEndpointToken(root) {
     },
     value => typeof value?.token === 'string',
   );
-  endpointTokens.set(paths.endpoint, locator.token);
+  setDaemonToken(paths.endpoint, locator.token);
 }
 
 async function initializeClient(socketPath, clientSessionId, capabilities = [
@@ -296,30 +249,6 @@ function connectBrowser(socketPath, client, commandId) {
       commandId,
     },
   });
-}
-
-async function stopDaemon(socketPath) {
-  const health = await daemonRequest(socketPath, '/health');
-  return daemonRequest(socketPath, '/shutdown', {
-    brokerProcessIdentity: health.brokerProcessIdentity,
-    executableVersion: health.executableVersion,
-    executableIdentity: health.executableIdentity,
-  });
-}
-
-async function waitFor(operation, predicate, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await operation();
-      if (predicate(value)) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-  throw lastError ?? new Error('Timed out waiting for daemon state');
 }
 
 test('daemon rediscovers the selected profile and publishes one restored generation', async t => {

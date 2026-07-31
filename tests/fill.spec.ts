@@ -2,8 +2,7 @@
 // Tests bp type against textarea, input, contenteditable, shadow DOM inputs, etc.
 import { test, expect } from '@playwright/test';
 import { open, type as bpType, evaluate, snapshot, findRef, findRefByRole } from './bp.js';
-
-const BASE = 'http://127.0.0.1:18274';
+import { TEST_BASE_URL as BASE } from './helpers/playwright.js';
 
 // ── Basic fill ──────────────────────────────────────
 

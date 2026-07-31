@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import http from 'node:http';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { startFakeDaemonServer } from './helpers/fake-daemon.mjs';
 import {
   isolatedBrokerEnvironment,
   testBrokerPaths,
@@ -650,8 +650,10 @@ async function startFakeDaemon(root, options = {}) {
     }
   };
 
-  const server = http.createServer((request, response) => {
-    void (async () => {
+  const fakeServer = await startFakeDaemonServer({
+    socketPath,
+    cleanupDirectory: paths.runtimeDir !== paths.stateDir ? paths.runtimeDir : undefined,
+    onRequest: async (request, response) => {
       if (request.method === 'GET' && request.url === '/health') {
         calls.push({ path: request.url });
         const health = {
@@ -759,24 +761,10 @@ async function startFakeDaemon(root, options = {}) {
       }
       response.statusCode = 404;
       response.end(JSON.stringify({ error: 'unexpected route' }));
-    })().catch(error => {
-      response.statusCode = 500;
-      response.end(JSON.stringify({ error: error.message }));
-    });
+    },
   });
-  try {
-    await new Promise((resolveListen, rejectListen) => {
-      server.once('error', rejectListen);
-      server.listen(socketPath, resolveListen);
-    });
-  } catch (error) {
-    if (paths.runtimeDir !== paths.stateDir) {
-      await rm(paths.runtimeDir, { recursive: true, force: true });
-    }
-    throw error;
-  }
   return {
-    server,
+    server: fakeServer.server,
     calls,
     get droppedToolDispatches() {
       return droppedToolDispatches;
@@ -788,12 +776,7 @@ async function startFakeDaemon(root, options = {}) {
       return daemonToken;
     },
     initialToken: initialDaemonToken,
-    async close() {
-      await new Promise(resolveClose => server.close(resolveClose));
-      if (paths.runtimeDir !== paths.stateDir) {
-        await rm(paths.runtimeDir, { recursive: true, force: true });
-      }
-    },
+    close: fakeServer.close,
     resetTabs(options = {}) {
       managedClosed = false;
       preserveSelectedManagedAfterClose = options.preserveSelectedManagedAfterClose === true;

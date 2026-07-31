@@ -3,22 +3,18 @@ import { spawn } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { WebSocketServer } from 'ws';
 import {
   CDPError,
   CDP_HANDSHAKE_TIMEOUT_CODE,
   ManagedTargetJanitorClient,
 } from '../dist/services.js';
+import { startCdpFixture as startCdpServerFixture } from './helpers/cdp.mjs';
 import { forceKillChild } from './helpers/platform.mjs';
 
 const WORKER = fileURLToPath(new URL('../dist/managed-target-janitor.js', import.meta.url));
 
 async function startCdpFixture() {
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
-  await new Promise((resolve, reject) => {
-    server.once('listening', resolve);
-    server.once('error', reject);
-  });
+  let server;
   const targets = new Map([
     ['user-tab', { targetId: 'user-tab', type: 'page', title: 'User', url: 'https://user.test/' }],
   ]);
@@ -32,9 +28,8 @@ async function startCdpFixture() {
       if (socket.readyState === socket.OPEN) socket.send(payload);
     }
   };
-  server.on('connection', socket => {
-    socket.on('message', bytes => {
-      const message = JSON.parse(bytes.toString());
+  const fixture = await startCdpServerFixture({
+    onMessage: ({ message, socket }) => {
       receivedMethods.push(message.method);
       const respond = result => socket.send(JSON.stringify({ id: message.id, result }));
       if (message.method === 'Target.setDiscoverTargets') {
@@ -84,10 +79,11 @@ async function startCdpFixture() {
         return;
       }
       respond({});
-    });
+    },
   });
+  server = fixture.server;
   return {
-    wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/test`,
+    ...fixture,
     targets,
     closed,
     receivedMethods,
@@ -119,10 +115,6 @@ async function startCdpFixture() {
         title: 'Racing popup',
         url: 'https://popup.test/race',
       };
-    },
-    async close() {
-      for (const socket of server.clients) socket.terminate();
-      await new Promise(resolve => server.close(resolve));
     },
   };
 }

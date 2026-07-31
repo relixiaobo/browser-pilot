@@ -13,6 +13,7 @@ import {
   bp,
   type BpResult,
 } from './bp.js';
+import { waitForEvaluation } from './helpers/playwright.js';
 
 const SITE = 'https://the-internet.herokuapp.com';
 let availabilityError: string | undefined;
@@ -112,8 +113,7 @@ test.describe('dynamic controls', () => {
     const removeRef = findRef(snap, 'Remove');
     expect(removeRef).toBeDefined();
     click(removeRef!);
-    // Wait for animation to complete (server-side removal can be slow)
-    evaluate('new Promise(r => setTimeout(r, 4000))');
+    await waitForEvaluation('document.querySelector("#checkbox-example input") === null', undefined, 6_000);
     const snap2 = snapshot();
     const hasCheckbox = snap2.elements?.some(e => e.role === 'checkbox');
     // Checkbox should be gone after Remove
@@ -125,16 +125,12 @@ test.describe('dynamic controls', () => {
     const enableRef = findRef(snap, 'Enable');
     expect(enableRef).toBeDefined();
     click(enableRef!);
-    let enabled = false;
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const state = evaluate('document.querySelector("#input-example input")?.disabled === false');
-      if (state.value === true) {
-        enabled = true;
-        break;
-      }
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    expect(enabled).toBe(true);
+    const enabled = await waitForEvaluation(
+      'document.querySelector("#input-example input")?.disabled === false',
+      undefined,
+      6_000,
+    );
+    expect(enabled.value).toBe(true);
     // Now the input should be enabled and typeable
     const snap2 = snapshot();
     const inputRef = snap2.elements?.find(e => e.role === 'textbox');
@@ -204,8 +200,11 @@ test.describe('dynamic loading', () => {
     const startRef = findRef(snap, 'Start');
     expect(startRef).toBeDefined();
     click(startRef!);
-    // Wait for loading to finish
-    evaluate('new Promise(r => setTimeout(r, 6000))');
+    await waitForEvaluation(
+      'document.getElementById("finish")?.textContent?.includes("Hello World")',
+      undefined,
+      8_000,
+    );
     const result = evaluate('document.getElementById("finish")?.textContent');
     expect(result.value).toContain('Hello World');
   });

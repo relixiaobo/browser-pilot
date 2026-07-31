@@ -8,8 +8,8 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { TEST_BASE_URL as BASE } from './helpers/playwright.js';
 
-const BASE = 'http://127.0.0.1:18274';
 const testOutputPath = (name: string): string => join(
   process.env.BROWSER_PILOT_TEST_ROOT ?? tmpdir(),
   name,

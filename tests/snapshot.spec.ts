@@ -2,8 +2,7 @@
 // Tests bp snapshot's ability to discover interactive elements in various DOM structures.
 import { test, expect } from '@playwright/test';
 import { open } from './bp.js';
-
-const BASE = 'http://127.0.0.1:18274';
+import { TEST_BASE_URL as BASE } from './helpers/playwright.js';
 
 // ── Standard elements ───────────────────────────────
 

@@ -3,7 +3,10 @@
 import http from 'node:http';
 import { renderBrowserCapabilityFixture } from './fixtures/browser-capability-matrix.mjs';
 
-const PORT = parseInt(process.argv[2] || '18274', 10);
+const PORT = Number(process.env.BROWSER_PILOT_TEST_SERVER_PORT ?? process.argv[2]);
+if (!Number.isInteger(PORT) || PORT <= 0) {
+  throw new Error('Set BROWSER_PILOT_TEST_SERVER_PORT to a positive integer');
+}
 
 const PAGES = {
   // ── Playwright fixtures (adapted) ──────────────────
@@ -336,6 +339,12 @@ const PAGES = {
 
 const server = http.createServer((req, res) => {
   const path = req.url?.split('?')[0] || '/';
+
+  if (path === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{"ok":true}');
+    return;
+  }
 
   // ── API endpoints for network interception tests ──
   if (path === '/api/data') {

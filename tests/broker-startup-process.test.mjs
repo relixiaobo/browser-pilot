@@ -6,6 +6,12 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
 import { supportedBrowserProfiles } from '../dist/services.js';
+import { waitFor, waitForFile } from './helpers/async.mjs';
+import {
+  daemonRequest,
+  setDaemonToken,
+  stopDaemon,
+} from './helpers/daemon.mjs';
 import {
   forceKillChild,
   forceKillProcess,
@@ -16,8 +22,6 @@ import {
 
 const CLI = join(process.cwd(), 'dist', 'cli.js');
 const DAEMON = join(process.cwd(), 'dist', 'daemon.js');
-const endpointTokens = new Map();
-
 function runCli(root, args, env = {}, cliPath = CLI) {
   const child = spawn(process.execPath, [cliPath, ...args], {
     env: isolatedBrokerEnvironment(root, { PATH: '', ...env }),
@@ -31,62 +35,6 @@ function runCli(root, args, env = {}, cliPath = CLI) {
     child.once('error', reject);
     child.once('exit', (code, signal) => resolve({ code, signal, stdout, stderr }));
   });
-}
-
-function daemonRequest(socketPath, path, body, token = endpointTokens.get(socketPath)) {
-  return new Promise((resolve, reject) => {
-    const request = http.request({
-      socketPath,
-      path,
-      method: body === undefined ? 'GET' : 'POST',
-      headers: {
-        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-        ...(path !== '/health' && token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-    }, response => {
-      const chunks = [];
-      response.on('data', chunk => chunks.push(chunk));
-      response.on('end', () => {
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-        catch (error) { reject(error); }
-      });
-    });
-    request.once('error', reject);
-    request.end(body === undefined ? undefined : JSON.stringify(body));
-  });
-}
-
-async function stopDaemon(socketPath) {
-  const health = await daemonRequest(socketPath, '/health');
-  if (!health.ok) return;
-  return daemonRequest(socketPath, '/shutdown', {
-    brokerProcessIdentity: health.brokerProcessIdentity,
-    executableVersion: health.executableVersion,
-    executableIdentity: health.executableIdentity,
-  });
-}
-
-async function waitForFile(path, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      await access(path);
-      return;
-    } catch {
-      await new Promise(resolve => setTimeout(resolve, 20));
-    }
-  }
-  throw new Error(`Timed out waiting for ${path}`);
-}
-
-async function waitForValue(read, predicate, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await read();
-    if (predicate(value)) return value;
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-  throw new Error('Timed out waiting for expected value');
 }
 
 async function startPassiveBroker(root, options = {}) {
@@ -106,7 +54,7 @@ async function startPassiveBroker(root, options = {}) {
   const locatorFile = join(stateDir, 'broker-locator.json');
   await waitForFile(locatorFile);
   const locator = JSON.parse(await readFile(locatorFile, 'utf8'));
-  endpointTokens.set(testBrokerPaths(root, options.env).endpoint, locator.token);
+  setDaemonToken(testBrokerPaths(root, options.env).endpoint, locator.token);
   return { child, profile, stderr: () => stderr };
 }
 
@@ -246,7 +194,7 @@ test('simultaneous CLI processes start and reuse exactly one per-user Broker', a
   ]);
   const health = await daemonRequest(socketPath, '/health');
   const locator = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
-  endpointTokens.set(socketPath, locator.token);
+  setDaemonToken(socketPath, locator.token);
   assert.equal(health.brokerProcessIdentity, locator.brokerProcessIdentity);
   assert.equal(health.brokerProtocol, 3);
   assert.deepEqual(Object.keys(health).sort(), [
@@ -272,13 +220,13 @@ test('simultaneous CLI processes start and reuse exactly one per-user Broker', a
   });
 
   forceKillProcess(locator.pid);
-  await waitForValue(() => {
+  await waitFor(() => {
     try { process.kill(locator.pid, 0); return false; } catch { return true; }
   }, Boolean);
 
   await runCli(root, ['connect']);
   const recovered = JSON.parse(await readFile(join(stateDir, 'broker-locator.json'), 'utf8'));
-  endpointTokens.set(socketPath, recovered.token);
+  setDaemonToken(socketPath, recovered.token);
   assert.notEqual(recovered.brokerProcessIdentity, locator.brokerProcessIdentity);
   assert.notEqual(recovered.token, locator.token);
 });
@@ -322,7 +270,7 @@ test('passive Broker startup and concurrent explicit connects create exactly one
     },
   });
   const firstConnect = connect(first, 'command:authorization-first');
-  await waitForValue(() => cdp.pendingUpgradeCount, value => value === 1);
+  await waitFor(() => cdp.pendingUpgradeCount, value => value === 1);
   const secondConnect = connect(second, 'command:authorization-second');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(cdp.upgradeCount, 1);
@@ -334,7 +282,7 @@ test('passive Broker startup and concurrent explicit connects create exactly one
   assert.equal(cdp.upgradeCount, 1);
 
   cdp.disconnectClients();
-  await waitForValue(
+  await waitFor(
     () => daemonRequest(socketPath, '/health'),
     health => health.browser?.state === 'disconnected',
   );
@@ -373,7 +321,7 @@ test('CLI reuses a Broker while an explicit browser connection is pending', asyn
       commandId: 'command:pending-browser-connect',
     },
   });
-  await waitForValue(() => cdp.pendingUpgradeCount, value => value === 1);
+  await waitFor(() => cdp.pendingUpgradeCount, value => value === 1);
   const command = runCli(root, ['connect']);
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(cdp.upgradeCount, 1);
@@ -418,9 +366,9 @@ test('terminating an authorization-pending Broker removes its worker and startin
       commandId: 'command:stopping-connect',
     },
   }).catch(() => {});
-  await waitForValue(() => cdp.pendingUpgradeCount, value => value === 1);
+  await waitFor(() => cdp.pendingUpgradeCount, value => value === 1);
   await terminateChild(broker.child);
-  await waitForValue(() => cdp.pendingUpgradeCount, value => value === 0);
+  await waitFor(() => cdp.pendingUpgradeCount, value => value === 0);
   await assert.rejects(access(pidFile));
   assert.equal(broker.stderr(), '');
 });
@@ -487,7 +435,7 @@ test('a second daemon refuses the live owner without disturbing it', async t => 
   });
 
   const before = await daemonRequest(paths.endpoint, '/health');
-  const secondExit = await waitForValue(
+  const secondExit = await waitFor(
     () => Promise.resolve({ code: second.child.exitCode, signal: second.child.signalCode }),
     result => result.code !== null || result.signal !== null,
   );
@@ -520,7 +468,7 @@ test('a daemon reclaims owner state after the previous process is killed', {
   await new Promise(resolve => first.child.once('exit', resolve));
 
   second = await startPassiveBroker(root, { profile: join(root, 'replacement-profile') });
-  const after = await waitForValue(
+  const after = await waitFor(
     async () => {
       try { return await daemonRequest(paths.endpoint, '/health'); } catch { return undefined; }
     },
@@ -575,7 +523,7 @@ test('compatible CLI installations reuse one Broker while shutdown ownership sta
 
   const stopped = await runCli(root, ['disconnect']);
   assert.equal(stopped.code, 0, stopped.stderr);
-  await waitForValue(async () => {
+  await waitFor(async () => {
     try { await daemonRequest(socketPath, '/health'); return false; } catch { return true; }
   }, Boolean);
 });

@@ -2,8 +2,11 @@
 // Tests block, mock, headers, rules management, request monitoring, and request details.
 import { test, expect } from '@playwright/test';
 import { open, click, evaluate, findRef, bp } from './bp.js';
-
-const BASE = 'http://127.0.0.1:18274';
+import {
+  TEST_BASE_URL as BASE,
+  waitForEvaluation,
+  waitForValue,
+} from './helpers/playwright.js';
 
 // ── Setup / Teardown ────────────────────────────────
 
@@ -22,6 +25,18 @@ function openNetPage() {
   const snap = open(`${BASE}/net/test`);
   expect(snap.ok).toBe(true);
   return snap;
+}
+
+async function waitForRequest(urlFragment: string, method?: string) {
+  const net = await waitForValue(
+    () => bp('net'),
+    result => result.requests?.some((request: any) => (
+      request.url.includes(urlFragment) && (!method || request.method === method)
+    )),
+  );
+  return net.requests?.find((request: any) => (
+    request.url.includes(urlFragment) && (!method || request.method === method)
+  ));
 }
 
 // ── Request Monitoring ──────────────────────────────
@@ -43,10 +58,7 @@ test.describe('request monitoring', () => {
     const fetchRef = findRef(snap, 'Fetch Data');
     expect(fetchRef).toBeDefined();
     click(fetchRef!);
-    evaluate('new Promise(r => setTimeout(r, 1000))');
-    const net = bp('net');
-    expect(net.ok).toBe(true);
-    const apiReq = net.requests?.find((r: any) => r.url.includes('/api/data'));
+    const apiReq = await waitForRequest('/api/data');
     expect(apiReq).toBeDefined();
     expect(apiReq?.method).toBe('GET');
   });
@@ -57,9 +69,7 @@ test.describe('request monitoring', () => {
     const postRef = findRef(snap, 'POST Data');
     expect(postRef).toBeDefined();
     click(postRef!);
-    evaluate('new Promise(r => setTimeout(r, 1000))');
-    const net = bp('net');
-    const postReq = net.requests?.find((r: any) => r.url.includes('/api/post'));
+    const postReq = await waitForRequest('/api/post', 'POST');
     expect(postReq).toBeDefined();
     expect(postReq?.method).toBe('POST');
   });
@@ -68,8 +78,10 @@ test.describe('request monitoring', () => {
     const snap = openNetPage();
     const fetchRef = findRef(snap, 'Fetch Data');
     click(fetchRef!);
-    evaluate('new Promise(r => setTimeout(r, 1000))');
-    const filtered = bp('net --url "*api/data*"');
+    const filtered = await waitForValue(
+      () => bp('net --url "*api/data*"'),
+      result => result.requests?.some((request: any) => request.url.includes('/api/data')),
+    );
     expect(filtered.ok).toBe(true);
     for (const r of filtered.requests || []) {
       expect(r.url).toContain('api/data');
@@ -80,8 +92,10 @@ test.describe('request monitoring', () => {
     const snap = openNetPage();
     click(findRef(snap, 'Fetch Data')!);
     click(findRef(snap, 'POST Data')!);
-    evaluate('new Promise(r => setTimeout(r, 1000))');
-    const postOnly = bp('net --method POST');
+    const postOnly = await waitForValue(
+      () => bp('net --method POST'),
+      result => result.requests?.some((request: any) => request.url.includes('/api/post')),
+    );
     expect(postOnly.ok).toBe(true);
     for (const r of postOnly.requests || []) {
       expect(r.method).toBe('POST');
@@ -106,7 +120,7 @@ test.describe('block', () => {
     const trackRef = findRef(snap, 'Load Tracker');
     expect(trackRef).toBeDefined();
     click(trackRef!);
-    evaluate('new Promise(r => setTimeout(r, 1500))');
+    await waitForEvaluation('document.getElementById("result")?.textContent === "not tracked"');
     const tracked = evaluate('window.__tracked');
     expect(tracked.value).not.toBe(true);
   });
@@ -114,11 +128,10 @@ test.describe('block', () => {
   test('should block API requests causing fetch failure', async () => {
     bp('net block "*api/data*"');
     openNetPage();
-    evaluate('fetch("/api/data").then(()=>{window.__fetchOk=true}).catch(()=>{window.__fetchOk=false})');
-    evaluate('new Promise(r => setTimeout(r, 3000))');
+    evaluate('window.__fetchDone=false;fetch("/api/data").then(()=>{window.__fetchOk=true;window.__fetchDone=true}).catch(()=>{window.__fetchOk=false;window.__fetchDone=true})');
+    await waitForEvaluation('window.__fetchDone === true', undefined, 3_000);
     const result = evaluate('window.__fetchOk');
-    // Blocked request should either reject (false) or never resolve (undefined)
-    expect(result.value).not.toBe(true);
+    expect(result.value).toBe(false);
   });
 });
 
@@ -129,7 +142,7 @@ test.describe('mock', () => {
     bp('net mock "*api/data*" --body \'{"mocked":true}\'');
     openNetPage();
     evaluate('fetch("/api/data").then(r=>r.json()).then(d=>{window.__mockResult=d})');
-    evaluate('new Promise(r => setTimeout(r, 1000))');
+    await waitForEvaluation('window.__mockResult?.mocked === true');
     const result = evaluate('JSON.stringify(window.__mockResult)');
     expect(result.value).toContain('mocked');
   });
@@ -138,7 +151,7 @@ test.describe('mock', () => {
     bp('net mock "*api/data*" --body \'{"err":"nope"}\'');
     openNetPage();
     evaluate('fetch("/api/data").then(r=>r.json()).then(d=>{window.__b=d})');
-    evaluate('new Promise(r => setTimeout(r, 1000))');
+    await waitForEvaluation('window.__b?.err === "nope"');
     const body = evaluate('JSON.stringify(window.__b)');
     expect(body.value).toContain('nope');
   });
@@ -148,7 +161,7 @@ test.describe('mock', () => {
     const snap = openNetPage();
     const fetchRef = findRef(snap, 'Fetch Data');
     click(fetchRef!);
-    evaluate('new Promise(r => setTimeout(r, 1500))');
+    await waitForEvaluation('document.getElementById("result")?.textContent?.includes("mock")');
     const display = evaluate('document.getElementById("result").textContent');
     expect(display.value).toContain('mock');
     expect(display.value).toContain('42');
@@ -162,7 +175,7 @@ test.describe('headers', () => {
     bp('net headers "*api/headers*" "X-Custom:test-value"');
     openNetPage();
     evaluate('fetch("/api/headers").then(r=>r.json()).then(d=>{window.__h=d})');
-    evaluate('new Promise(r => setTimeout(r, 1000))');
+    await waitForEvaluation('window.__h?.headers?.["x-custom"] === "test-value"');
     const result = evaluate('JSON.stringify(window.__h)');
     expect(result.value).toContain('x-custom');
     expect(result.value).toContain('test-value');
@@ -172,7 +185,7 @@ test.describe('headers', () => {
     bp('net headers "*api/headers*" "X-First:one" "X-Second:two"');
     openNetPage();
     evaluate('fetch("/api/headers").then(r=>r.json()).then(d=>{window.__h=d})');
-    evaluate('new Promise(r => setTimeout(r, 1000))');
+    await waitForEvaluation('window.__h?.headers?.["x-first"] === "one" && window.__h?.headers?.["x-second"] === "two"');
     const result = evaluate('JSON.stringify(window.__h)');
     expect(result.value).toContain('x-first');
     expect(result.value).toContain('x-second');
@@ -219,9 +232,7 @@ test.describe('request details', () => {
     bp('net clear');
     const fetchRef = findRef(snap, 'Fetch Data');
     click(fetchRef!);
-    evaluate('new Promise(r => setTimeout(r, 1500))');
-    const net = bp('net');
-    const apiReq = net.requests?.find((r: any) => r.url.includes('/api/data'));
+    const apiReq = await waitForRequest('/api/data');
     expect(apiReq).toBeDefined();
     const detail = bp(`net show ${apiReq!.id}`);
     expect(detail.ok).toBe(true);
@@ -240,14 +251,14 @@ test.describe('combined', () => {
 
     // Verify mock
     evaluate('fetch("/api/data").then(r=>r.json()).then(d=>{window.__combined=d})');
-    evaluate('new Promise(r => setTimeout(r, 1000))');
+    await waitForEvaluation('window.__combined?.combined === true');
     const mockResult = evaluate('JSON.stringify(window.__combined)');
     expect(mockResult.value).toContain('combined');
 
     // Verify block
     const trackRef = findRef(snap, 'Load Tracker');
     click(trackRef!);
-    evaluate('new Promise(r => setTimeout(r, 1500))');
+    await waitForEvaluation('document.getElementById("result")?.textContent === "not tracked"');
     const tracked = evaluate('window.__tracked');
     expect(tracked.value).not.toBe(true);
   });
@@ -256,7 +267,7 @@ test.describe('combined', () => {
     bp('net mock "*api/data*" --body \'{"persistent":true}\'');
     openNetPage();
     evaluate('fetch("/api/data").then(r=>r.json()).then(d=>{window.__persist=d})');
-    evaluate('new Promise(r => setTimeout(r, 1000))');
+    await waitForEvaluation('window.__persist?.persistent === true');
     const result = evaluate('JSON.stringify(window.__persist)');
     expect(result.value).toContain('persistent');
   });
