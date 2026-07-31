@@ -5,6 +5,7 @@ dist/
 tests/agent/data/
 tests/agent/__pycache__/
 test-results/
+playwright-report/
 build/
 release/
 screenshot-*.png
