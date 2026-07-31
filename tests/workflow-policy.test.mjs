@@ -7,7 +7,7 @@ const root = resolve(import.meta.dirname, '..');
 const [ci, release] = await Promise.all([
   readFile(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'),
   readFile(join(root, '.github', 'workflows', 'release.yml'), 'utf8'),
-]);
+]).then(sources => sources.map(source => source.replace(/\r\n?/gu, '\n')));
 
 function workflowJobs(source) {
   const jobsStart = source.indexOf('\njobs:\n');

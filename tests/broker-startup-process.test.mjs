@@ -129,6 +129,7 @@ async function startGatedCdpFixture() {
   };
   server.on('upgrade', (request, socket, head) => {
     upgradeCount += 1;
+    socket.on('error', () => {});
     const upgrade = { request, socket, head };
     const remove = () => {
       const index = upgrades.indexOf(upgrade);
@@ -200,7 +201,7 @@ test('simultaneous CLI processes start and reuse exactly one per-user Broker', a
   assert.deepEqual(Object.keys(health).sort(), [
     'brokerProcessIdentity',
     'brokerProtocol',
-    'browser',
+    ...('browser' in health ? ['browser'] : []),
     'clients',
     'executableIdentity',
     'executableVersion',

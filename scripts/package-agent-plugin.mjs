@@ -31,14 +31,19 @@ assert.equal(
 );
 
 await mkdir(outputDirectory, { recursive: true });
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const { stdout } = await execFileAsync(npm, [
+const npmArguments = [
   'pack',
   join(root, 'plugin'),
   '--json',
   '--pack-destination',
   outputDirectory,
-], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
+];
+const npmCli = process.env.npm_execpath;
+const { stdout } = await execFileAsync(
+  npmCli ? process.execPath : 'npm',
+  npmCli ? [npmCli, ...npmArguments] : npmArguments,
+  { cwd: root, maxBuffer: 10 * 1024 * 1024 },
+);
 const packed = JSON.parse(stdout);
 assert.equal(packed.length, 1, 'npm pack must produce one plugin archive');
 

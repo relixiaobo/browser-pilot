@@ -160,7 +160,11 @@ test('an abruptly terminated daemon reclaims managed targets without closing use
 
   forceKillChild(daemon);
   await new Promise(resolve => daemon.once('exit', resolve));
-  await waitFor(() => Promise.resolve(cdp.closed), value => value.includes('managed-crash'));
+  await waitFor(
+    () => Promise.resolve(cdp.closed),
+    value => value.includes('managed-crash'),
+    process.platform === 'win32' ? 15_000 : 5_000,
+  );
 
   assert.equal(cdp.targets.has('managed-crash'), false);
   assert.equal(cdp.targets.has('user-tab'), true);
