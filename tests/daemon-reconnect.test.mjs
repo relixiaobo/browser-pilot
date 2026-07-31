@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
+import { supportedBrowserProfiles } from '../dist/services.js';
 import {
   isolatedBrokerEnvironment,
   testBrokerPaths,
@@ -32,6 +33,28 @@ async function startCdpFixture(options = {}) {
     port: server.address().port,
     async close() {
       for (const socket of server.clients) socket.terminate();
+      await new Promise(resolve => server.close(resolve));
+    },
+  };
+}
+
+async function startHangingHandshakeFixture() {
+  const sockets = new Set();
+  const server = http.createServer();
+  server.on('upgrade', (_request, socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+  });
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1');
+  });
+  return {
+    port: server.address().port,
+    async close() {
+      for (const socket of sockets) socket.destroy();
       await new Promise(resolve => server.close(resolve));
     },
   };
@@ -79,6 +102,99 @@ test('daemon disconnects a half-open CDP connection after two missed default kee
   assert.equal(disconnected.browser.connectionGeneration, 1);
   assert.ok(Date.now() - startedAt < 30_000);
   assert.ok(pingCount >= 2);
+  assert.equal(stderr.join(''), '');
+});
+
+test('daemon distinguishes stale endpoints from authorization handshake timeouts', {
+  timeout: 20_000,
+}, async t => {
+  const root = await mkdtemp(testTempPrefix('bp-daemon-connect-diagnosis-'));
+  const browserEnv = isolatedBrokerEnvironment(root);
+  const profile = supportedBrowserProfiles({ homeDir: root, env: browserEnv })[0]?.dataDir;
+  assert.ok(profile, `No supported browser profile is defined for ${process.platform}`);
+  const socketPath = testBrokerPaths(root).endpoint;
+  await mkdir(profile, { recursive: true });
+  const child = spawn(process.execPath, [
+    join(process.cwd(), 'dist', 'daemon.js'),
+    '',
+    'Chrome',
+    profile,
+  ], {
+    env: browserEnv,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  const stderr = [];
+  child.stderr.on('data', bytes => stderr.push(bytes.toString()));
+  let hanging;
+  t.after(async () => {
+    await stopDaemon(socketPath, 'bridge:connect-diagnosis').catch(() => {});
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await hanging?.close().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const initialized = await waitFor(
+    () => daemonRequest(socketPath, '/broker/rpc', {
+      clientSessionId: 'bridge:connect-diagnosis',
+      method: 'initialize',
+      params: {
+        client: {
+          id: 'com.example.connect-diagnosis',
+          name: 'Connect Diagnosis',
+          version: '1.0.0',
+          instanceId: 'instance:connect-diagnosis',
+        },
+        protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 1 } },
+        requestedCapabilities: ['browser.control', 'workspace.manage'],
+      },
+    }),
+    value => value.result?.browsers?.length > 0,
+  );
+  const browser = initialized.result.browsers.find(candidate => candidate.profile === profile);
+  assert.ok(browser);
+  const created = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId: 'bridge:connect-diagnosis',
+    method: 'workspaces/create',
+    params: { browserId: browser.id },
+  });
+  const leased = await daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId: 'bridge:connect-diagnosis',
+    method: 'leases/create',
+    params: { workspaceId: created.result.workspace.id },
+  });
+  const connect = commandId => daemonRequest(socketPath, '/broker/rpc', {
+    clientSessionId: 'bridge:connect-diagnosis',
+    method: 'tools/call',
+    params: {
+      name: 'browser.connect',
+      arguments: { browserId: browser.id },
+      workspaceId: created.result.workspace.id,
+      leaseId: leased.result.lease.id,
+      commandId,
+    },
+  });
+
+  const closedServer = http.createServer();
+  await new Promise((resolve, reject) => {
+    closedServer.once('listening', resolve);
+    closedServer.once('error', reject);
+    closedServer.listen(0, '127.0.0.1');
+  });
+  const stalePort = closedServer.address().port;
+  await new Promise(resolve => closedServer.close(resolve));
+  await writeFile(join(profile, 'DevToolsActivePort'), `${stalePort}\n/devtools/browser/stale\n`);
+  const stale = await connect('command:stale-endpoint');
+  assert.equal(stale.error.data.code, 'browser_disconnected');
+  assert.equal(stale.error.data.remediation.code, 'start_browser');
+
+  hanging = await startHangingHandshakeFixture();
+  await writeFile(
+    join(profile, 'DevToolsActivePort'),
+    `${hanging.port}\n/devtools/browser/authorization-pending\n`,
+  );
+  const authorization = await connect('command:authorization-timeout');
+  assert.equal(authorization.error.data.code, 'browser_not_authorized');
+  assert.equal(authorization.error.data.remediation.code, 'allow_remote_debugging');
   assert.equal(stderr.join(''), '');
 });
 

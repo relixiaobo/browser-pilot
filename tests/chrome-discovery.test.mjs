@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -98,7 +98,7 @@ test('browser discovery omits products that are not installed and rejects malfor
   const result = await discoverBrowserCandidates({
     platform: 'darwin',
     profiles: [malformed, absent],
-    runningCommands: ['Test Browser'],
+    runningCommands: [`Test Browser --user-data-dir="${malformed.dataDir}"`],
   });
   assert.equal(result.length, 1);
   assert.equal(result[0].candidate.state, 'remote_debugging_disabled');
@@ -139,4 +139,84 @@ test('browser discovery opens no TCP or WebSocket connection', async t => {
   assert.equal(result[0].candidate.remoteDebuggingState, 'enabled');
   assert.equal(tcpConnections, 0);
   assert.equal(upgrades, 0);
+});
+
+test('Linux discovery ignores a stale SingletonLock whose pid is dead', async t => {
+  if (process.platform === 'win32') {
+    t.skip('Creating a Linux-style SingletonLock symlink requires elevated privileges on Windows');
+    return;
+  }
+  const temp = await mkdtemp(join(tmpdir(), 'browser-pilot-discovery-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const browser = await definition(temp, {
+    key: 'linux-stale-lock',
+    executableNames: ['google-chrome', 'google-chrome-stable'],
+  });
+  await symlink('fixture-host-2147483647', join(browser.dataDir, 'SingletonLock'));
+  await writeFile(join(browser.dataDir, 'DevToolsActivePort'), '9222\n/devtools/browser/stale\n');
+
+  const [result] = await discoverBrowserCandidates({
+    platform: 'linux',
+    profiles: [browser],
+    runningProcesses: [],
+  });
+
+  assert.equal(result.candidate.processState, 'not_running');
+  assert.equal(result.candidate.remoteDebuggingState, 'stale');
+  assert.equal(result.candidate.remediation.code, 'restart_remote_debugging');
+});
+
+test('Linux discovery binds a live SingletonLock pid and Chrome process to the profile data dir', async t => {
+  if (process.platform === 'win32') {
+    t.skip('Creating a Linux-style SingletonLock symlink requires elevated privileges on Windows');
+    return;
+  }
+  const temp = await mkdtemp(join(tmpdir(), 'browser-pilot-discovery-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const browser = await definition(temp, {
+    key: 'linux-profile-match',
+    executableNames: ['google-chrome', 'google-chrome-stable'],
+  });
+  const otherDataDir = join(temp, 'other profile');
+  await symlink(`fixture-host-${process.pid}`, join(browser.dataDir, 'SingletonLock'));
+
+  const [mismatched] = await discoverBrowserCandidates({
+    platform: 'linux',
+    profiles: [browser],
+    runningProcesses: [{
+      pid: process.pid,
+      command: `/opt/google/chrome/chrome --user-data-dir="${otherDataDir}"`,
+    }],
+  });
+  assert.equal(mismatched.candidate.processState, 'not_running');
+
+  const [matched] = await discoverBrowserCandidates({
+    platform: 'linux',
+    profiles: [browser],
+    runningProcesses: [{
+      pid: process.pid,
+      command: `/opt/google/chrome/chrome --user-data-dir="${browser.dataDir}"`,
+    }],
+  });
+  assert.equal(matched.candidate.processState, 'running');
+  assert.equal(matched.candidate.state, 'remote_debugging_disabled');
+});
+
+test('Windows discovery never treats a persistent lock file as process liveness', async t => {
+  const temp = await mkdtemp(join(tmpdir(), 'browser-pilot-discovery-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const browser = await definition(temp, {
+    key: 'windows-stale-lock',
+    executableNames: ['chrome.exe'],
+  });
+  await writeFile(join(browser.dataDir, 'SingletonLock'), 'persistent-lock');
+
+  const [result] = await discoverBrowserCandidates({
+    platform: 'win32',
+    profiles: [browser],
+    runningProcesses: [],
+  });
+
+  assert.equal(result.candidate.processState, 'not_running');
+  assert.equal(result.candidate.state, 'not_running');
 });

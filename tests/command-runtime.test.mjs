@@ -287,6 +287,31 @@ test('known tool errors complete deterministically and transport uncertainty doe
   );
 });
 
+test('browser.connect preserves a classified connection failure after dispatch', async () => {
+  const runtime = new MemoryCommandRuntime();
+  const connect = runtime.run(input({
+    commandId: 'command:connect-failure',
+    method: 'browser.connect',
+    browserDisconnectOutcomeKnown: true,
+    targetId: undefined,
+    actorKey: 'browser:test\u0000connection',
+    request: { name: 'browser.connect', arguments: { browserId: 'browser:test' } },
+  }), async ({ markDispatched }) => {
+    markDispatched();
+    throw new BrowserPilotError('browser_disconnected', 'stale endpoint');
+  });
+
+  await assert.rejects(
+    connect,
+    error => error.code === 'browser_disconnected' && error.context.commandId === 'command:connect-failure',
+  );
+  assert.equal(runtime.get({
+    principalId: 'principal:test',
+    workspaceId: 'workspace:test',
+    commandId: 'command:connect-failure',
+  }).command.status, 'completed');
+});
+
 test('Command Runtime bounds terminal records and enforces ownership', async () => {
   const runtime = new MemoryCommandRuntime({ maxCommands: 1 });
   await runtime.run(input({ commandId: 'command:first' }), async () => ({ ok: true }));

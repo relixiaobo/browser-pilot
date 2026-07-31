@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { connect as connectTcp } from 'node:net';
 import { delimiter, join } from 'node:path';
 import { homedir, platform } from 'node:os';
+import { promisify } from 'node:util';
 import WebSocket from 'ws';
 import type {
   BrowserAuthorizationState,
@@ -46,7 +47,15 @@ export interface BrowserDiscoveryOptions {
   env?: NodeJS.ProcessEnv;
   profiles?: readonly BrowserProfileDefinition[];
   runningCommands?: readonly string[] | null;
+  runningProcesses?: readonly BrowserRunningProcess[] | null;
 }
+
+export interface BrowserRunningProcess {
+  pid?: number;
+  command: string;
+}
+
+const execFileAsync = promisify(execFile);
 
 function readChromeInfo(browser: string, dataDir: string): ChromeInfo | null {
   const portFile = join(dataDir, 'DevToolsActivePort');
@@ -204,39 +213,138 @@ function installed(definition: BrowserProfileDefinition): boolean {
     definition.installPaths.some(pathExistsWithoutFollowingSymlink);
 }
 
-function readRunningCommands(os: NodeJS.Platform): readonly string[] | null {
+function parseProcessRows(output: string): BrowserRunningProcess[] {
+  const processes: BrowserRunningProcess[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (Number.isSafeInteger(pid) && pid > 0) processes.push({ pid, command: match[2] });
+  }
+  return processes;
+}
+
+async function readRunningProcesses(os: NodeJS.Platform): Promise<readonly BrowserRunningProcess[] | null> {
   try {
     if (os === 'win32') {
-      return execFileSync('tasklist.exe', ['/FO', 'CSV', '/NH'], {
-        encoding: 'utf8', timeout: 2_000, windowsHide: true,
-      }).split(/\r?\n/).filter(Boolean);
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress',
+      ], { encoding: 'utf8', timeout: 2_000, windowsHide: true });
+      if (!stdout.trim()) return [];
+      const parsed = JSON.parse(stdout) as unknown;
+      const records = Array.isArray(parsed) ? parsed : [parsed];
+      return records.flatMap(value => {
+        if (!value || typeof value !== 'object') return [];
+        const record = value as Record<string, unknown>;
+        if (!Number.isSafeInteger(record.ProcessId) || Number(record.ProcessId) < 1) return [];
+        if (typeof record.CommandLine !== 'string' || !record.CommandLine.trim()) return [];
+        return [{ pid: Number(record.ProcessId), command: record.CommandLine }];
+      });
     }
-    return execFileSync('ps', ['-axo', 'command='], {
+    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,command='], {
       encoding: 'utf8', timeout: 2_000,
-    }).split(/\r?\n/).filter(Boolean);
+    });
+    return parseProcessRows(stdout);
   } catch {
     return null;
   }
 }
 
+function normalizedProfilePath(value: string, os: NodeJS.Platform): string {
+  const normalized = value
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/[\\/]+/g, '/')
+    .replace(/\/$/, '');
+  return os === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function commandUserDataDir(command: string): string | undefined {
+  const match = command.match(/(?:^|\s)--user-data-dir(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s]+))/i);
+  return match?.[1] ?? match?.[2] ?? match?.[3];
+}
+
+function executableAliases(definition: BrowserProfileDefinition): string[] {
+  const productAliases: Record<string, string[]> = {
+    chrome: ['chrome', 'chrome.exe', 'google-chrome', 'google-chrome-stable'],
+    chromium: ['chromium', 'chromium-browser', 'chrome'],
+    brave: ['brave', 'brave.exe', 'brave-browser', 'brave-browser-stable'],
+    edge: ['msedge', 'msedge.exe', 'microsoft-edge', 'microsoft-edge-stable'],
+  };
+  return [...new Set([
+    ...definition.executableNames,
+    ...definition.installPaths.map(path => path.split(/[\\/]/).at(-1) ?? ''),
+    ...(productAliases[definition.product.toLowerCase()] ?? []),
+  ].filter(Boolean).map(name => name.toLowerCase()))];
+}
+
+function commandMatchesProfile(
+  definition: BrowserProfileDefinition,
+  command: string,
+  os: NodeJS.Platform,
+  allowImplicitDataDir = false,
+): boolean {
+  if (/(?:^|\s)--type(?:=|\s)/i.test(command)) return false;
+  const normalized = command.toLowerCase();
+  const matchesExecutable = executableAliases(definition).some(name => {
+    const macExecutable = `/${name}.app/contents/macos/${name}`;
+    if (normalized.includes(macExecutable)) return true;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[/\\\\"'])${escaped}(?=$|[\\s"',])`, 'i').test(command);
+  });
+  if (!matchesExecutable) return false;
+  const commandDataDir = commandUserDataDir(command);
+  if (commandDataDir !== undefined) {
+    return normalizedProfilePath(commandDataDir, os) === normalizedProfilePath(definition.dataDir, os);
+  }
+  return allowImplicitDataDir;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function linuxSingletonPid(definition: BrowserProfileDefinition): number | undefined {
+  const lockPath = join(definition.dataDir, 'SingletonLock');
+  try {
+    if (!lstatSync(lockPath).isSymbolicLink()) return undefined;
+    const match = readlinkSync(lockPath).match(/-(\d+)$/);
+    const pid = match ? Number(match[1]) : NaN;
+    return Number.isSafeInteger(pid) && pid > 0 && processAlive(pid) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function browserProcessState(
   definition: BrowserProfileDefinition,
-  commands: readonly string[] | null,
+  processes: readonly BrowserRunningProcess[] | null,
+  os: NodeJS.Platform,
 ): BrowserProcessState {
-  for (const lockName of ['SingletonLock', 'SingletonSocket', 'lockfile']) {
-    if (pathExistsWithoutFollowingSymlink(join(definition.dataDir, lockName))) return 'running';
+  if (os === 'linux') {
+    const lockPid = linuxSingletonPid(definition);
+    if (lockPid !== undefined) {
+      if (processes === null) return 'unknown';
+      const owner = processes.find(process => process.pid === lockPid);
+      if (owner && commandMatchesProfile(definition, owner.command, os, true)) return 'running';
+    }
+  } else if (os !== 'win32') {
+    for (const lockName of ['SingletonLock', 'SingletonSocket', 'lockfile']) {
+      if (pathExistsWithoutFollowingSymlink(join(definition.dataDir, lockName))) return 'running';
+    }
   }
-  if (commands === null) return 'unknown';
-  const names = definition.executableNames.map(name => name.toLowerCase());
-  return commands.some(command => {
-    const normalized = command.toLowerCase();
-    return names.some(name => {
-      const macExecutable = `/${name}.app/contents/macos/${name}`;
-      if (normalized.includes(macExecutable)) return true;
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return new RegExp(`(^|[/\\\\"'])${escaped}(?=$|[\\s"',])`, 'i').test(normalized);
-    });
-  }) ? 'running' : 'not_running';
+  if (processes === null) return 'unknown';
+  return processes.some(process => commandMatchesProfile(definition, process.command, os))
+    ? 'running'
+    : 'not_running';
 }
 
 function tcpReachable(port: number, timeoutMs: number): Promise<boolean> {
@@ -335,15 +443,17 @@ function remediation(
 export async function discoverBrowserCandidates(options: BrowserDiscoveryOptions = {}): Promise<DiscoveredBrowser[]> {
   const os = options.platform ?? platform();
   const definitions = options.profiles ?? supportedBrowserProfiles(options);
-  const runningCommands = options.runningCommands === undefined
-    ? readRunningCommands(os)
-    : options.runningCommands;
+  const runningProcesses = options.runningProcesses !== undefined
+    ? options.runningProcesses
+    : options.runningCommands !== undefined
+      ? options.runningCommands?.map(command => ({ command })) ?? null
+      : await readRunningProcesses(os);
   const results: DiscoveredBrowser[] = [];
 
   for (const definition of definitions) {
     if (!installed(definition)) continue;
     const endpoint = readChromeInfo(definition.product, definition.dataDir);
-    let processState = browserProcessState(definition, runningCommands);
+    const processState = browserProcessState(definition, runningProcesses, os);
     let remoteDebuggingState: BrowserRemoteDebuggingState = 'disabled';
     let authorizationState: BrowserAuthorizationState = 'not_applicable';
     let state: BrowserCandidate['state'];
@@ -355,7 +465,6 @@ export async function discoverBrowserCandidates(options: BrowserDiscoveryOptions
       authorizationState = 'unknown';
       state = 'disconnected';
     } else {
-      processState = 'running';
       remoteDebuggingState = 'enabled';
       authorizationState = 'unknown';
       state = 'disconnected';

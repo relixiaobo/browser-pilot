@@ -29,8 +29,10 @@ import { CompatibilityDialogService } from './services/compatibility-dialog-serv
 import {
   discoverBrowserCandidates,
   discoverChromeAtDataDir,
+  probeBrowserEndpoint,
   type DiscoveredBrowser,
 } from './chrome.js';
+import { CDPError, CDP_HANDSHAKE_TIMEOUT_CODE } from './cdp.js';
 import { ManagedTargetJanitorClient } from './managed-target-janitor-client.js';
 import { publicExecutablePath } from './runtime-layout.js';
 import { BROWSER_PILOT_VERSION as PKG_VERSION } from './version.js';
@@ -378,27 +380,68 @@ async function main() {
         });
       } catch (error) {
         await controller.cdp.browserDisconnected().catch(() => {});
+        const probe = error instanceof CDPError && error.code === CDP_HANDSHAKE_TIMEOUT_CODE
+          ? 'authorization_required'
+          : await probeBrowserEndpoint(chrome).catch(() => 'unreachable' as const);
+        if (probe === 'authorization_required') {
+          const candidate = {
+            ...controller.binding.candidate,
+            processState: 'running' as const,
+            remoteDebuggingState: 'enabled' as const,
+            authorizationState: 'required' as const,
+            state: 'authorization_required' as const,
+            remediation: {
+              code: 'allow_remote_debugging',
+              message: 'Approve the existing Chrome remote debugging prompt, then retry the explicit connect operation.',
+              actionRequired: true,
+            },
+          };
+          controller.binding.candidate = candidate;
+          broker.updateBrowserCandidate(controller.binding.instance.id, candidate);
+          throw new BrowserPilotError(
+            'browser_not_authorized',
+            'Chrome remote debugging authorization was not completed',
+            {
+              retryable: true,
+              cause: error instanceof Error ? error : undefined,
+              remediation: candidate.remediation,
+            },
+          );
+        }
+
+        const latest = (await discoverBrowserCandidates()).find(browser => (
+          browser.candidate.id === controller.binding.candidate.id
+        ));
+        const processState = latest?.candidate.processState ?? controller.binding.candidate.processState;
+        const remediation = processState === 'not_running'
+          ? {
+            code: 'start_browser',
+            message: 'Start this browser profile and enable remote debugging, then retry the explicit connect operation.',
+            actionRequired: true,
+          }
+          : {
+            code: 'restart_remote_debugging',
+            message: 'The recorded remote debugging endpoint is stale. Restart this browser profile and enable remote debugging again.',
+            actionRequired: true,
+          };
         const candidate = {
           ...controller.binding.candidate,
-          processState: 'running' as const,
-          remoteDebuggingState: 'enabled' as const,
-          authorizationState: 'required' as const,
-          state: 'authorization_required' as const,
-          remediation: {
-            code: 'allow_remote_debugging',
-            message: 'Approve the existing Chrome remote debugging prompt, then retry the explicit connect operation.',
-            actionRequired: true,
-          },
+          ...(latest ? latest.candidate : {}),
+          processState,
+          remoteDebuggingState: 'stale' as const,
+          authorizationState: 'unknown' as const,
+          state: 'disconnected' as const,
+          remediation,
         };
         controller.binding.candidate = candidate;
         broker.updateBrowserCandidate(controller.binding.instance.id, candidate);
         throw new BrowserPilotError(
-          'browser_not_authorized',
-          'Chrome remote debugging authorization was not completed',
+          'browser_disconnected',
+          'Chrome remote debugging endpoint is unreachable',
           {
             retryable: true,
             cause: error instanceof Error ? error : undefined,
-            remediation: candidate.remediation,
+            remediation,
           },
         );
       }

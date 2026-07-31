@@ -1248,6 +1248,7 @@ export class MemoryBrokerRuntime {
         : {}),
       method: definition.name,
       mutating: definition.mutating,
+      ...(isBrowserConnectionAttempt ? { browserDisconnectOutcomeKnown: true } : {}),
       cancellation: definition.cancellation,
       actorKey,
       request,

@@ -33,6 +33,7 @@ export interface RunCommandInput {
   deadlineMs?: number;
   method: string;
   mutating: boolean;
+  browserDisconnectOutcomeKnown?: boolean;
   cancellation: ToolCancellation;
   actorKey: string;
   request: JsonValue;
@@ -68,6 +69,7 @@ interface StoredCommand extends CommandDescriptor {
   fingerprint: string;
   scopeKey: string;
   cancellation: ToolCancellation;
+  browserDisconnectOutcomeKnown: boolean;
   result?: JsonValue;
   error?: JsonRpcErrorObject;
   abortController: AbortController;
@@ -212,6 +214,7 @@ export class MemoryCommandRuntime {
       fingerprint,
       scopeKey,
       cancellation: input.cancellation,
+      browserDisconnectOutcomeKnown: input.browserDisconnectOutcomeKnown === true,
       abortController: new AbortController(),
       resolve,
       reject,
@@ -351,8 +354,11 @@ export class MemoryCommandRuntime {
     } catch (error) {
       if (TERMINAL_STATUSES.has(record.status)) return;
       const stable = this.withCommandContext(error, record);
+      const knownConnectionFailure = record.browserDisconnectOutcomeKnown &&
+        stable.code === 'browser_disconnected';
       if (
         record.mutating && record.dispatchedAt !== undefined &&
+        !knownConnectionFailure &&
         (stable.code === 'browser_disconnected' || stable.code === 'internal_error' || stable.code === 'unknown_outcome')
       ) {
         if (stable.code === 'unknown_outcome') {
