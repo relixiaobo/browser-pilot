@@ -23,6 +23,7 @@
     "verify:standalone": "node scripts/verify-standalone.mjs",
     "dev": "tsup --watch",
     "start": "node dist/cli.js",
+    "validate:skill": "node scripts/validate-managed-skill.mjs",
     "lint": "eslint src scripts tests *.ts",
     "test": "npm run build && node scripts/run-node-tests.mjs unit && node scripts/run-node-tests.mjs browser && npx playwright test --project core --project compat --project network",
     "test:unit": "npm run build && node scripts/run-node-tests.mjs unit",
@@ -59,7 +60,8 @@
     "postject": "^1.0.0-alpha.6",
     "tsup": "^8.0.0",
     "typescript": "^5.7.0",
-    "typescript-eslint": "^8.65.0"
+    "typescript-eslint": "^8.65.0",
+    "yaml": "^2.9.0"
   },
   "keywords": [
     "browser",

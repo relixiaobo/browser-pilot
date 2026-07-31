@@ -1,7 +1,6 @@
-# Embedding Browser Pilot in an Agent Product
+# Integrating Browser Pilot in an Agent Host
 
-Use one integration model for Tenon, OpenClaw, Codex, Claude Code, and any other
-shell-capable Agent host:
+Use one command path in any shell-capable Agent host:
 
 ```text
 Agent -> Browser Pilot skill -> host shell/command runner -> bp CLI -> Chrome
@@ -10,29 +9,37 @@ Agent -> Browser Pilot skill -> host shell/command runner -> bp CLI -> Chrome
 Do not create Browser Pilot-specific native tools, an SDK wrapper, an MCP
 server, a persistent protocol adapter, or Agent-specific browser runtime.
 
-## Bundle the Executable
+## Provide the Executable
 
-Choose one release form and pin it in the product build:
+Choose one provisioning mode without changing the skill workflow:
 
-- Bundle the native executable on Apple Silicon macOS, x64 Linux, or x64
-  Windows.
-- Or bundle `browser-pilot-cli` with a pinned Node.js 22 or newer runtime and
-  invoke its `dist/cli.js` entry.
+- **Managed skill:** install only the complete skill directory. The Agent runs
+  the mandatory preflight in `SKILL.md` and installs the exact tested npm CLI
+  through its ordinary shell and approval flow when needed. The host does not
+  need Browser Pilot-specific code or a bundled executable.
+- **Pre-provisioned CLI:** place a compatible native executable or a pinned
+  `browser-pilot-cli` installation on `PATH`. The npm form requires Node.js 22
+  or newer. Native releases support Apple Silicon macOS, x64 Linux, and x64
+  Windows; Intel Mac is unsupported.
 
-Verify the release index and checksums before packaging. Intel Mac is not
-supported. Do not download or replace Browser Pilot during an Agent task.
+For a pre-provisioned native executable, verify the release index and checksums
+before packaging. For either mode, the Agent still runs `bp --version` and
+refuses an incompatible CLI. Do not teach it a host-specific executable path.
 
-Place the bundled command's directory first on the Agent command environment's
-`PATH`, so both self-installed and product-bundled setups resolve the same
-command:
+For a remotely managed skill installation, select the repository subdirectory
+`plugin/skills/browser-pilot` and track the `skill-stable` branch. That branch
+advances only after its exact npm CLI version and GitHub Release are public.
+Do not track the development branch, where compatibility metadata can refer to
+an unpublished CLI version.
+
+Resolve the same command in both modes:
 
 ```bash
 command -v bp
 bp --version
 ```
 
-The skill and all browser workflows remain identical in both installation
-modes. Do not teach the Agent a product-specific executable path.
+The skill and all browser workflows remain identical in both modes.
 
 ## Inject Stable Environment
 
@@ -52,9 +59,10 @@ The client key must be:
 - unchanged during retry recovery.
 
 Create the output directory before the Agent starts and keep its lifecycle
-under the host's normal task-file policy. Browser Pilot returns absolute file
-paths for captures, PDFs, downloads, and saved network bodies. Let the Agent
-use its existing file/image capability to consume them.
+under the host's normal task-file policy. While the variable is set, Browser
+Pilot rejects output paths outside that directory. It returns absolute file
+paths for captures, PDFs, downloads, and saved network bodies. Let the Agent use
+its existing file/image capability to consume them.
 
 Do not set one static `BROWSER_PILOT_REQUEST_ID` for an entire task. Request IDs
 identify one intended CLI operation. Let the Agent or command runner attach a
@@ -87,10 +95,9 @@ At product startup, checking `bp --version` is sufficient. Run `bp status` only
 when browser state is relevant; it may establish the Agent's logical state in
 the already running service.
 
-Pin the CLI version tested by the product release. The skill accepts the
-declared compatible range, so a user-installed compatible CLI can still work.
-On product upgrades, update the executable, skill, compatibility metadata, and
-release checksums together.
+In managed-skill mode, let the mandatory preflight reconcile skill and CLI
+updates. In pre-provisioned mode, pin a version accepted by the skill's declared
+range and update the executable when that range advances.
 
 Compatible installations reuse one per-user service through protocol
 negotiation. A product-bundled CLI may release its own Agent state but cannot

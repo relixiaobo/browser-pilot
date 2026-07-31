@@ -99,6 +99,8 @@ program.command('screenshot [filename]')
     if (opts.annotate !== undefined && (opts.full || opts.selector)) {
       throw invalidArgument('--annotate cannot be combined with --full or --selector', 'annotate');
     }
+    const file = filename ?? `screenshot-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.png`;
+    const destination = outputPath(file);
     await withCliTarget(async (client, target) => {
       let annotations: Record<string, JsonValue> | undefined;
       if (opts.annotate !== undefined) {
@@ -117,8 +119,6 @@ program.command('screenshot [filename]')
         includeOriginal: true,
       }, target.targetId);
       const artifact = artifactFrom(result);
-      const file = filename ?? `screenshot-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.png`;
-      const destination = outputPath(file);
       try {
         await client.exportArtifact(artifact.id, destination);
       } finally {
@@ -143,13 +143,13 @@ program.command('pdf [filename]')
   .option('--landscape', 'landscape orientation')
   .addHelpText('after', '\nExamples:\n  bp pdf\n  bp pdf report.pdf\n  bp pdf report.pdf --landscape')
   .action(action(async (filename, opts) => {
+    const file = filename ?? `page-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.pdf`;
+    const destination = outputPath(file);
     await withCliTarget(async (client, target) => {
       const result = await client.callTool('browser.pdf', {
         ...(opts.landscape ? { landscape: true } : {}),
       }, target.targetId);
       const artifact = artifactFrom(result);
-      const file = filename ?? `page-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.pdf`;
-      const destination = outputPath(file);
       try {
         await client.exportArtifact(artifact.id, destination);
       } finally {

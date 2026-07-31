@@ -37,8 +37,9 @@ Browser Pilot does not publish or support:
 - direct consumer access to Broker sockets or locator files.
 
 This decision applies equally to Agent-managed installs and products that
-bundle Browser Pilot. A product makes the CLI available on the Agent command
-environment's `PATH`, installs the same skill, and injects stable environment.
+pre-provision Browser Pilot. Both install the same skill and inject stable
+environment. The CLI is either installed by the skill's mandatory preflight or
+already available on the Agent command environment's `PATH`.
 
 ## 3. Public Contract
 
@@ -63,7 +64,9 @@ A shell-capable Agent host needs only:
 
 - a normal local command execution tool;
 - the complete Browser Pilot skill;
-- a compatible `bp` executable on the command environment's `PATH`;
+- permission for the Agent to install the skill's exact npm CLI through the
+  normal shell approval flow, or a compatible `bp` executable already on
+  `PATH`;
 - a stable `BROWSER_PILOT_CLIENT_KEY` per independent Agent;
 - an absolute task-owned `BROWSER_PILOT_OUTPUT_DIR` when file results are used;
 - ordinary access to returned task files.
@@ -72,10 +75,10 @@ The host must not map every Browser Pilot command into a native tool. The skill
 provides progressive disclosure, and CLI help provides exact runtime command
 discovery.
 
-The host should pin the CLI version tested by its product release. The skill
-declares a compatible range so a compatible user-installed command can also be
-used. The host must update its executable, skill, compatibility metadata, and
-checksums together.
+Managed skill installations must track `plugin/skills/browser-pilot` from the
+`skill-stable` branch, which advances only after the matching npm package and
+GitHub Release are public. Pre-provisioned installations should pin a CLI
+version inside the skill's declared compatible range.
 
 ## 5. Browser Scope and Authorization
 
@@ -325,11 +328,16 @@ CLI file-producing commands return:
 - width and height for images when available;
 - command-specific metadata such as annotation count.
 
-Output resolution order is:
+When `BROWSER_PILOT_OUTPUT_DIR` is set, it is an enforced output boundary:
 
-1. explicit filename;
-2. `BROWSER_PILOT_OUTPUT_DIR`;
-3. current working directory.
+- relative filenames resolve inside that absolute directory;
+- absolute filenames are accepted only when they remain inside it;
+- `..` and existing symbolic-link escapes are rejected before browser or
+  network work starts;
+- generated default filenames are written inside it.
+
+When the variable is unset, explicit filenames resolve normally and generated
+defaults use the current working directory for backward compatibility.
 
 The Broker stores media and downloads in private bounded temporary storage,
 then exports them to a caller-authorized absolute path. Binary bytes are never
@@ -406,6 +414,7 @@ leaves the Broker running.
 
 Supported distributions are:
 
+- managed Agent skill with an exact npm CLI preflight;
 - global npm install;
 - local npm install or `npx --no-install`;
 - product-bundled npm package with pinned Node runtime;
@@ -424,7 +433,8 @@ Every release includes:
   range, tested version, supported platforms, asset sizes, and hashes.
 
 CLI, skill, plugin manifests, compatibility metadata, and checksums must be
-released from one synchronized root version.
+released from one synchronized root version. After publication succeeds, the
+release commit advances the non-force-updated `skill-stable` branch.
 
 ## 20. Security and Privacy Invariants
 
@@ -541,6 +551,7 @@ A release is acceptable only when all of the following hold:
 - Managed crash cleanup leaves user tabs untouched.
 - Screenshot, PDF, download, upload, and saved network results use local files
   with complete metadata.
+- `BROWSER_PILOT_OUTPUT_DIR` confines every CLI-created task file when set.
 
 Real-site canaries report drift separately and do not make deterministic release
 gates depend on third-party uptime.

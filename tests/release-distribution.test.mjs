@@ -224,7 +224,10 @@ test('release sync advances every active manifest from the root package version'
 
   const writeJson = (path, value) => writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
   await Promise.all([
-    writeJson(join(fixtureRoot, 'package.json'), { version: '0.5.0' }),
+    writeJson(join(fixtureRoot, 'package.json'), {
+      version: '0.5.0',
+      engines: { node: '>=22' },
+    }),
     writeJson(join(fixtureRoot, 'package-lock.json'), {
       version: '0.4.0',
       packages: { '': { version: '0.4.0' } },
@@ -270,11 +273,15 @@ test('release sync advances every active manifest from the root package version'
   assert.equal(plugin.peerDependencies['browser-pilot-cli'], '>=0.5.0 <1.0.0');
   assert.equal(claudePlugin.version, '0.5.0');
   assert.equal(marketplace.plugins[0].version, '0.5.0');
+  assert.equal(compatibility.schemaVersion, 2);
+  assert.equal(compatibility.skillVersion, '0.5.0');
   assert.deepEqual(compatibility.browserPilotCli, {
     testedVersion: '0.5.0',
     minimumVersion: '0.5.0',
     maximumVersionExclusive: '1.0.0',
     supportedVersionRange: '>=0.5.0 <1.0.0',
+    requiredNodeVersion: '>=22',
+    installCommand: 'npm install --global browser-pilot-cli@0.5.0',
   });
 });
 

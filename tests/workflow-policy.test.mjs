@@ -44,11 +44,13 @@ test('CI rejects release manifest drift before validation', () => {
   const validate = jobs.get('validate');
   assert.ok(validate, 'CI must define a validation job');
   const install = validate.indexOf('run: npm ci');
+  const skillValidation = validate.indexOf('run: npm run validate:skill');
   const versionCheck = validate.indexOf('run: npm run release:check-version');
   const lint = validate.indexOf('run: npm run lint');
   const unit = validate.indexOf('run: npm run test:unit');
   assert.ok(install >= 0, 'validation must install dependencies');
-  assert.ok(versionCheck > install, 'version sync must be checked after install');
+  assert.ok(skillValidation > install, 'managed skill validation must run after install');
+  assert.ok(versionCheck > skillValidation, 'version sync must be checked after skill validation');
   assert.ok(lint > versionCheck, 'lint must run after the version sync check');
   assert.ok(unit > lint, 'lint must run before unit tests');
 });
@@ -90,10 +92,19 @@ test('release publication is one tag-gated draft to npm to public state machine'
   assert.match(publish, /^    if: startsWith\(github\.ref, 'refs\/tags\/v'\)$/m);
   assert.match(publish, /^    needs: build$/m);
   assert.match(publish, /permissions:[\s\S]*contents: write[\s\S]*id-token: write/);
+  const skillValidation = publish.indexOf('npm run validate:skill');
   const plugin = publish.indexOf('npm run package:agent-plugin');
   const index = publish.indexOf('npm run package:release-index');
   const stateMachine = publish.indexOf('node scripts/release-publish.mjs --assets release-assets');
-  assert.ok(plugin >= 0 && index > plugin && stateMachine > index);
+  const stableSkillBranch = publish.indexOf(
+    'git push origin "${GITHUB_SHA}:refs/heads/skill-stable"',
+  );
+  assert.ok(skillValidation >= 0 && plugin > skillValidation && index > plugin && stateMachine > index);
+  assert.ok(
+    stableSkillBranch > stateMachine,
+    'managed skill branch must advance only after release publication succeeds',
+  );
+  assert.doesNotMatch(publish.slice(stableSkillBranch), /(?:--force|-f\b)/);
   assert.doesNotMatch(publish, /npm publish/);
   assert.doesNotMatch(build, /-print -quit/);
   assert.match(build, /for ARCHIVE in "\$\{ARCHIVES\[@\]\}"/);

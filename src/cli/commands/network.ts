@@ -110,6 +110,7 @@ netCmd.command('show <id>')
   .description('Show full request/response details')
   .option('--save <file>', 'save response body to file')
   .action(action(async (idStr, opts) => {
+    const destination = opts.save ? outputPath(opts.save) : undefined;
     const client = await requireCompatibility();
     const id = Number(idStr);
     const summary = await findNetworkRequest(client, id);
@@ -122,7 +123,7 @@ netCmd.command('show <id>')
       : {};
     const responseBody = typeof result.body === 'string' ? result.body : undefined;
 
-    if (opts.save) {
+    if (destination) {
       if (responseBody === undefined) {
         throw new BrowserPilotError(
           'action_not_verified',
@@ -130,7 +131,6 @@ netCmd.command('show <id>')
           { context: { sequence: id } },
         );
       }
-      const destination = outputPath(opts.save);
       const bytes = result.bodyEncoding === 'base64'
         ? Buffer.from(responseBody, 'base64')
         : Buffer.from(responseBody, 'utf8');

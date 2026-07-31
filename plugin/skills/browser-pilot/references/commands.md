@@ -213,8 +213,12 @@ List completed downloads retained for the current Agent key.
 Export one listed download to a local file. Re-list after a download completes.
 
 Capture and download results include an absolute `file`, MIME type, byte size,
-and image dimensions when applicable. Without a filename, output uses
-`BROWSER_PILOT_OUTPUT_DIR`, then the current working directory.
+and image dimensions when applicable. Set `BROWSER_PILOT_OUTPUT_DIR` to an
+absolute task-owned directory to confine all captures, PDFs, download exports,
+and saved network bodies. While it is set, relative filenames resolve inside
+that directory; absolute filenames must already be inside it; and `..` or
+symbolic-link escapes fail before browser or network work starts. Without it,
+explicit filenames and then the current working directory remain available.
 
 ## Cookies and Authentication
 

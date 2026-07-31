@@ -32,7 +32,9 @@ async function syncJson(path, update) {
 }
 
 const packagePath = join(root, 'package.json');
-const version = (await readJson(packagePath)).version;
+const packageManifest = await readJson(packagePath);
+const version = packageManifest.version;
+assert.equal(typeof packageManifest.engines?.node, 'string', 'package.json engines.node is required');
 const cliCompatibility = releaseVersionMetadata(version);
 const changed = [];
 
@@ -61,10 +63,13 @@ if (await syncJson(join(root, '.claude-plugin', 'marketplace.json'), manifest =>
 })) changed.push('.claude-plugin/marketplace.json');
 
 if (await syncJson(join(root, 'plugin', 'skills', 'browser-pilot', 'compatibility.json'), manifest => {
+  manifest.schemaVersion = 2;
   manifest.skillVersion = version;
   manifest.browserPilotCli = {
     testedVersion: version,
     ...cliCompatibility,
+    requiredNodeVersion: packageManifest.engines.node,
+    installCommand: `npm install --global browser-pilot-cli@${version}`,
   };
   return manifest;
 })) changed.push('plugin/skills/browser-pilot/compatibility.json');

@@ -172,6 +172,7 @@ jobs:
           merge-multiple: true
 
       - run: npm ci
+      - run: npm run validate:skill
       - run: npm run build
       - name: Package versioned Agent plugin
         run: npm run package:agent-plugin -- --output release-assets
@@ -182,3 +183,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release-publish.mjs --assets release-assets
+
+      - name: Advance managed skill release branch
+        run: git push origin "${GITHUB_SHA}:refs/heads/skill-stable"

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
@@ -1957,4 +1957,68 @@ test('CLI uses only canonical Broker and file operations', async t => {
     call.body.params.clientKey === 'browser-pilot-cli' &&
     call.body.params.ttlMs === 300_000
   )));
+});
+
+test('BROWSER_PILOT_OUTPUT_DIR confines every file-producing command', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-output-dir-'));
+  const { calls, close } = await startFakeDaemon(root);
+  t.after(async () => {
+    await close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const outputDirectory = join(root, 'agent-output');
+  const environment = { BROWSER_PILOT_OUTPUT_DIR: outputDirectory };
+  const relativeOutputDirectory = await runCliFailure(
+    root,
+    ['screenshot', 'capture.png'],
+    { BROWSER_PILOT_OUTPUT_DIR: 'relative-output' },
+  );
+  assert.equal(relativeOutputDirectory.output.code, 'invalid_argument');
+  assert.equal(relativeOutputDirectory.output.context.field, 'outputDir');
+
+  const escapedScreenshot = await runCliFailure(root, ['screenshot', '../escape.png'], environment);
+  assert.equal(escapedScreenshot.output.code, 'invalid_argument');
+  assert.match(escapedScreenshot.output.error, /inside BROWSER_PILOT_OUTPUT_DIR/);
+
+  const escapedPdf = await runCliFailure(root, ['pdf', join(root, 'outside.pdf')], environment);
+  assert.equal(escapedPdf.output.code, 'invalid_argument');
+
+  const escapedDownload = await runCliFailure(
+    root,
+    ['download', '1', join(root, 'outside.csv')],
+    environment,
+  );
+  assert.equal(escapedDownload.output.code, 'invalid_argument');
+
+  const escapedNetworkBody = await runCliFailure(
+    root,
+    ['net', 'show', '4', '--save', '../response.bin'],
+    environment,
+  );
+  assert.equal(escapedNetworkBody.output.code, 'invalid_argument');
+  assert.equal(
+    calls.some(call => ['browser.capture', 'browser.pdf', 'browser.network.request'].includes(
+      call.body?.params?.name,
+    )),
+    false,
+    'invalid output paths must fail before browser or network work starts',
+  );
+
+  const insidePath = join(outputDirectory, 'capture.png');
+  const captured = await runCli(root, ['screenshot', insidePath], environment);
+  assert.equal(captured.file, insidePath);
+  assert.equal(await readFile(insidePath, 'utf8'), 'screenshot-bytes');
+
+  if (process.platform !== 'win32') {
+    const outsideDirectory = join(root, 'outside');
+    await mkdir(outsideDirectory);
+    await symlink(outsideDirectory, join(outputDirectory, 'linked-output'), 'dir');
+    const symlinkEscape = await runCliFailure(
+      root,
+      ['screenshot', 'linked-output/escape.png'],
+      environment,
+    );
+    assert.equal(symlinkEscape.output.code, 'invalid_argument');
+  }
 });

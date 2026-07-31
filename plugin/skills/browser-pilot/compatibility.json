@@ -1,11 +1,13 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "skillVersion": "0.6.0",
   "browserPilotCli": {
     "testedVersion": "0.6.0",
     "minimumVersion": "0.6.0",
     "maximumVersionExclusive": "1.0.0",
-    "supportedVersionRange": ">=0.6.0 <1.0.0"
+    "supportedVersionRange": ">=0.6.0 <1.0.0",
+    "requiredNodeVersion": ">=22",
+    "installCommand": "npm install --global browser-pilot-cli@0.6.0"
   },
   "protocol": {
     "min": {

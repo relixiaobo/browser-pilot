@@ -34,6 +34,8 @@ assert.equal(skillCompatibility.skillVersion, version);
 assert.deepEqual(skillCompatibility.browserPilotCli, {
   testedVersion: version,
   ...cliCompatibility,
+  requiredNodeVersion: packageJson.engines.node,
+  installCommand: `npm install --global browser-pilot-cli@${version}`,
 });
 
 async function sha256(path) {

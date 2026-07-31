@@ -5,7 +5,7 @@ description: >
   extension. Use for browsing signed-in websites, reading pages, filling forms,
   operating web apps, handling tabs, frames, dialogs, uploads, downloads,
   screenshots, PDFs, cookies, HTTP auth, or network activity. Also use when
-  bundling Browser Pilot into a shell-capable Agent product.
+  integrating Browser Pilot into a shell-capable Agent host.
 ---
 
 # Browser Pilot
@@ -18,21 +18,34 @@ persistent Browser Pilot client process.
 Browser Pilot can control eligible user-opened tabs as well as tabs it creates.
 Browser-internal and extension-owned pages are excluded.
 
-## Check the CLI
+## Check and Install the CLI
 
-Read [compatibility.json](compatibility.json), then check the resolved command
-and version before the first browser operation in a task:
+Browser Pilot requires the `bp` executable. Before the first browser operation
+in every task, read [compatibility.json](compatibility.json), then check the
+resolved command and version:
 
 ```bash
 command -v bp
 bp --version
 ```
 
-Use any version inside `browserPilotCli.supportedVersionRange`. If `bp` is
-absent, install `browser-pilot-cli@<browserPilotCli.testedVersion>` or use the
-product-bundled command already placed on the Agent's `PATH`. Do not silently
-use an incompatible executable. The npm distribution requires Node.js 22 or
-newer. Native macOS releases require Apple Silicon; Intel Mac is unsupported.
+Continue only when the reported semantic version is inside
+`browserPilotCli.supportedVersionRange`, whose lower bound is the required
+minimum version. If `bp` is absent or outside that range:
+
+1. Run `node --version` and `npm --version`. Node.js must satisfy
+   `browserPilotCli.requiredNodeVersion`.
+2. Run the exact `browserPilotCli.installCommand` from `compatibility.json`
+   through the Agent's normal shell approval flow. This command installs or
+   upgrades Browser Pilot; do not replace its pinned version with `@latest`.
+3. Run `bp --version` again and re-check the supported range. If the command is
+   still absent or incompatible, stop and report the failed prerequisite. Do
+   not attempt browser commands with the wrong CLI.
+
+Do not assume the Agent host installs Browser Pilot. A compatible executable
+already on `PATH` may be used regardless of whether a user, the Agent, or the
+host provided it. Native macOS releases require Apple Silicon; Intel Mac is
+unsupported.
 
 ## Connect Deliberately
 
@@ -97,7 +110,7 @@ interactive Agent uses Browser Pilot.
 
 Product integrators must read
 [references/embedding.md](references/embedding.md). The Agent still invokes
-the bundled CLI through its ordinary shell tool.
+the resolved `bp` CLI through its ordinary shell tool.
 
 ## Operate from Current State
 
@@ -175,21 +188,23 @@ Choose an action only when it follows from the user's request and page state.
 
 ## Handle Files and Visual Results
 
-Set `BROWSER_PILOT_OUTPUT_DIR` to a task-owned absolute directory, or pass an
-explicit filename for durable results:
+Set `BROWSER_PILOT_OUTPUT_DIR` to a task-owned absolute directory for durable
+results:
 
 ```bash
-bp screenshot /absolute/task/path/page.png
-bp pdf /absolute/task/path/report.pdf
+bp screenshot page.png
+bp pdf report.pdf
 bp downloads
-bp download 1 /absolute/task/path/export.bin
+bp download 1 export.bin
 ```
 
-Without a filename, captures and exports use `BROWSER_PILOT_OUTPUT_DIR`, then
-the current working directory. Read the returned absolute `file` path. When
-visual inspection is needed, open that image with the Agent host's existing
-image/file viewing capability. Browser Pilot intentionally returns a local path
-through CLI JSON rather than embedding binary data in shell output.
+When `BROWSER_PILOT_OUTPUT_DIR` is set, every capture, PDF, download export, and
+saved network body must stay inside it; outside absolute paths and `..` escapes
+are rejected. Without it, explicit filenames and then the current working
+directory remain available. Read the returned absolute `file` path. When visual
+inspection is needed, open that image with the Agent host's existing image/file
+viewing capability. Browser Pilot intentionally returns a local path through
+CLI JSON rather than embedding binary data in shell output.
 
 Upload only a user- or host-authorized local path. Browser Pilot copies files
 for transport and never removes the source or Chrome's original download.

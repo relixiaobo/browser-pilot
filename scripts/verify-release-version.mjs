@@ -32,14 +32,18 @@ assert.equal(
   'agent plugin CLI peer range must match the release compatibility policy',
 );
 assert.equal(pluginManifest.version, version, 'plugin manifest version must match package.json');
+assert.equal(skillCompatibility.schemaVersion, 2, 'skill compatibility schema must be current');
 assert.equal(skillCompatibility.skillVersion, version, 'skill version must match package.json');
 assert.deepEqual(skillCompatibility.browserPilotCli, {
   testedVersion: version,
   ...cliCompatibility,
+  requiredNodeVersion: packageManifest.engines.node,
+  installCommand: `npm install --global browser-pilot-cli@${version}`,
 }, 'skill CLI compatibility must match package.json');
 assert.ok(
   skill.includes('[compatibility.json](compatibility.json)') &&
-    skill.includes('browserPilotCli'),
+    skill.includes('browserPilotCli.installCommand') &&
+    skill.includes('bp --version'),
   'skill instructions must load and enforce its compatibility manifest',
 );
 assert.ok(
