@@ -390,6 +390,66 @@ test('incompatible clients fail without replacing the running Broker', async t =
   assert.equal(healthAfter.clients.connections, 0);
 });
 
+test('a second daemon refuses the live owner without disturbing it', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-single-daemon-'));
+  const paths = testBrokerPaths(root);
+  const first = await startPassiveBroker(root);
+  const second = await startPassiveBroker(root, { profile: join(root, 'second-profile') });
+  t.after(async () => {
+    await Promise.all([terminateChild(first.child), terminateChild(second.child)]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const before = await daemonRequest(paths.endpoint, '/health');
+  const secondExit = await waitForValue(
+    () => Promise.resolve({ code: second.child.exitCode, signal: second.child.signalCode }),
+    result => result.code !== null || result.signal !== null,
+  );
+  const after = await daemonRequest(paths.endpoint, '/health');
+  const owner = JSON.parse(await readFile(paths.daemonOwnerLockFile, 'utf8'));
+
+  assert.equal(secondExit.code, 1);
+  assert.match(second.stderr(), /daemon_already_running/);
+  assert.match(second.stderr(), /Another Browser Pilot daemon already owns this home/);
+  assert.equal(after.brokerProcessIdentity, before.brokerProcessIdentity);
+  assert.equal(owner.pid, first.child.pid);
+  assert.equal(first.stderr(), '');
+});
+
+test('a daemon reclaims owner state after the previous process is killed', {
+  skip: process.platform === 'win32' ? 'Windows has no SIGKILL signal' : false,
+}, async t => {
+  const root = await mkdtemp(testTempPrefix('bp-reclaim-daemon-'));
+  const paths = testBrokerPaths(root);
+  const first = await startPassiveBroker(root);
+  let second;
+  t.after(async () => {
+    await terminateChild(first.child);
+    if (second) await terminateChild(second.child);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const before = await daemonRequest(paths.endpoint, '/health');
+  forceKillChild(first.child);
+  await new Promise(resolve => first.child.once('exit', resolve));
+
+  second = await startPassiveBroker(root, { profile: join(root, 'replacement-profile') });
+  const after = await waitForValue(
+    async () => {
+      try { return await daemonRequest(paths.endpoint, '/health'); } catch { return undefined; }
+    },
+    health => health?.brokerProcessIdentity !== undefined &&
+      health.brokerProcessIdentity !== before.brokerProcessIdentity,
+  );
+  const owner = JSON.parse(await readFile(paths.daemonOwnerLockFile, 'utf8'));
+  const locator = JSON.parse(await readFile(paths.locatorFile, 'utf8'));
+
+  assert.equal(after.ok, true);
+  assert.equal(owner.pid, second.child.pid);
+  assert.equal(locator.pid, second.child.pid);
+  assert.equal(second.stderr(), '');
+});
+
 test('compatible CLI installations reuse one Broker while shutdown ownership stays exact', async t => {
   const root = await mkdtemp(testTempPrefix('bp-compatible-install-process-'));
   const socketPath = testBrokerPaths(root).endpoint;

@@ -12,6 +12,7 @@ export interface BrowserPilotPaths {
   locatorFile: string;
   pidFile: string;
   startupLockFile: string;
+  daemonOwnerLockFile: string;
   versionHistoryFile: string;
   artifactDir: string;
   downloadDir: string;
@@ -54,6 +55,7 @@ export function resolveBrowserPilotPaths(options: BrowserPilotPathOptions = {}):
       locatorFile: win32.join(stateDir, 'broker-locator.json'),
       pidFile: win32.join(stateDir, 'daemon.pid'),
       startupLockFile: win32.join(stateDir, 'startup.lock'),
+      daemonOwnerLockFile: win32.join(stateDir, 'daemon-owner.lock'),
       versionHistoryFile: win32.join(stateDir, 'broker-versions.json'),
       artifactDir: win32.join(stateDir, 'artifacts'),
       downloadDir: win32.join(stateDir, 'downloads'),
@@ -85,6 +87,7 @@ export function resolveBrowserPilotPaths(options: BrowserPilotPathOptions = {}):
     locatorFile: join(stateDir, 'broker-locator.json'),
     pidFile: join(stateDir, 'daemon.pid'),
     startupLockFile: join(stateDir, 'startup.lock'),
+    daemonOwnerLockFile: join(stateDir, 'daemon-owner.lock'),
     versionHistoryFile: join(stateDir, 'broker-versions.json'),
     artifactDir: join(stateDir, 'artifacts'),
     downloadDir: join(stateDir, 'downloads'),
@@ -99,5 +102,6 @@ export const BROKER_TRANSPORT = BROWSER_PILOT_PATHS.transport;
 export const LOCATOR_FILE = BROWSER_PILOT_PATHS.locatorFile;
 export const PID_FILE = BROWSER_PILOT_PATHS.pidFile;
 export const STARTUP_LOCK_FILE = BROWSER_PILOT_PATHS.startupLockFile;
+export const DAEMON_OWNER_LOCK_FILE = BROWSER_PILOT_PATHS.daemonOwnerLockFile;
 export const ARTIFACT_DIR = BROWSER_PILOT_PATHS.artifactDir;
 export const DOWNLOAD_DIR = BROWSER_PILOT_PATHS.downloadDir;

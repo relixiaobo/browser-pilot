@@ -1,12 +1,11 @@
 import http from 'node:http';
-import { unlinkSync, chmodSync } from 'node:fs';
+import { chmodSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
-import { BROKER_TRANSPORT, STATE_DIR, SOCKET_PATH } from './paths.js';
+import { BROKER_TRANSPORT, SOCKET_PATH } from './paths.js';
 import {
-  ensureBrokerDirectoriesSync,
+  acquireDaemonOwnerLockSync,
   createExecutableMetadataSync,
-  removeBrokerLocatorSync,
+  DaemonOwnerError,
   updateBrokerVersionHistorySync,
   writeBrokerLocatorSync,
   writeBrokerStartingSync,
@@ -46,20 +45,6 @@ const PROTOCOL_RANGE = {
 const initialWsUrl = process.argv[2] || undefined;
 const browserProduct = process.argv[3] || '';
 const browserProfile = process.argv[4] || '';
-ensureBrokerDirectoriesSync();
-for (const legacyFile of ['state.json', 'refs.json']) {
-  try { unlinkSync(join(STATE_DIR, legacyFile)); } catch { /* absent or already removed */ }
-}
-if (BROKER_TRANSPORT === 'unix_socket') {
-  try { unlinkSync(SOCKET_PATH); } catch { /* absent */ }
-}
-
-function cleanup(brokerProcessIdentity: string) {
-  if (BROKER_TRANSPORT === 'unix_socket') {
-    try { unlinkSync(SOCKET_PATH); } catch { /* absent */ }
-  }
-  removeBrokerLocatorSync(brokerProcessIdentity);
-}
 
 function readBody(req: http.IncomingMessage, maxBytes = 5 * 1024 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -174,6 +159,10 @@ async function syncFetchAll(cdp: Transport, currentSessionId?: string) {
 async function main() {
   const startedAt = Date.now();
   const brokerProcessIdentity = `${process.pid}:${startedAt}`;
+  const daemonOwner = acquireDaemonOwnerLockSync();
+  const cleanup = (): void => { daemonOwner.cleanup(brokerProcessIdentity); };
+  process.once('exit', cleanup);
+  daemonOwner.clearStaleBrokerState();
   const cdp = new ManagedTargetJanitorClient({
     onLog: message => process.stderr.write(`Managed browser connection: ${message}\n`),
   });
@@ -182,13 +171,13 @@ async function main() {
     if (terminating) return;
     terminating = true;
     await cdp.close().catch(() => {});
-    cleanup(brokerProcessIdentity);
+    cleanup();
     process.exit(0);
   };
   const requestTermination = (): void => { void terminate(); };
-  process.once('exit', () => cleanup(brokerProcessIdentity));
   process.on('SIGTERM', requestTermination);
   process.on('SIGINT', requestTermination);
+  daemonOwner.assertOwnership();
   writeBrokerStartingSync({ pid: process.pid, startedAt, brokerProcessIdentity });
   if (initialWsUrl) await cdp.connect(initialWsUrl);
   let activeSessionId: string | undefined;
@@ -838,6 +827,7 @@ async function main() {
   });
 
   server.listen(SOCKET_PATH, () => {
+    daemonOwner.assertOwnership();
     if (BROKER_TRANSPORT === 'unix_socket') {
       try { chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
     }
@@ -869,9 +859,14 @@ async function main() {
     await Promise.all(additionalControllers.map(controller => controller.cdp.close()));
     await cdp.close();
     await artifactStore.clear().catch(() => {});
-    cleanup(brokerProcessIdentity);
+    cleanup();
     process.exit(0);
   };
 }
 
-main().catch((err) => { process.stderr.write(`Daemon error: ${err.message}\n`); process.exit(1); });
+main().catch((error: unknown) => {
+  const err = error instanceof Error ? error : new Error(String(error));
+  const code = err instanceof DaemonOwnerError ? ` [${err.code}]` : '';
+  process.stderr.write(`Daemon error${code}: ${err.message}\n`);
+  process.exit(1);
+});

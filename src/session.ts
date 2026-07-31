@@ -6,7 +6,6 @@ import {
   readBrokerLocatorSync,
   readBrokerPidSync,
   readBrokerStartingSync,
-  removeStaleBrokerFilesSync,
 } from './broker-locator.js';
 import {
   discoverBrowserCandidates,
@@ -140,8 +139,6 @@ export async function connectDaemon(browserFilter?: string): Promise<DaemonClien
         },
       });
     }
-    removeStaleBrokerFilesSync();
-
     const candidates = await discoverBrowserCandidates();
     const filter = browserFilter?.toLowerCase();
     const matches = candidates.filter(({ candidate }) => (

@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, chmod, lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { testTempPrefix } from './helpers/platform.mjs';
 import {
   acquireBrokerStartupLock,
+  acquireDaemonOwnerLockSync,
   createExecutableMetadataSync,
   ensureBrokerDirectoriesSync,
   readBrokerLocatorSync,
+  readDaemonOwnerSync,
+  readProcessStartIdentitySync,
   readBrokerVersionHistorySync,
   removeBrokerLocatorSync,
   resolveBrowserPilotPaths,
@@ -35,6 +38,7 @@ test('platform path resolution uses a private short Unix endpoint and a per-user
     assert.equal(short.stateDir, '/Users/alice/.browser-pilot');
     assert.equal(short.endpoint, '/Users/alice/.browser-pilot/daemon.sock');
     assert.equal(short.transport, 'unix_socket');
+    assert.equal(short.daemonOwnerLockFile, '/Users/alice/.browser-pilot/daemon-owner.lock');
 
     const longHome = `/Users/${'a'.repeat(100)}`;
     const long = resolveBrowserPilotPaths({
@@ -59,6 +63,10 @@ test('platform path resolution uses a private short Unix endpoint and a per-user
   assert.equal(windows.stateDir, 'C:\\Users\\Alice\\AppData\\Local\\Browser Pilot');
   assert.match(windows.endpoint, /^\\\\\.\\pipe\\browser-pilot-[a-f0-9]{16}$/);
   assert.equal(windows.transport, 'windows_pipe');
+  assert.equal(
+    windows.daemonOwnerLockFile,
+    'C:\\Users\\Alice\\AppData\\Local\\Browser Pilot\\daemon-owner.lock',
+  );
 
   const isolatedWindows = resolveBrowserPilotPaths({
     platform: 'win32', homeDir: 'C:\\Users\\Alice', tempDir: 'C:\\Temp',
@@ -169,4 +177,127 @@ test('startup lock serializes contenders and safely reclaims a dead owner', asyn
   });
   recovered.release();
   abandoned.release();
+});
+
+test('daemon owner lock binds the live process start identity', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-daemon-owner-'));
+  const paths = testPaths(root);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const processStartIdentity = readProcessStartIdentitySync(process.pid);
+  assert.equal(typeof processStartIdentity, 'string');
+  const owner = acquireDaemonOwnerLockSync({ paths });
+  assert.equal(owner.record.pid, process.pid);
+  assert.equal(owner.record.processStartIdentity, processStartIdentity);
+  assert.deepEqual(readDaemonOwnerSync(paths), owner.record);
+  assert.throws(
+    () => acquireDaemonOwnerLockSync({ paths }),
+    error => error?.code === 'daemon_already_running' && /already owns/.test(error.message),
+  );
+  owner.release();
+  await assert.rejects(access(paths.daemonOwnerLockFile));
+});
+
+test('daemon owner reclaims a recycled live pid without signaling it', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-recycled-daemon-owner-'));
+  const paths = testPaths(root);
+  const foreignPid = 41_001;
+  const replacementPid = 41_002;
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const abandoned = acquireDaemonOwnerLockSync({
+    paths,
+    pid: foreignPid,
+    processStartIdentity: () => 'test:start:original',
+  });
+  const livenessChecks = [];
+  const replacement = acquireDaemonOwnerLockSync({
+    paths,
+    pid: replacementPid,
+    processAlive: pid => {
+      livenessChecks.push(pid);
+      return pid === foreignPid;
+    },
+    processStartIdentity: pid => (
+      pid === replacementPid ? 'test:start:replacement' : 'test:start:recycled'
+    ),
+  });
+
+  assert.deepEqual(livenessChecks, [foreignPid]);
+  assert.equal(replacement.record.pid, replacementPid);
+  assert.equal(readDaemonOwnerSync(paths).token, replacement.record.token);
+  abandoned.release();
+  assert.equal(readDaemonOwnerSync(paths).token, replacement.record.token);
+  replacement.release();
+});
+
+test('daemon owner fails closed when a live owner start identity is unreadable', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-unreadable-daemon-owner-'));
+  const paths = testPaths(root);
+  const ownerPid = 42_001;
+  const contenderPid = 42_002;
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const owner = acquireDaemonOwnerLockSync({
+    paths,
+    pid: ownerPid,
+    processStartIdentity: () => 'test:start:owner',
+  });
+  await writeFile(paths.pidFile, 'owner state\n', { mode: 0o600 });
+  assert.throws(
+    () => acquireDaemonOwnerLockSync({
+      paths,
+      pid: contenderPid,
+      processAlive: pid => pid === ownerPid,
+      processStartIdentity: pid => (
+        pid === contenderPid ? 'test:start:contender' : undefined
+      ),
+    }),
+    error => error?.code === 'daemon_owner_unverifiable' &&
+      /Inspect or stop the recorded process/.test(error.message) &&
+      /BROWSER_PILOT_HOME/.test(error.message),
+  );
+  assert.equal(readDaemonOwnerSync(paths).token, owner.record.token);
+  assert.equal(await readFile(paths.pidFile, 'utf8'), 'owner state\n');
+  owner.release();
+});
+
+test('late stale daemon cleanup preserves replacement state and endpoint', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-late-daemon-cleanup-'));
+  const paths = testPaths(root);
+  const stale = acquireDaemonOwnerLockSync({
+    paths,
+    pid: 43_001,
+    processStartIdentity: () => 'test:start:stale',
+  });
+  const replacement = acquireDaemonOwnerLockSync({
+    paths,
+    pid: 43_002,
+    processAlive: () => false,
+    processStartIdentity: () => 'test:start:replacement',
+  });
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  replacement.clearStaleBrokerState();
+  const locator = {
+    schemaVersion: 1,
+    pid: replacement.record.pid,
+    endpoint: paths.endpoint,
+    transport: paths.transport,
+    startedAt: 1_234,
+    brokerProcessIdentity: 'broker:replacement',
+  };
+  writeBrokerLocatorSync(locator, paths);
+  if (paths.transport === 'unix_socket') {
+    await writeFile(paths.endpoint, 'replacement endpoint\n', { mode: 0o600 });
+  }
+
+  stale.cleanup('broker:stale');
+
+  assert.equal(readDaemonOwnerSync(paths).token, replacement.record.token);
+  assert.deepEqual(readBrokerLocatorSync(paths), locator);
+  if (paths.transport === 'unix_socket') {
+    assert.equal(await readFile(paths.endpoint, 'utf8'), 'replacement endpoint\n');
+  }
+  replacement.cleanup(locator.brokerProcessIdentity);
 });

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   closeSync,
@@ -76,6 +77,23 @@ interface StartupLockRecord {
   token: string;
 }
 
+export interface DaemonOwnerRecord {
+  schemaVersion: 1;
+  pid: number;
+  processStartIdentity: string;
+  createdAt: number;
+  token: string;
+}
+
+export interface DaemonOwnerLock {
+  readonly record: DaemonOwnerRecord;
+  ownsLock(): boolean;
+  assertOwnership(): void;
+  clearStaleBrokerState(): void;
+  cleanup(brokerProcessIdentity: string): void;
+  release(): void;
+}
+
 export interface BrokerStartupLock {
   release(): void;
 }
@@ -96,6 +114,24 @@ export interface AcquireBrokerStartupLockOptions {
   now?: () => number;
   pid?: number;
   processAlive?: (pid: number) => boolean;
+}
+
+export interface AcquireDaemonOwnerLockOptions {
+  paths?: BrowserPilotPaths;
+  now?: () => number;
+  pid?: number;
+  processAlive?: (pid: number) => boolean;
+  processStartIdentity?: (pid: number) => string | undefined;
+}
+
+export class DaemonOwnerError extends Error {
+  constructor(
+    readonly code: 'daemon_already_running' | 'daemon_owner_unverifiable',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DaemonOwnerError';
+  }
 }
 
 function currentUid(): number | undefined {
@@ -374,6 +410,219 @@ export function processIsAlive(pid: number): boolean {
   }
 }
 
+function normalizeProcessStartIdentity(platform: NodeJS.Platform, value: string): string | undefined {
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  return normalized ? `${platform}:${normalized}` : undefined;
+}
+
+export function readProcessStartIdentitySync(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!isSafePid(pid)) return undefined;
+  try {
+    if (platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const commandEnd = stat.lastIndexOf(')');
+      if (commandEnd < 0) return undefined;
+      const fieldsAfterCommand = stat.slice(commandEnd + 1).trim().split(/\s+/);
+      const startTicks = fieldsAfterCommand[19];
+      return /^\d+$/.test(startTicks ?? '') ? `linux:${startTicks}` : undefined;
+    }
+
+    if (platform === 'win32') {
+      const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+      const executable = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const command = [
+        `$process = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"`,
+        "if ($null -ne $process) { $process.CreationDate.ToUniversalTime().ToString('O') }",
+      ].join('; ');
+      const result = spawnSync(executable, [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command,
+      ], { encoding: 'utf8', windowsHide: true });
+      if (result.status !== 0) return undefined;
+      return normalizeProcessStartIdentity(platform, result.stdout);
+    }
+
+    const result = spawnSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      env: { ...process.env, LC_ALL: 'C' },
+      windowsHide: true,
+    });
+    if (result.status !== 0) return undefined;
+    return normalizeProcessStartIdentity(platform, result.stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+function validDaemonOwner(value: unknown): value is DaemonOwnerRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.schemaVersion === 1 &&
+    isSafePid(record.pid) &&
+    typeof record.processStartIdentity === 'string' &&
+    record.processStartIdentity.length > 0 && record.processStartIdentity.length <= 256 &&
+    isSafeTimestamp(record.createdAt) &&
+    typeof record.token === 'string' && record.token.length >= 8 && record.token.length <= 128;
+}
+
+export function readDaemonOwnerSync(
+  paths: BrowserPilotPaths = BROWSER_PILOT_PATHS,
+): DaemonOwnerRecord | undefined {
+  if (!existsSync(paths.daemonOwnerLockFile)) return undefined;
+  try {
+    const value = parseJsonFile(paths.daemonOwnerLockFile);
+    return validDaemonOwner(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameDaemonOwner(left: DaemonOwnerRecord, right: DaemonOwnerRecord): boolean {
+  return left.pid === right.pid &&
+    left.processStartIdentity === right.processStartIdentity &&
+    left.token === right.token;
+}
+
+function removeDaemonOwnerLock(
+  paths: BrowserPilotPaths,
+  expected: DaemonOwnerRecord,
+): boolean {
+  const current = readDaemonOwnerSync(paths);
+  if (!current || !sameDaemonOwner(current, expected)) return false;
+  try {
+    unlinkSync(paths.daemonOwnerLockFile);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeBrokerStateFilesSync(paths: BrowserPilotPaths): void {
+  for (const path of [
+    paths.locatorFile,
+    paths.pidFile,
+    join(paths.stateDir, 'state.json'),
+    join(paths.stateDir, 'refs.json'),
+  ]) {
+    try { unlinkSync(path); } catch { /* absent */ }
+  }
+  if (paths.transport === 'unix_socket') {
+    try { unlinkSync(paths.endpoint); } catch { /* absent */ }
+  }
+}
+
+function createDaemonOwnerLock(
+  paths: BrowserPilotPaths,
+  record: DaemonOwnerRecord,
+): DaemonOwnerLock | undefined {
+  let descriptor: number;
+  try {
+    descriptor = openSync(paths.daemonOwnerLockFile, 'wx', PRIVATE_FILE_MODE);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined;
+    throw error;
+  }
+  try {
+    writeSync(descriptor, `${JSON.stringify(record)}\n`);
+  } finally {
+    closeSync(descriptor);
+  }
+
+  let released = false;
+  const ownsLock = (): boolean => {
+    if (released) return false;
+    const current = readDaemonOwnerSync(paths);
+    return current !== undefined && sameDaemonOwner(current, record);
+  };
+  const assertOwnership = (): void => {
+    if (!ownsLock()) {
+      throw new Error('Browser Pilot daemon no longer owns its lifetime lock');
+    }
+  };
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    removeDaemonOwnerLock(paths, record);
+  };
+  return {
+    record,
+    ownsLock,
+    assertOwnership,
+    clearStaleBrokerState() {
+      assertOwnership();
+      removeBrokerStateFilesSync(paths);
+    },
+    cleanup(brokerProcessIdentity: string) {
+      if (!ownsLock()) return;
+      if (paths.transport === 'unix_socket') {
+        try { unlinkSync(paths.endpoint); } catch { /* absent */ }
+      }
+      removeBrokerLocatorSync(brokerProcessIdentity, paths);
+      release();
+    },
+    release,
+  };
+}
+
+function unverifiableDaemonOwner(message: string): DaemonOwnerError {
+  return new DaemonOwnerError(
+    'daemon_owner_unverifiable',
+    `${message} Inspect or stop the recorded process, or set BROWSER_PILOT_HOME to a separate directory before retrying.`,
+  );
+}
+
+export function acquireDaemonOwnerLockSync(
+  options: AcquireDaemonOwnerLockOptions = {},
+): DaemonOwnerLock {
+  const paths = options.paths ?? BROWSER_PILOT_PATHS;
+  const now = options.now ?? Date.now;
+  const pid = options.pid ?? process.pid;
+  const alive = options.processAlive ?? processIsAlive;
+  const processStartIdentity = options.processStartIdentity ?? readProcessStartIdentitySync;
+  ensureBrokerDirectoriesSync(paths);
+
+  const currentStartIdentity = processStartIdentity(pid);
+  if (!currentStartIdentity) {
+    throw unverifiableDaemonOwner(`Cannot read the start identity of Browser Pilot daemon pid ${pid}.`);
+  }
+
+  for (;;) {
+    const record: DaemonOwnerRecord = {
+      schemaVersion: 1,
+      pid,
+      processStartIdentity: currentStartIdentity,
+      createdAt: now(),
+      token: randomUUID(),
+    };
+    const lock = createDaemonOwnerLock(paths, record);
+    if (lock) return lock;
+
+    const owner = readDaemonOwnerSync(paths);
+    if (!owner) {
+      throw unverifiableDaemonOwner(
+        `The Browser Pilot daemon owner lock at ${paths.daemonOwnerLockFile} is invalid or inaccessible.`,
+      );
+    }
+    if (alive(owner.pid)) {
+      const actualStartIdentity = processStartIdentity(owner.pid);
+      if (!actualStartIdentity) {
+        throw unverifiableDaemonOwner(
+          `Cannot verify the start identity of the live Browser Pilot daemon owner pid ${owner.pid}.`,
+        );
+      }
+      if (actualStartIdentity === owner.processStartIdentity) {
+        throw new DaemonOwnerError(
+          'daemon_already_running',
+          `Another Browser Pilot daemon already owns this home (pid ${owner.pid}).`,
+        );
+      }
+    }
+    if (!removeDaemonOwnerLock(paths, owner)) continue;
+  }
+}
+
 function readStartupLock(path: string): StartupLockRecord | undefined {
   if (!existsSync(path)) return undefined;
   try {
@@ -470,15 +719,4 @@ export async function acquireBrokerStartupLock(
     await delay(pollMs);
   }
   throw new Error('Timed out waiting for another Browser Pilot process to finish Broker startup');
-}
-
-export function removeStaleBrokerFilesSync(paths: BrowserPilotPaths = BROWSER_PILOT_PATHS): void {
-  const pid = readBrokerPidSync(paths);
-  if (pid && processIsAlive(pid)) return;
-  for (const path of [paths.locatorFile, paths.pidFile]) {
-    try { unlinkSync(path); } catch { /* absent */ }
-  }
-  if (paths.transport === 'unix_socket') {
-    try { unlinkSync(paths.endpoint); } catch { /* absent */ }
-  }
 }
