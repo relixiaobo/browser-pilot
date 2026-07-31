@@ -31,7 +31,8 @@ bp --human tabs
   recovery. The `BROWSER_PILOT_REQUEST_ID` environment variable is equivalent.
 - `--timeout <ms>` sets the command deadline. It does not make an interrupted
   mutation safe to repeat.
-- `--human` changes formatting only.
+- `--human` changes formatting only. A positional value equal to `--human`
+  remains command data.
 
 ## Connection and State
 
@@ -141,7 +142,8 @@ state. Inspect autocomplete suggestions after typing before choosing one.
 
 Send trusted key events to the focused control. Use for canvas-style editors or
 controls not represented by a ref. Options are `--click <selector>`, `--clear`,
-`--submit`, `--delay <ms>`, and `--limit`.
+`--submit`, `--delay <ms>`, and `--limit`. JSON uses the standard fresh page
+state shape, including page geometry, hints, and Profile context when present.
 
 ### `bp press <key> [--limit <n>]`
 
@@ -212,14 +214,14 @@ Avoid these commands unless the task requires the sensitive data or behavior.
 
 - `bp net [--limit <n>] [--url <pattern>] [--method <method>]`
   `[--status <code-pattern>] [--type <types>] [--after <id>]` lists requests.
-- `bp net show <id> [--save <file>]` returns details and optionally saves the
-  response body.
+- `bp net show <id> [--save <file>]` returns details under the same numeric
+  request `id` shown by `bp net`, and optionally saves the response body.
 - `bp net block <pattern>` blocks matching requests.
 - `bp net mock <pattern> [--body <text>|--file <path>] [--status <code>]`
   installs a mock response.
 - `bp net headers <pattern> <header...>` adds or replaces request headers.
 - `bp net rules` lists current rules.
-- `bp net remove <id>` or `bp net remove --all` removes rules.
+- `bp net remove <uuid|rule:uuid>` or `bp net remove --all` removes rules.
 - `bp net clear` clears the request journal.
 
 Network rules belong only to the current Agent key and are cleaned up when its

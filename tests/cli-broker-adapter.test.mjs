@@ -483,7 +483,11 @@ async function startFakeDaemon(root, options = {}) {
         return {
           workspaceId: 'workspace:cli',
           leaseId: 'lease:cli',
-          ruleId: `rule:${args.type}-11111111-1111-4111-8111-111111111111`,
+          ruleId: {
+            block: 'rule:11111111-1111-4111-8111-111111111111',
+            mock: 'rule:22222222-2222-4222-8222-222222222222',
+            headers: 'rule:33333333-3333-4333-8333-333333333333',
+          }[args.type],
         };
       case 'browser.network.rules.list':
         return {
@@ -491,13 +495,13 @@ async function startFakeDaemon(root, options = {}) {
           leaseId: 'lease:cli',
           rules: [
             {
-              ruleId: 'rule:block-11111111-1111-4111-8111-111111111111',
+              ruleId: 'rule:11111111-1111-4111-8111-111111111111',
               type: 'block',
               pattern: '*analytics*',
               enabled: true,
             },
             {
-              ruleId: 'rule:mock-11111111-1111-4111-8111-111111111111',
+              ruleId: 'rule:22222222-2222-4222-8222-222222222222',
               type: 'mock',
               pattern: '*api/data*',
               status: 201,
@@ -505,7 +509,7 @@ async function startFakeDaemon(root, options = {}) {
               enabled: true,
             },
             {
-              ruleId: 'rule:headers-11111111-1111-4111-8111-111111111111',
+              ruleId: 'rule:33333333-3333-4333-8333-333333333333',
               type: 'headers',
               pattern: '*api*',
               headers: [{ name: 'X-Test', value: 'contract' }],
@@ -1172,7 +1176,7 @@ test('CLI JSON output contract covers every command', async t => {
     'keyboard', 'keyboard text', '--clear', '--delay', '5', '--click', '.editor', '--limit', '7',
   ]);
   outputs.press = await runCli(root, ['press', 'Control+a', '--limit', '8']);
-  outputs.eval = await runCli(root, ['eval', 'document.title']);
+  outputs.eval = await runCli(root, ['eval', '--', '--human']);
   outputs.read = await runCli(root, ['read', 'main', '--limit', '200']);
   outputs.search = await runCli(root, ['search', 'Submit', '--whole-word']);
   outputs.find = await runCli(root, ['find', 'button', '--attributes', 'id,data-testid']);
@@ -1205,7 +1209,10 @@ test('CLI JSON output contract covers every command', async t => {
   ]);
   outputs['net rules'] = await runCli(root, ['net', 'rules']);
   outputs['net remove'] = await runCli(root, [
-    'net', 'remove', 'rule:block-11111111-1111-4111-8111-111111111111',
+    'net', 'remove', '11111111-1111-4111-8111-111111111111',
+  ]);
+  outputs['net remove full'] = await runCli(root, [
+    'net', 'remove', 'rule:11111111-1111-4111-8111-111111111111',
   ]);
   outputs['net clear'] = await runCli(root, ['net', 'clear']);
   outputs.disconnect = await runCli(root, ['disconnect']);
@@ -1282,6 +1289,19 @@ test('CLI JSON output contract covers every command', async t => {
     dispatchedAt: 11,
     completedAt: 12,
   };
+
+  const evalCall = daemon.calls.find(call => call.body?.params?.name === 'browser.eval');
+  assert.ok(evalCall);
+  assert.equal(evalCall.body.params.arguments.expression, '--human');
+  assert.deepEqual(
+    daemon.calls
+      .filter(call => call.body?.params?.name === 'browser.network.rules.remove')
+      .map(call => call.body.params.arguments),
+    [
+      { ruleId: 'rule:11111111-1111-4111-8111-111111111111' },
+      { ruleId: 'rule:11111111-1111-4111-8111-111111111111' },
+    ],
+  );
 
   assert.deepEqual(outputs, {
     status: {
@@ -1381,12 +1401,27 @@ test('CLI JSON output contract covers every command', async t => {
     type: observationOutput,
     keyboard: {
       ok: true,
-      typed: 'keyboard text',
       title: 'Example Form',
       url: 'https://example.test/form',
+      page: {
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1200,
+        scrollX: 0,
+        scrollY: 0,
+        pixelsAbove: 0,
+        pixelsBelow: 600,
+        pixelsLeft: 0,
+        pixelsRight: 0,
+        scrollPercentX: 0,
+        scrollPercentY: 0,
+      },
       elements: [{ ref: 1, role: 'button', name: 'Submit' }],
       truncated: false,
       truncationReasons: [],
+      hints: [{ code: 'focused', message: 'Keyboard target retained focus' }],
+      profileContextId: 'profile-context:work',
     },
     press: observationOutput,
     eval: {
@@ -1601,7 +1636,6 @@ test('CLI JSON output contract covers every command', async t => {
       ok: true,
       id: 4,
       requestId: 'network-request:opaque',
-      sequence: 4,
       method: 'GET',
       url: 'https://example.test/api',
       type: 'Fetch',
@@ -1619,7 +1653,7 @@ test('CLI JSON output contract covers every command', async t => {
     'net block': {
       ok: true,
       rule: {
-        id: 'rule:block-11111111-1111-4111-8111-111111111111',
+        id: 'rule:11111111-1111-4111-8111-111111111111',
         type: 'block',
         pattern: '*analytics*',
       },
@@ -1627,7 +1661,7 @@ test('CLI JSON output contract covers every command', async t => {
     'net mock': {
       ok: true,
       rule: {
-        id: 'rule:mock-11111111-1111-4111-8111-111111111111',
+        id: 'rule:22222222-2222-4222-8222-222222222222',
         type: 'mock',
         pattern: '*api/data*',
         status: 200,
@@ -1636,7 +1670,7 @@ test('CLI JSON output contract covers every command', async t => {
     'net headers': {
       ok: true,
       rule: {
-        id: 'rule:headers-11111111-1111-4111-8111-111111111111',
+        id: 'rule:33333333-3333-4333-8333-333333333333',
         type: 'headers',
         pattern: '*api*',
         headers: [{ name: 'X-Test', value: 'contract' }],
@@ -1646,13 +1680,13 @@ test('CLI JSON output contract covers every command', async t => {
       ok: true,
       rules: [
         {
-          id: 'rule:block-11111111-1111-4111-8111-111111111111',
+          id: 'rule:11111111-1111-4111-8111-111111111111',
           type: 'block',
           pattern: '*analytics*',
           enabled: true,
         },
         {
-          id: 'rule:mock-11111111-1111-4111-8111-111111111111',
+          id: 'rule:22222222-2222-4222-8222-222222222222',
           type: 'mock',
           pattern: '*api/data*',
           status: 201,
@@ -1660,7 +1694,7 @@ test('CLI JSON output contract covers every command', async t => {
           enabled: true,
         },
         {
-          id: 'rule:headers-11111111-1111-4111-8111-111111111111',
+          id: 'rule:33333333-3333-4333-8333-333333333333',
           type: 'headers',
           pattern: '*api*',
           headers: [{ name: 'X-Test', value: 'contract' }],
@@ -1669,6 +1703,7 @@ test('CLI JSON output contract covers every command', async t => {
       ],
     },
     'net remove': { ok: true },
+    'net remove full': { ok: true },
     'net clear': { ok: true },
     disconnect: { ok: true },
   });

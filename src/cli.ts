@@ -106,7 +106,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 // ── Output ──────────────────────────────────────────
 
 function useJson(): boolean {
-  if (process.argv.slice(2).includes('--human') || program.opts().human) return false;
+  if (program.opts().human) return false;
   return !process.stdout.isTTY;  // JSON by default for pipes/LLMs, human for TTY
 }
 
@@ -1073,19 +1073,7 @@ Examples:
         ...(opts.click ? { focusSelector: opts.click } : {}),
         observationLimit: limit,
       }, target.targetId);
-      if (useJson()) {
-        console.log(JSON.stringify({
-          ok: true,
-          typed: text,
-          title: String(result.title ?? ''),
-          url: String(result.url ?? ''),
-          elements: observationElements(result),
-          truncated: result.truncated === true,
-          truncationReasons: Array.isArray(result.truncationReasons) ? result.truncationReasons : [],
-        }));
-      } else {
-        emitObservation(result);
-      }
+      emitObservation(result);
     });
   }));
 
@@ -1838,10 +1826,11 @@ netCmd.command('show <id>')
       return;
     }
 
-    const detail: Record<string, any> = { id: request.sequence, ...request, responseBody };
+    const detail: Record<string, any> = { id, ...request, responseBody };
+    delete detail.sequence;
 
     if (useJson()) {
-      console.log(JSON.stringify({ ok: true, ...detail, responseBody }));
+      console.log(JSON.stringify({ ok: true, ...detail }));
     } else {
       console.log(`#${detail.id} ${serializeStructuralText(detail.method)} ${serializeStructuralText(detail.url, 2_048)}`);
       console.log(`Status: ${detail.status ?? 'pending'} ${serializeStructuralText(detail.statusText)}`);
@@ -1930,7 +1919,10 @@ netCmd.command('remove [ruleId]')
       emit({ ok: true }, 'All rules removed');
     }
     else if (ruleId) {
-      await client.callTool('browser.network.rules.remove', { ruleId });
+      const normalizedRuleId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(ruleId)
+        ? `rule:${ruleId}`
+        : ruleId;
+      await client.callTool('browser.network.rules.remove', { ruleId: normalizedRuleId });
       emit({ ok: true }, `Rule #${ruleId} removed`);
     }
     else throw invalidArgument('Specify a rule ID or use --all', 'ruleId');
