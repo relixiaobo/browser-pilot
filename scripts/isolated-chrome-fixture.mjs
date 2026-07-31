@@ -200,7 +200,7 @@ export async function startIsolatedChromeFixture(prefix = 'browser-pilot-test-')
     await startBrowser();
   } catch (error) {
     await terminateChild(chrome);
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     throw error;
   }
 
@@ -217,7 +217,7 @@ export async function startIsolatedChromeFixture(prefix = 'browser-pilot-test-')
       stopped = true;
       await terminateTestBroker(brokerHome);
       await stopBrowser();
-      await rm(root, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }
