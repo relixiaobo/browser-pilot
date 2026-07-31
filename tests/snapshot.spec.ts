@@ -1,7 +1,7 @@
 // Snapshot compatibility tests
 // Tests bp snapshot's ability to discover interactive elements in various DOM structures.
 import { test, expect } from '@playwright/test';
-import { open, snapshot, evaluate } from './bp.js';
+import { open } from './bp.js';
 
 const BASE = 'http://127.0.0.1:18274';
 
@@ -30,7 +30,6 @@ test.describe('snapshot standard', () => {
   test('finds number input as spinbutton', async () => {
     const snap = open(`${BASE}/input/number`);
     expect(snap.ok).toBe(true);
-    const roles = snap.elements?.map(e => e.role) || [];
     // number input typically has role=spinbutton
     console.log('Number input roles:', JSON.stringify(snap.elements?.map(e => `${e.role}:"${e.name}"`)));
     expect(snap.elements?.length).toBeGreaterThan(0);

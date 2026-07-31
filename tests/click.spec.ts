@@ -1,7 +1,7 @@
 // Click compatibility tests — adapted from Playwright's page-click.spec.ts
 // Tests bp click against scrollable elements, shadow DOM, overlays, fixed position, etc.
 import { test, expect } from '@playwright/test';
-import { open, click, evaluate, snapshot, findRef, findRefByRole } from './bp.js';
+import { open, click, evaluate, snapshot, findRef } from './bp.js';
 
 const BASE = 'http://127.0.0.1:18274';
 

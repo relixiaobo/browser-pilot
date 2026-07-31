@@ -31,8 +31,8 @@ bp --version
 Use any version inside `browserPilotCli.supportedVersionRange`. If `bp` is
 absent, install `browser-pilot-cli@<browserPilotCli.testedVersion>` or use the
 product-bundled command already placed on the Agent's `PATH`. Do not silently
-use an incompatible executable. Native macOS releases require Apple Silicon;
-Intel Mac is unsupported.
+use an incompatible executable. The npm distribution requires Node.js 22 or
+newer. Native macOS releases require Apple Silicon; Intel Mac is unsupported.
 
 ## Connect Deliberately
 

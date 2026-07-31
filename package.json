@@ -1,6 +1,6 @@
 {
   "name": "browser-pilot-cli",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "CLI tool to control your browser via Chrome DevTools Protocol",
   "repository": "https://github.com/relixiaobo/browser-pilot",
   "type": "module",
@@ -21,6 +21,7 @@
     "verify:standalone": "node scripts/verify-standalone.mjs",
     "dev": "tsup --watch",
     "start": "node dist/cli.js",
+    "lint": "eslint src scripts tests *.ts",
     "test": "tsup && node scripts/run-node-tests.mjs unit && node scripts/run-node-tests.mjs browser && npx playwright test --project core --project compat --project network",
     "test:unit": "tsup && node scripts/run-node-tests.mjs unit",
     "test:browser": "tsup && node scripts/run-node-tests.mjs browser",
@@ -56,10 +57,12 @@
     "@playwright/test": "^1.59.1",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "eslint": "^9.39.5",
     "playwright": "^1.59.1",
     "postject": "^1.0.0-alpha.6",
     "tsup": "^8.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.65.0"
   },
   "keywords": [
     "browser",
@@ -70,7 +73,7 @@
     "devtools"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "license": "MIT"
 }

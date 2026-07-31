@@ -16,8 +16,8 @@ Choose one release form and pin it in the product build:
 
 - Bundle the native executable on Apple Silicon macOS, x64 Linux, or x64
   Windows.
-- Or bundle `browser-pilot-cli` with a pinned Node runtime and invoke its
-  `dist/cli.js` entry.
+- Or bundle `browser-pilot-cli` with a pinned Node.js 22 or newer runtime and
+  invoke its `dist/cli.js` entry.
 
 Verify the release index and checksums before packaging. Intel Mac is not
 supported. Do not download or replace Browser Pilot during an Agent task.

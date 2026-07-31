@@ -318,7 +318,6 @@ test('CLI startup reuses a Broker that is still waiting for browser authorizatio
   const root = await mkdtemp(testTempPrefix('bp-starting-broker-'));
   const paths = testBrokerPaths(root);
   const stateDir = paths.stateDir;
-  const socketPath = paths.endpoint;
   const cdp = await startGatedCdpFixture();
   const broker = await startPassiveBroker(root, { wsUrl: cdp.wsUrl });
   t.after(async () => {

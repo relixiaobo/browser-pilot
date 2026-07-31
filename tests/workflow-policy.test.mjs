@@ -40,10 +40,12 @@ test('CI rejects release manifest drift before validation', () => {
   assert.ok(validate, 'CI must define a validation job');
   const install = validate.indexOf('run: npm ci');
   const versionCheck = validate.indexOf('run: npm run release:check-version');
+  const lint = validate.indexOf('run: npm run lint');
   const unit = validate.indexOf('run: npm run test:unit');
   assert.ok(install >= 0, 'validation must install dependencies');
   assert.ok(versionCheck > install, 'version sync must be checked after install');
-  assert.ok(unit > versionCheck, 'version sync must be checked before unit tests');
+  assert.ok(lint > versionCheck, 'lint must run after the version sync check');
+  assert.ok(unit > lint, 'lint must run before unit tests');
 });
 
 test('CI exercises the portable unit and distribution contracts on Windows', () => {

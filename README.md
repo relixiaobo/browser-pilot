@@ -377,7 +377,7 @@ npm run release:check-version
 ## Requirements
 
 - Chrome 144+, Edge, Brave, or another supported Chromium browser
-- Node.js 18 or newer for the npm distribution
+- Node.js 22 or newer for the npm distribution
 - Remote debugging enabled at `chrome://inspect/#remote-debugging`
 - Apple Silicon macOS, x64 Linux, or x64 Windows for native releases
 

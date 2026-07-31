@@ -5,8 +5,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from '
 import { constants as fsConstants } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawn } from 'node:child_process';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 

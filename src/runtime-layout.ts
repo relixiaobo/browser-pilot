@@ -1,4 +1,3 @@
-import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 declare const __BROWSER_PILOT_SELF_CONTAINED__: boolean;

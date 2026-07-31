@@ -11,6 +11,7 @@ import { testTempPrefix } from './helpers/platform.mjs';
 const execFile = promisify(execFileCallback);
 const root = resolve(import.meta.dirname, '..');
 const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+const packageLock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
 const version = packageJson.version;
 const cliCompatibility = releaseVersionMetadata(version);
 
@@ -94,6 +95,11 @@ test('npm version stages every manifest synchronized by the version hook', () =>
       + 'plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json '
       + 'plugin/skills/browser-pilot/compatibility.json',
   );
+});
+
+test('npm distribution and lockfile require Node.js 22 or newer', () => {
+  assert.equal(packageJson.engines.node, '>=22');
+  assert.equal(packageLock.packages[''].engines.node, packageJson.engines.node);
 });
 
 test('release sync advances every active manifest from the root package version', async t => {

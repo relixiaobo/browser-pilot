@@ -16,7 +16,7 @@ const INTERNAL_NAME_LIMIT = 4_096;
 const INTERNAL_NAME_DEPTH_LIMIT = 128;
 const INTERNAL_NAME_NODE_LIMIT = 10_000;
 
-interface RareData<T> {
+interface RareData {
   index?: unknown;
   value?: unknown;
 }
@@ -108,7 +108,7 @@ function stringAt(strings: readonly unknown[], rawIndex: unknown): string {
 
 function rareMap<T>(raw: unknown, decode: (value: unknown) => T | undefined): Map<number, T> {
   if (!raw || typeof raw !== 'object') return new Map();
-  const data = raw as RareData<T>;
+  const data = raw as RareData;
   const indexes = array(data.index);
   const values = array(data.value);
   const result = new Map<number, T>();
@@ -124,7 +124,7 @@ function rareMap<T>(raw: unknown, decode: (value: unknown) => T | undefined): Ma
 function rareBooleanSet(raw: unknown): Set<number> {
   if (!raw || typeof raw !== 'object') return new Set();
   const result = new Set<number>();
-  for (const index of array((raw as RareData<boolean>).index)) {
+  for (const index of array((raw as RareData).index)) {
     if (Number.isSafeInteger(index) && Number(index) >= 0) result.add(Number(index));
   }
   return result;

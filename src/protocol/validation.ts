@@ -30,7 +30,7 @@ import {
   type WorkspaceGetParams,
   type WorkspaceReleaseParams,
 } from './model.js';
-import { BrowserPilotError, invalidArgument, protocolIncompatible } from './errors.js';
+import { BrowserPilotError, invalidArgument } from './errors.js';
 
 const CLIENT_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{2,127}$/;
 const INSTANCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;

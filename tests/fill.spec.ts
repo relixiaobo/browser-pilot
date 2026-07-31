@@ -33,7 +33,7 @@ test.describe('basic fill', () => {
   });
 
   test('should fill contenteditable', async () => {
-    const snap = open(`${BASE}/input/textarea`);
+    open(`${BASE}/input/textarea`);
     // contenteditable may or may not appear in snapshot depending on ARIA roles
     // Try using eval to type into it
     const result = bpType('[contenteditable]', 'ce value');
@@ -195,7 +195,7 @@ test.describe('special input types', () => {
     // Try to fill date input
     const dateRef = findRef(snap, 'Date');
     if (dateRef) {
-      const result = bpType(dateRef, '2020-03-02');
+      bpType(dateRef, '2020-03-02');
       // Check if the value was set
       const val = evaluate('document.getElementById("date").value');
       // Note: SET_VALUE approach may or may not work for date inputs

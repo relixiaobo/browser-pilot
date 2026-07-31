@@ -5,11 +5,11 @@ import type {
   TransportConnectionEvent,
   TransportConnectionState,
 } from './transport.js';
-import type {
-  ManagedTargetCreateParams,
-  ManagedTargetLifecycle,
+import {
+  ManagedTargetCreationRejectedError,
+  type ManagedTargetCreateParams,
+  type ManagedTargetLifecycle,
 } from './services/managed-target-lifecycle.js';
-import { ManagedTargetCreationRejectedError } from './services/managed-target-lifecycle.js';
 import { internalProcessInvocation, type InternalProcessInvocation } from './runtime-layout.js';
 
 const MAX_PENDING_REQUESTS = 1024;

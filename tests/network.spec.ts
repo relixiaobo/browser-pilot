@@ -1,7 +1,7 @@
 // Network interception tests for bp net
 // Tests block, mock, headers, rules management, request monitoring, and request details.
 import { test, expect } from '@playwright/test';
-import { open, click, evaluate, snapshot, findRef, bp } from './bp.js';
+import { open, click, evaluate, findRef, bp } from './bp.js';
 
 const BASE = 'http://127.0.0.1:18274';
 

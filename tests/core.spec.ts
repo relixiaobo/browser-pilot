@@ -2,7 +2,7 @@
 // Covers lifecycle, navigation, click, type, press, eval, screenshot, pdf,
 // cookies, frames, upload, auth, tabs, dialogs, and output format.
 import { test, expect } from '@playwright/test';
-import { open, click, type as bpType, press, evaluate, snapshot, findRef, findRefByRole, bp, startBp } from './bp.js';
+import { open, click, type as bpType, press, evaluate, snapshot, bp, startBp } from './bp.js';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
