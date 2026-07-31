@@ -678,7 +678,7 @@ program.command('wait')
     const deadlineAt = startedAt + waitTimeoutMs;
     const client = await requireCompatibility();
     const needsTarget = opts.url !== undefined || opts.text !== undefined || opts.selector !== undefined;
-    const target = needsTarget ? await client.ensureTarget() : undefined;
+    const target = needsTarget ? await client.selectedTarget() : undefined;
     const condition = opts.url !== undefined ? 'url'
       : opts.text !== undefined ? 'text'
         : opts.selector !== undefined ? 'selector'

@@ -31,6 +31,8 @@ do not start a second browser connection or repeat the mutation.
 - `browser_not_authorized`: follow structured remediation and wait for the
   user. Inspect status and the original command before considering another
   explicit connection. Do not loop connection attempts.
+- `no_selected_tab`: list tabs and select one, or explicitly open a new tab,
+  before retrying a page-targeted wait. The failed wait did not create a tab.
 - `profile_selection_required`: list profiles and select one or ask the user.
   Do not reconnect.
 - `profile_context_stale` or `profile_context_unavailable`: list profiles again

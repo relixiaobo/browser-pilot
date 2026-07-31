@@ -308,6 +308,21 @@ export class CompatibilityBrokerClient {
     return this.openManagedTarget();
   }
 
+  async selectedTarget(): Promise<CompatibilityTarget> {
+    const targets = await this.listTabs('all');
+    const selected = targets.find(isSelected);
+    if (!selected) {
+      throw new BrowserPilotError('no_selected_tab', 'No browser tab is selected', {
+        remediation: {
+          code: 'select_tab',
+          message: "Run 'bp tabs' and select an existing tab with 'bp tab <index>', or open one with 'bp open <url> --new'.",
+          actionRequired: true,
+        },
+      });
+    }
+    return selected;
+  }
+
   async ensureManagedTarget(): Promise<CompatibilityTarget> {
     const targets = await this.listTabs('managed_only');
     const selected = targets.find(isSelected) ?? targets[0];

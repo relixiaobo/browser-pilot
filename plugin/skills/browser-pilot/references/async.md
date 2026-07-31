@@ -21,6 +21,10 @@ inappropriate. `--timeout` is the overall deadline. A `wait_timeout` result
 means only that Browser Pilot did not observe the condition before that
 deadline.
 
+URL, text, and selector waits require a selected tab. A `no_selected_tab`
+result is side-effect free: list and select an existing tab, or explicitly
+open a new one, before retrying the wait.
+
 Prefer `bp wait` to shell `sleep` and ad hoc polling loops. After a successful
 wait, inspect the relevant tab, dialog, download list, or page state.
 

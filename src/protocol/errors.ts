@@ -7,6 +7,7 @@ export const ERROR_CODES = [
   'browser_not_found',
   'browser_not_authorized',
   'browser_disconnected',
+  'no_selected_tab',
   'broker_in_use',
   'profile_selection_required',
   'profile_context_stale',

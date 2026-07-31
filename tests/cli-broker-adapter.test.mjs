@@ -165,6 +165,9 @@ async function startFakeDaemon(root, options = {}) {
           observationId: 'observation:after-open',
         });
       case 'browser.tabs.list': {
+        if (options.noTabs === true) {
+          return { workspaceId: 'workspace:cli', leaseId: 'lease:cli', targets: [] };
+        }
         const managedTarget = {
           targetId: 'target:managed',
           profileContextId: 'profile-context:work',
@@ -642,6 +645,24 @@ test('CLI preserves specific browser setup remediation without suggesting anothe
   const human = await runCliFailure(root, ['--human', 'tabs'], env);
   assert.match(human.stderr, /action: Open chrome:\/\/inspect\/#remote-debugging/);
   assert.doesNotMatch(human.stderr, /Run 'bp connect' first/);
+});
+
+test('bp wait fails without creating or selecting a tab when none is selected', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-wait-no-target-'));
+  const daemon = await startFakeDaemon(root, { noTabs: true });
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const result = await runCliFailure(root, ['--timeout', '1000', 'wait', '--text', 'Submit']);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.stderr, '');
+  assert.equal(result.output.code, 'no_selected_tab');
+  assert.equal(result.output.remediation.code, 'select_tab');
+  assert.ok(daemon.calls.some(call => call.body?.params?.name === 'browser.tabs.list'));
+  assert.equal(daemon.calls.some(call => call.body?.params?.name === 'browser.open'), false);
+  assert.equal(daemon.calls.some(call => call.body?.params?.name === 'browser.tabs.switch'), false);
 });
 
 test('CLI rejects an incompatible private Broker transport before sending RPC', async t => {
