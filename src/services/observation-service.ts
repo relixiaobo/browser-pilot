@@ -25,6 +25,8 @@ export interface ObservationServiceOptions {
   waitForLoad?: (transport: Transport, sessionId: string, timeout: number) => Promise<void>;
   executionContextId?: number;
   frameId?: string;
+  maxDomTextNodes?: number;
+  onDomTextNode?: () => void;
 }
 
 export class ObservationService {
@@ -34,6 +36,8 @@ export class ObservationService {
   private readonly loadWaiter: (transport: Transport, sessionId: string, timeout: number) => Promise<void>;
   private readonly executionContextId?: number;
   private readonly frameId?: string;
+  private readonly maxDomTextNodes?: number;
+  private readonly onDomTextNode?: () => void;
 
   constructor(
     private readonly transport: Transport,
@@ -47,6 +51,8 @@ export class ObservationService {
     this.loadWaiter = options.waitForLoad ?? waitForLoad;
     this.executionContextId = options.executionContextId;
     this.frameId = options.frameId;
+    this.maxDomTextNodes = options.maxDomTextNodes;
+    this.onDomTextNode = options.onDomTextNode;
   }
 
   get refs(): RefStore {
@@ -63,6 +69,8 @@ export class ObservationService {
     return takeSnapshot(this.transport, this.sessionId, this.targetId, limit, this.refStore, {
       ...(this.executionContextId !== undefined ? { executionContextId: this.executionContextId } : {}),
       ...(this.frameId !== undefined ? { frameId: this.frameId } : {}),
+      ...(this.maxDomTextNodes !== undefined ? { maxDomTextNodes: this.maxDomTextNodes } : {}),
+      ...(this.onDomTextNode ? { onDomTextNode: this.onDomTextNode } : {}),
     });
   }
 

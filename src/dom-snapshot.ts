@@ -70,6 +70,22 @@ export interface DomSnapshotDocument {
   childrenByParent: ReadonlyMap<number, readonly DomSnapshotNodeFact[]>;
   byElementId: ReadonlyMap<string, DomSnapshotNodeFact>;
   labelsByFor: ReadonlyMap<string, readonly DomSnapshotNodeFact[]>;
+  lineageByNodeIndex: ReadonlyMap<number, DomSnapshotLineage>;
+}
+
+export interface DomSnapshotLineage {
+  hidden: boolean;
+  inert: boolean;
+  disabled: boolean;
+  insideDialog: boolean;
+  nearestLabelNodeIndex?: number;
+}
+
+export interface DomSnapshotWorkBudget {
+  maxDescendantTextNodes: number;
+  descendantTextNodes: number;
+  exhausted: boolean;
+  onDescendantTextNode?: () => void;
 }
 
 export interface ParsedDomSnapshot {
@@ -230,10 +246,10 @@ export function parseDomSnapshot(raw: unknown): ParsedDomSnapshot {
     }
 
     const byNodeIndex = new Map(nodes.map(node => [node.nodeIndex, node]));
+    populateNodeDepths(nodes, byNodeIndex);
     for (const node of nodes) {
       const parent = byNodeIndex.get(node.parentIndex);
       if (parent) node.parentBackendNodeId = parent.backendNodeId;
-      node.depth = nodeDepthByIndex(byNodeIndex, node.parentIndex);
     }
 
     const children = new Map<number, DomSnapshotNodeFact[]>();
@@ -264,6 +280,7 @@ export function parseDomSnapshot(raw: unknown): ParsedDomSnapshot {
       childrenByParent: children,
       byElementId,
       labelsByFor,
+      lineageByNodeIndex: buildLineage(nodes),
     };
   });
 
@@ -284,18 +301,28 @@ export function parseDomSnapshot(raw: unknown): ParsedDomSnapshot {
   };
 }
 
-function nodeDepthByIndex(nodes: ReadonlyMap<number, DomSnapshotNodeFact>, parentIndex: number): number {
-  let depth = 0;
-  let current = parentIndex;
-  const visited = new Set<number>();
-  while (current >= 0 && !visited.has(current)) {
-    visited.add(current);
-    const parent = nodes.get(current);
-    if (!parent) break;
-    depth += 1;
-    current = parent.parentIndex;
+function populateNodeDepths(
+  nodes: readonly DomSnapshotNodeFact[],
+  byNodeIndex: ReadonlyMap<number, DomSnapshotNodeFact>,
+): void {
+  const depths = new Map<number, number>();
+  for (const node of nodes) {
+    if (depths.has(node.nodeIndex)) continue;
+    const chain: DomSnapshotNodeFact[] = [];
+    const visited = new Set<number>();
+    let current: DomSnapshotNodeFact | undefined = node;
+    while (current && !depths.has(current.nodeIndex) && !visited.has(current.nodeIndex)) {
+      visited.add(current.nodeIndex);
+      chain.push(current);
+      current = byNodeIndex.get(current.parentIndex);
+    }
+    let depth = current ? depths.get(current.nodeIndex) ?? -1 : -1;
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      depth += 1;
+      depths.set(chain[index].nodeIndex, depth);
+    }
   }
-  return depth;
+  for (const node of nodes) node.depth = depths.get(node.nodeIndex) ?? 0;
 }
 
 function attributePresent(value: string | undefined): boolean {
@@ -306,16 +333,31 @@ function ariaTrue(value: string | undefined): boolean {
   return value?.trim().toLowerCase() === 'true';
 }
 
-function ancestors(document: DomSnapshotDocument, node: DomSnapshotNodeFact): DomSnapshotNodeFact[] {
-  const result: DomSnapshotNodeFact[] = [];
-  let parentIndex = node.parentIndex;
-  const visited = new Set<number>();
-  while (parentIndex >= 0 && !visited.has(parentIndex)) {
-    visited.add(parentIndex);
-    const parent = document.byNodeIndex.get(parentIndex);
-    if (!parent) break;
-    result.push(parent);
-    parentIndex = parent.parentIndex;
+function buildLineage(nodes: readonly DomSnapshotNodeFact[]): Map<number, DomSnapshotLineage> {
+  const result = new Map<number, DomSnapshotLineage>();
+  const ordered = [...nodes].sort((left, right) => left.depth - right.depth);
+  for (const node of ordered) {
+    const parent = result.get(node.parentIndex);
+    const role = node.attributes.get('role')?.trim().toLowerCase();
+    result.set(node.nodeIndex, {
+      hidden: (parent?.hidden ?? false) ||
+        attributePresent(node.attributes.get('hidden')) ||
+        ariaTrue(node.attributes.get('aria-hidden')) ||
+        node.styles.display === 'none' ||
+        node.styles.visibility === 'hidden' ||
+        node.styles.visibility === 'collapse' ||
+        Number.parseFloat(node.styles.opacity) === 0,
+      inert: (parent?.inert ?? false) || attributePresent(node.attributes.get('inert')),
+      disabled: (parent?.disabled ?? false) ||
+        attributePresent(node.attributes.get('disabled')) ||
+        ariaTrue(node.attributes.get('aria-disabled')),
+      insideDialog: (parent?.insideDialog ?? false) || role === 'dialog' || role === 'alertdialog',
+      ...(node.nodeName === 'label'
+        ? { nearestLabelNodeIndex: node.nodeIndex }
+        : parent?.nearestLabelNodeIndex !== undefined
+          ? { nearestLabelNodeIndex: parent.nearestLabelNodeIndex }
+          : {}),
+    });
   }
   return result;
 }
@@ -324,7 +366,7 @@ export function domElementState(
   document: DomSnapshotDocument,
   node: DomSnapshotNodeFact,
 ): DomElementState {
-  const lineage = [node, ...ancestors(document, node)];
+  const lineage = document.lineageByNodeIndex.get(node.nodeIndex);
   const bounds = node.bounds;
   const visible = Boolean(
     bounds && bounds.width > 0 && bounds.height > 0 &&
@@ -332,32 +374,17 @@ export function domElementState(
     node.styles.visibility !== 'hidden' &&
     node.styles.visibility !== 'collapse' &&
     node.styles['pointer-events'] !== 'none' &&
-    !lineage.some(candidate => (
-      attributePresent(candidate.attributes.get('hidden')) ||
-      ariaTrue(candidate.attributes.get('aria-hidden')) ||
-      candidate.styles.display === 'none' ||
-      candidate.styles.visibility === 'hidden' ||
-      candidate.styles.visibility === 'collapse' ||
-      Number.parseFloat(candidate.styles.opacity) === 0
-    ))
+    !lineage?.hidden
   );
-  const inert = lineage.some(candidate => attributePresent(candidate.attributes.get('inert')));
-  const disabled = lineage.some(candidate => (
-    attributePresent(candidate.attributes.get('disabled')) ||
-    ariaTrue(candidate.attributes.get('aria-disabled'))
-  ));
   const readonly = attributePresent(node.attributes.get('readonly')) || ariaTrue(node.attributes.get('aria-readonly'));
-  return { visible, disabled, readonly, inert };
+  return { visible, disabled: lineage?.disabled ?? false, readonly, inert: lineage?.inert ?? false };
 }
 
 export function domElementInsideDialog(
   document: DomSnapshotDocument,
   node: DomSnapshotNodeFact,
 ): boolean {
-  return [node, ...ancestors(document, node)].some(candidate => {
-    const role = candidate.attributes.get('role')?.trim().toLowerCase();
-    return role === 'dialog' || role === 'alertdialog';
-  });
+  return document.lineageByNodeIndex.get(node.nodeIndex)?.insideDialog ?? false;
 }
 
 function normalizeName(value: string): string {
@@ -368,6 +395,7 @@ function descendantText(
   document: DomSnapshotDocument,
   root: DomSnapshotNodeFact,
   maxLength = INTERNAL_NAME_LIMIT,
+  work?: DomSnapshotWorkBudget,
 ): string {
   const parts: string[] = [];
   let length = 0;
@@ -377,9 +405,17 @@ function descendantText(
   while (stack.length > 0 && length < maxLength && visitedCount < INTERNAL_NAME_NODE_LIMIT) {
     const current = stack.pop();
     if (!current || current.depth > INTERNAL_NAME_DEPTH_LIMIT || visited.has(current.node.nodeIndex)) continue;
+    if (work && work.descendantTextNodes >= work.maxDescendantTextNodes) {
+      work.exhausted = true;
+      break;
+    }
     const node = current.node;
     visited.add(node.nodeIndex);
     visitedCount += 1;
+    if (work) {
+      work.descendantTextNodes += 1;
+      work.onDescendantTextNode?.();
+    }
     if (NAME_EXCLUDED_TAGS.has(node.nodeName)) continue;
     if (node !== root && node.nodeType === 1 && (
       attributePresent(node.attributes.get('hidden')) ||
@@ -402,60 +438,80 @@ function descendantText(
   return normalizeName(parts.join(' '));
 }
 
-function labelText(document: DomSnapshotDocument, node: DomSnapshotNodeFact): string {
+function labelText(
+  document: DomSnapshotDocument,
+  node: DomSnapshotNodeFact,
+  work?: DomSnapshotWorkBudget,
+): string {
   const id = node.attributes.get('id');
   if (id) {
     const labels: string[] = [];
     for (const candidate of document.labelsByFor.get(id) ?? []) {
-      const text = descendantText(document, candidate);
+      const text = descendantText(document, candidate, INTERNAL_NAME_LIMIT, work);
       if (text) labels.push(text);
     }
     if (labels.length > 0) return normalizeName(labels.join(' '));
   }
-  for (const candidate of ancestors(document, node)) {
-    if (candidate.nodeName === 'label') return descendantText(document, candidate);
-  }
+  const nearestLabelNodeIndex = document.lineageByNodeIndex.get(node.parentIndex)?.nearestLabelNodeIndex;
+  const nearestLabel = nearestLabelNodeIndex === undefined
+    ? undefined
+    : document.byNodeIndex.get(nearestLabelNodeIndex);
+  if (nearestLabel) return descendantText(document, nearestLabel, INTERNAL_NAME_LIMIT, work);
   return '';
 }
 
-export function domElementName(document: DomSnapshotDocument, node: DomSnapshotNodeFact): string {
+export function domElementName(
+  document: DomSnapshotDocument,
+  node: DomSnapshotNodeFact,
+  work?: DomSnapshotWorkBudget,
+): string {
   const labelledBy = node.attributes.get('aria-labelledby');
   if (labelledBy) {
     const labels = labelledBy.split(/\s+/)
       .map(id => document.byElementId.get(id))
       .filter((candidate): candidate is DomSnapshotNodeFact => candidate !== undefined)
-      .map(candidate => descendantText(document, candidate))
+      .map(candidate => descendantText(document, candidate, INTERNAL_NAME_LIMIT, work))
       .filter(Boolean);
     const name = normalizeName(labels.join(' '));
     if (name) return name;
   }
 
-  const candidates = [
-    node.attributes.get('aria-label'),
-    labelText(document, node),
+  const ariaLabel = node.attributes.get('aria-label');
+  if (ariaLabel) {
+    const name = normalizeName(ariaLabel);
+    if (name) return name;
+  }
+  const label = labelText(document, node, work);
+  if (label) return normalizeName(label);
+  for (const candidate of [
     node.attributes.get('title'),
     node.attributes.get('placeholder'),
     node.attributes.get('alt'),
-  ];
+  ]) {
+    if (!candidate) continue;
+    const name = normalizeName(candidate);
+    if (name) return name;
+  }
   const inputType = node.attributes.get('type')?.trim().toLowerCase();
   if (node.nodeName === 'input' && ['button', 'submit', 'reset'].includes(inputType ?? '')) {
-    candidates.push(node.inputValue, node.attributes.get('value'));
-  }
-  candidates.push(descendantText(document, node));
-  for (const candidate of candidates) {
-    if (candidate) {
+    for (const candidate of [node.inputValue, node.attributes.get('value')]) {
+      if (!candidate) continue;
       const name = normalizeName(candidate);
       if (name) return name;
     }
   }
-  return '';
+  return descendantText(document, node, INTERNAL_NAME_LIMIT, work);
 }
 
-export function domElementValue(document: DomSnapshotDocument, node: DomSnapshotNodeFact): string | undefined {
+export function domElementValue(
+  document: DomSnapshotDocument,
+  node: DomSnapshotNodeFact,
+  work?: DomSnapshotWorkBudget,
+): string | undefined {
   if (node.inputValue !== undefined) return node.inputValue;
   const contenteditable = node.attributes.get('contenteditable')?.trim().toLowerCase();
   if (contenteditable !== undefined && contenteditable !== 'false') {
-    return descendantText(document, node, 65_536);
+    return descendantText(document, node, 65_536, work);
   }
   return undefined;
 }

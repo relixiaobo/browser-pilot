@@ -100,6 +100,7 @@ function domSnapshotFixture(elements, frameId = 'frame:test') {
     contentDocumentIndex: { index: [], value: [] },
   };
   const layout = { nodeIndex: [], styles: [], bounds: [], paintOrders: [] };
+  const nodeIndexByBackendNodeId = new Map();
   const append = ({ parentIndex, nodeType, nodeName, nodeValue = '', backendNodeId, attributes = {} }) => {
     const nodeIndex = nodes.backendNodeId.length;
     nodes.parentIndex.push(parentIndex);
@@ -108,6 +109,7 @@ function domSnapshotFixture(elements, frameId = 'frame:test') {
     nodes.nodeValue.push(intern(nodeValue));
     nodes.backendNodeId.push(backendNodeId);
     nodes.attributes.push(Object.entries(attributes).flatMap(([name, value]) => [intern(name), intern(value)]));
+    nodeIndexByBackendNodeId.set(backendNodeId, nodeIndex);
     return nodeIndex;
   };
   append({ parentIndex: -1, nodeType: 9, nodeName: '#document', backendNodeId: 9_000 });
@@ -115,7 +117,9 @@ function domSnapshotFixture(elements, frameId = 'frame:test') {
   append({ parentIndex: 1, nodeType: 1, nodeName: 'BODY', backendNodeId: 9_002 });
   for (const element of elements) {
     const nodeIndex = append({
-      parentIndex: 2,
+      parentIndex: element.parentBackendNodeId === undefined
+        ? 2
+        : nodeIndexByBackendNodeId.get(element.parentBackendNodeId) ?? 2,
       nodeType: 1,
       nodeName: element.nodeName ?? 'DIV',
       backendNodeId: element.backendNodeId,
@@ -186,6 +190,7 @@ test('Observation v1 constants are canonical across types and tool schemas', () 
     'text_limit',
     'depth_limit',
     'byte_limit',
+    'work_limit',
   ]);
   assert.ok(OBSERVATION_INVALIDATION_REASONS.includes('document_replaced'));
   const observe = tool('browser.observe');
@@ -326,6 +331,58 @@ test('Observation snapshots enforce a UTF-8 serialized byte budget', async () =>
   assert.ok(result.data.elements.length > 0 && result.data.elements.length < elements.length);
   assert.ok(result.truncationReasons.includes('byte_limit'));
   assert.ok(Buffer.byteLength(JSON.stringify(result.data), 'utf8') <= OBSERVATION_V1_LIMITS.maxSerializedBytes);
+});
+
+test('Observation snapshots bound descendant text work on deeply nested clickables', async () => {
+  const nodeCount = 4_000;
+  const elements = Array.from({ length: nodeCount }, (_, index) => ({
+    backendNodeId: index + 1,
+    ...(index > 0 ? { parentBackendNodeId: index } : {}),
+    clickable: true,
+  }));
+  let visited = 0;
+  const startedAt = Date.now();
+  const result = await new ObservationService(
+    snapshotTransport(
+      { title: 'Deep DOM', url: 'https://example.test/deep-dom', guidance: {} },
+      axTree([]),
+      domSnapshotFixture(elements),
+    ),
+    'session:deep-dom',
+    'target:deep-dom',
+    {
+      frameId: 'frame:test',
+      maxDomTextNodes: 500,
+      onDomTextNode: () => { visited += 1; },
+    },
+  ).observe(50);
+
+  assert.ok(visited > 0 && visited <= 500);
+  assert.ok(result.truncationReasons.includes('work_limit'));
+  assert.ok(Date.now() - startedAt < 5_000);
+});
+
+test('Observation stops deriving DOM names after the element budget is full', async () => {
+  const elements = Array.from({ length: 1_000 }, (_, index) => ({
+    backendNodeId: index + 1,
+    text: `Command ${index + 1}`,
+    clickable: true,
+  }));
+  let visited = 0;
+  const result = await new ObservationService(
+    snapshotTransport(
+      { title: 'Element budget', url: 'https://example.test/elements', guidance: {} },
+      axTree([]),
+      domSnapshotFixture(elements),
+    ),
+    'session:element-budget',
+    'target:element-budget',
+    { frameId: 'frame:test', onDomTextNode: () => { visited += 1; } },
+  ).observe(1);
+
+  assert.equal(result.data.elements.length, 1);
+  assert.ok(result.truncationReasons.includes('element_limit'));
+  assert.equal(visited, 2);
 });
 
 test('Observation fuses AX semantics with DOM layout, state, names, and form values', async () => {

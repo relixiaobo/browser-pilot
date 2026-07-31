@@ -98,6 +98,9 @@ tabs, never user-opened tabs.
 ### `bp snapshot [--limit <n>]`
 
 Return bounded interactive elements with numbered refs and page geometry.
+`truncationReasons` can report element, text, depth, byte, or work limits.
+`work_limit` means Browser Pilot stopped expensive DOM text derivation; use a
+narrower page state representation before inferring that content is absent.
 
 ### `bp read [selector] [--limit <characters>]`
 

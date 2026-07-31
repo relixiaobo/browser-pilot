@@ -411,6 +411,7 @@ export const OBSERVATION_TRUNCATION_REASONS = [
   'text_limit',
   'depth_limit',
   'byte_limit',
+  'work_limit',
 ] as const;
 
 export type ObservationTruncationReason = (typeof OBSERVATION_TRUNCATION_REASONS)[number];
@@ -424,6 +425,7 @@ export const OBSERVATION_V1_LIMITS = {
   maxElementValueCharacters: 65_536,
   maxTextCharacters: 1_000_000,
   maxTreeDepth: 128,
+  maxDomTextNodes: 100_000,
   maxSerializedBytes: 2 * 1024 * 1024,
   ttlMs: 5 * 60_000,
   maxStoredObservations: 2_048,

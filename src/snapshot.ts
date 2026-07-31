@@ -10,6 +10,7 @@ import {
   domElementValue,
   isDomOnlyCandidate,
   parseDomSnapshot,
+  type DomSnapshotWorkBudget,
 } from './dom-snapshot.js';
 import {
   OBSERVATION_TRUNCATION_REASONS,
@@ -129,6 +130,8 @@ export interface SnapshotGuidanceSignals {
 export interface SnapshotContext {
   executionContextId?: number;
   frameId?: string;
+  maxDomTextNodes?: number;
+  onDomTextNode?: () => void;
 }
 
 // ── Snapshot ────────────────────────────────────────
@@ -160,6 +163,12 @@ export async function takeSnapshot(
   }
   const truncation = new Set<ObservationTruncationReason>();
   let textCharacters = 0;
+  const domWork: DomSnapshotWorkBudget = {
+    maxDescendantTextNodes: context.maxDomTextNodes ?? OBSERVATION_V1_LIMITS.maxDomTextNodes,
+    descendantTextNodes: 0,
+    exhausted: false,
+    ...(context.onDomTextNode ? { onDescendantTextNode: context.onDomTextNode } : {}),
+  };
 
   const boundedText = (raw: unknown, fieldLimit: number): string => {
     const value = typeof raw === 'string' ? raw : '';
@@ -221,7 +230,6 @@ export async function takeSnapshot(
   const modalRefs: number[] = [];
   const filterRefs: number[] = [];
   let modalCount = 0;
-  let eligibleCount = 0;
   const axClaimedBackendNodeIds = new Set<number>();
   const emittedBackendNodeIds = new Set<number>();
   let serializedBytes = Buffer.byteLength(JSON.stringify({ title, url, ...(page ? { page } : {}), elements: [] }), 'utf8');
@@ -231,22 +239,27 @@ export async function takeSnapshot(
   function addElement(input: {
     backendNodeId: number;
     role: string;
-    rawName: string;
-    rawValue?: string;
+    rawName: () => string;
+    rawValue?: () => string | undefined;
     checked?: boolean;
     autocomplete?: string;
     insideDialog: boolean;
   }): void {
     const effectiveRole = input.role.slice(0, 128);
-    const hasIdentity = input.rawName || input.rawValue || ALLOW_EMPTY_NAME.has(effectiveRole);
-    if (!hasIdentity || emittedBackendNodeIds.has(input.backendNodeId)) return;
-    eligibleCount += 1;
-    if (refs.length >= limit || byteBudgetExhausted) return;
+    if (emittedBackendNodeIds.has(input.backendNodeId) || byteBudgetExhausted) return;
+    if (refs.length >= limit) {
+      truncation.add('element_limit');
+      return;
+    }
 
-    const name = boundedText(input.rawName, OBSERVATION_V1_LIMITS.maxElementNameCharacters);
-    const value = input.rawValue === undefined
+    const rawName = input.rawName();
+    const rawValue = input.rawValue?.();
+    const hasIdentity = rawName || rawValue || ALLOW_EMPTY_NAME.has(effectiveRole);
+    if (!hasIdentity) return;
+    const name = boundedText(rawName, OBSERVATION_V1_LIMITS.maxElementNameCharacters);
+    const value = rawValue === undefined
       ? undefined
-      : boundedText(input.rawValue, OBSERVATION_V1_LIMITS.maxElementValueCharacters);
+      : boundedText(rawValue, OBSERVATION_V1_LIMITS.maxElementValueCharacters);
     const el: SnapshotData['elements'][number] = { ref: refs.length + 1, role: effectiveRole, name };
     if (value !== undefined && value !== '') el.value = value;
     if (input.checked !== undefined) el.checked = input.checked;
@@ -295,18 +308,12 @@ export async function takeSnapshot(
         childInsideDialog = true;
       }
 
-      if (semantic) {
+      if (semantic && !byteBudgetExhausted && !truncation.has('element_limit')) {
         const { backendNodeId } = semantic;
         if (Number.isSafeInteger(backendNodeId) && backendNodeId > 0) {
           axClaimedBackendNodeIds.add(backendNodeId);
           const domFact = domDocument?.byBackendNodeId.get(backendNodeId);
           const domState = domFact && domDocument ? domElementState(domDocument, domFact) : undefined;
-          const rawName = semantic.name !== undefined
-            ? semantic.name
-            : domFact && domDocument ? domElementName(domDocument, domFact) : '';
-          const rawValue = typeof node.value?.value === 'string'
-            ? node.value.value
-            : domFact && domDocument ? domElementValue(domDocument, domFact) : undefined;
           const checked = props.checked === true || props.checked === 'true'
             ? true
             : props.checked === false || props.checked === 'false'
@@ -321,8 +328,12 @@ export async function takeSnapshot(
             addElement({
               backendNodeId,
               role: semantic.role,
-              rawName,
-              rawValue,
+              rawName: () => semantic.name !== undefined
+                ? semantic.name
+                : domFact && domDocument ? domElementName(domDocument, domFact, domWork) : '',
+              rawValue: () => typeof node.value?.value === 'string'
+                ? node.value.value
+                : domFact && domDocument ? domElementValue(domDocument, domFact, domWork) : undefined,
               checked,
               autocomplete: typeof props.autocomplete === 'string'
                 ? props.autocomplete
@@ -342,22 +353,26 @@ export async function takeSnapshot(
 
   if (domDocument) {
     for (const node of domDocument.nodes) {
-      if (axClaimedBackendNodeIds.has(node.backendNodeId) || !isDomOnlyCandidate(domDocument, node)) continue;
+      if (byteBudgetExhausted || truncation.has('element_limit')) break;
+      if (axClaimedBackendNodeIds.has(node.backendNodeId)) continue;
       if (node.depth > OBSERVATION_V1_LIMITS.maxTreeDepth) {
         truncation.add('depth_limit');
         continue;
       }
+      if (!isDomOnlyCandidate(domDocument, node)) continue;
       addElement({
         backendNodeId: node.backendNodeId,
         role: domElementRole(node),
-        rawName: domElementName(domDocument, node),
-        rawValue: domElementValue(domDocument, node),
+        rawName: () => domElementName(domDocument, node, domWork),
+        rawValue: () => domElementValue(domDocument, node, domWork),
         checked: domElementChecked(node),
         autocomplete: node.attributes.get('autocomplete'),
         insideDialog: domElementInsideDialog(domDocument, node),
       });
+      if (truncation.has('element_limit')) break;
     }
   }
+  if (domWork.exhausted) truncation.add('work_limit');
   refStore.save(targetId, refs);
 
   // Format text
@@ -378,7 +393,6 @@ export async function takeSnapshot(
     }
   }
 
-  if (eligibleCount > limit) truncation.add('element_limit');
   const truncationReasons = OBSERVATION_TRUNCATION_REASONS.filter(reason => truncation.has(reason));
   const truncated = truncationReasons.length > 0;
   return {
