@@ -11,8 +11,12 @@ import {
   testTempPrefix,
 } from './helpers/platform.mjs';
 
-async function startCdpFixture() {
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+async function startCdpFixture(options = {}) {
+  const server = new WebSocketServer({
+    host: '127.0.0.1',
+    port: 0,
+    autoPong: options.autoPong ?? true,
+  });
   await new Promise((resolve, reject) => {
     server.once('listening', resolve);
     server.once('error', reject);
@@ -32,6 +36,51 @@ async function startCdpFixture() {
     },
   };
 }
+
+test('daemon disconnects a half-open CDP connection after two missed default keepalives', {
+  timeout: 40_000,
+}, async t => {
+  const root = await mkdtemp(testTempPrefix('bp-daemon-keepalive-'));
+  const profile = join(root, 'profile');
+  const socketPath = testBrokerPaths(root).endpoint;
+  await mkdir(profile, { recursive: true });
+  const cdp = await startCdpFixture({ autoPong: false });
+  let pingCount = 0;
+  cdp.server.on('connection', socket => socket.on('ping', () => { pingCount += 1; }));
+  const stderr = [];
+  const child = spawn(process.execPath, [
+    join(process.cwd(), 'dist', 'daemon.js'),
+    `ws://127.0.0.1:${cdp.port}/devtools/browser/half-open`,
+    'Chrome',
+    profile,
+  ], {
+    env: isolatedBrokerEnvironment(root),
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  child.stderr.on('data', bytes => stderr.push(bytes.toString()));
+  t.after(async () => {
+    await stopDaemon(socketPath).catch(() => {});
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await cdp.close().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await waitFor(
+    () => daemonRequest(socketPath, '/health'),
+    value => value.browser?.state === 'connected',
+  );
+  const startedAt = Date.now();
+  const disconnected = await waitFor(
+    () => daemonRequest(socketPath, '/health'),
+    value => value.browser?.state === 'disconnected',
+    32_000,
+  );
+
+  assert.equal(disconnected.browser.connectionGeneration, 1);
+  assert.ok(Date.now() - startedAt < 30_000);
+  assert.ok(pingCount >= 2);
+  assert.equal(stderr.join(''), '');
+});
 
 function daemonRequest(socketPath, path, body) {
   return new Promise((resolve, reject) => {

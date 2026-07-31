@@ -38,6 +38,12 @@ export * from './browser-tool-service.js';
 export * from './browser-tool-router.js';
 export { CompatibilityBrokerClient } from '../compatibility-broker-client.js';
 export { ManagedTargetJanitorClient } from '../managed-target-janitor-client.js';
+export {
+  CDPClient,
+  CDPError,
+  CDP_HANDSHAKE_TIMEOUT_CODE,
+  type CDPClientOptions,
+} from '../cdp.js';
 export { canonicalJson } from '../canonical-json.js';
 export {
   DEFAULT_STRUCTURAL_TEXT_LENGTH,

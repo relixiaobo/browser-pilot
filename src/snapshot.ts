@@ -1,4 +1,5 @@
 import { PAGE_INFO } from './page-scripts.js';
+import { CDPError } from './cdp.js';
 import {
   DOM_SNAPSHOT_CAPTURE_PARAMS,
   domElementChecked,
@@ -440,6 +441,7 @@ export async function resolveTargetIdentity(
       }, sessionId));
     } catch (cause) {
       if (cause instanceof BrowserPilotError && cause.code === 'browser_disconnected') throw cause;
+      if (cause instanceof CDPError && cause.code !== -32000) throw cause;
       throw new BrowserPilotError('stale_ref', 'Ref no longer resolves to the observed element', {
         context: { ...(targetId ? { targetId } : {}), ref },
         cause,

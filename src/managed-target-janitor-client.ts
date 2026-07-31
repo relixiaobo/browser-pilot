@@ -1,4 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import {
+  CDPError,
+  type CDPClientOptions,
+} from './cdp.js';
 import { BrowserPilotError } from './protocol/errors.js';
 import type {
   Transport,
@@ -32,6 +36,7 @@ interface WorkerRequest {
 export interface ManagedTargetJanitorClientOptions {
   workerPath?: string;
   onLog?: (message: string) => void;
+  cdpOptions?: CDPClientOptions;
 }
 
 /**
@@ -42,6 +47,7 @@ export interface ManagedTargetJanitorClientOptions {
 export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Transport {
   private readonly workerInvocation: InternalProcessInvocation;
   private readonly onLog?: (message: string) => void;
+  private readonly cdpOptions?: CDPClientOptions;
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly ownedTargetIds = new Set<string>();
   private readonly expectedExits = new WeakSet<ChildProcess>();
@@ -62,6 +68,7 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
       ? { command: process.execPath, argumentsPrefix: [options.workerPath] }
       : internalProcessInvocation('janitor', import.meta.url);
     this.onLog = options.onLog;
+    this.cdpOptions = options.cdpOptions;
   }
 
   get connectionState(): TransportConnectionState {
@@ -160,6 +167,7 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
     const worker = spawn(this.workerInvocation.command, [
       ...this.workerInvocation.argumentsPrefix,
       wsUrl,
+      ...(this.cdpOptions ? [JSON.stringify(this.cdpOptions)] : []),
     ], {
       stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
       serialization: 'advanced',
@@ -208,6 +216,13 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
       this.readyReject = undefined;
       return;
     }
+    if (message.event === 'startup_error') {
+      const error = this.deserializeWorkerError(message.error);
+      this.readyReject?.(error);
+      this.readyResolve = undefined;
+      this.readyReject = undefined;
+      return;
+    }
     if (message.event === 'owned' && typeof message.targetId === 'string') {
       this.ownedTargetIds.add(message.targetId);
       return;
@@ -235,8 +250,10 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
       const description = typeof error.message === 'string'
         ? error.message.slice(0, 1024)
         : 'Managed browser connection failed';
-      if (error.code === 'cdp_error') {
-        pending.reject(new Error(description));
+      if (typeof error.code === 'number' || error.code === 'cdp_error') {
+        pending.reject(new CDPError(error.code, description, error.data));
+      } else if (error.code === 'browser_disconnected') {
+        pending.reject(new BrowserPilotError('browser_disconnected', description, { retryable: true }));
       } else if (error.code === 'janitor_error' && pending.method === 'create') {
         pending.reject(new ManagedTargetCreationRejectedError(description));
       } else {
@@ -245,6 +262,23 @@ export class ManagedTargetJanitorClient implements ManagedTargetLifecycle, Trans
       return;
     }
     pending.resolve(message.result);
+  }
+
+  private deserializeWorkerError(value: unknown): Error {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return new BrowserPilotError('internal_error', 'Managed browser connection failed to start');
+    }
+    const error = value as Record<string, unknown>;
+    const description = typeof error.message === 'string'
+      ? error.message.slice(0, 1024)
+      : 'Managed browser connection failed to start';
+    if (typeof error.code === 'number' || error.code === 'cdp_handshake_timeout' || error.code === 'cdp_error') {
+      return new CDPError(error.code, description, error.data);
+    }
+    if (error.code === 'browser_disconnected') {
+      return new BrowserPilotError('browser_disconnected', description, { retryable: true });
+    }
+    return new BrowserPilotError('internal_error', description, { retryable: true });
   }
 
   private dispatchEvent(method: string, params: unknown, sessionId?: string): void {

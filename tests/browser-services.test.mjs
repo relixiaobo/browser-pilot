@@ -4,6 +4,7 @@ import {
   ActionService,
   AuthService,
   CdpActionContinuityGuard,
+  CDPError,
   CookieService,
   FrameService,
   InputDispatcher,
@@ -373,7 +374,9 @@ test('ActionService reports a node removed before live resolution as a stale ref
   const refs = new MemoryRefStore();
   refs.save('target-removed', [{ backendNodeId: 106, role: 'button', name: 'Removed' }]);
   const transport = new FakeTransport(method => {
-    if (method === 'DOM.resolveNode') throw new Error('No node with given id found');
+    if (method === 'DOM.resolveNode') {
+      throw new CDPError(-32000, 'No node with given id found', { backendNodeId: 106 });
+    }
     throw new Error(`Unexpected method: ${method}`);
   });
   const service = new ActionService(transport, 'session-removed', 'target-removed', {
@@ -390,6 +393,25 @@ test('ActionService reports a node removed before live resolution as a stale ref
     ),
   );
   assert.equal(transport.calls.some(call => call.method.startsWith('Input.')), false);
+});
+
+test('ActionService preserves non-node CDP errors during live ref resolution', async () => {
+  const refs = new MemoryRefStore();
+  refs.save('target-invalid-context', [{ backendNodeId: 107, role: 'button', name: 'Command' }]);
+  const cdpError = new CDPError(-32602, 'Invalid execution context', { contextId: 77 });
+  const transport = new FakeTransport(method => {
+    if (method === 'DOM.resolveNode') throw cdpError;
+    throw new Error(`Unexpected method: ${method}`);
+  });
+  const service = new ActionService(transport, 'session-invalid-context', 'target-invalid-context', {
+    refStore: refs,
+    observationService: { async observeAfterAction() { return snapshot; } },
+  });
+
+  await assert.rejects(
+    () => service.click({ kind: 'ref', ref: '1' }),
+    error => error === cdpError && error.code === -32602 && error.data?.contextId === 77,
+  );
 });
 
 test('ActionService dispatches a page-validated descendant or label hit point', async () => {

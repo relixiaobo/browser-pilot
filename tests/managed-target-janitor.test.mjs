@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createServer as createNetServer } from 'node:net';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { ManagedTargetJanitorClient } from '../dist/services.js';
+import {
+  CDPError,
+  CDP_HANDSHAKE_TIMEOUT_CODE,
+  ManagedTargetJanitorClient,
+} from '../dist/services.js';
 import { forceKillChild } from './helpers/platform.mjs';
 
 const WORKER = fileURLToPath(new URL('../dist/managed-target-janitor.js', import.meta.url));
@@ -65,6 +70,17 @@ async function startCdpFixture() {
         broadcast({ method: 'Target.targetDestroyed', params: { targetId } });
         return;
       }
+      if (message.method === 'Runtime.structuredFailure') {
+        socket.send(JSON.stringify({
+          id: message.id,
+          error: {
+            code: -32602,
+            message: 'Invalid execution context',
+            data: { contextId: 77 },
+          },
+        }));
+        return;
+      }
       respond({});
     });
   });
@@ -103,6 +119,28 @@ async function startCdpFixture() {
     },
     async close() {
       for (const socket of server.clients) socket.terminate();
+      await new Promise(resolve => server.close(resolve));
+    },
+  };
+}
+
+async function startHangingHandshakeFixture() {
+  const sockets = new Set();
+  const server = createNetServer(socket => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+    socket.on('data', () => {});
+  });
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1');
+  });
+  return {
+    wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/hanging`,
+    async close() {
+      for (const socket of sockets) socket.destroy();
       await new Promise(resolve => server.close(resolve));
     },
   };
@@ -293,4 +331,41 @@ test('janitor client validates requested ownership instead of the adoption count
     ['adopt-descendant', 'adopt-racing-popup', 'adopt-root'],
   );
   assert.equal(cdp.targets.has('user-tab'), true);
+});
+
+test('janitor client round-trips CDP error code and data', async t => {
+  const cdp = await startCdpFixture();
+  const client = new ManagedTargetJanitorClient({ workerPath: WORKER });
+  t.after(async () => {
+    await client.close();
+    await cdp.close();
+  });
+  await client.connect(cdp.wsUrl);
+
+  await assert.rejects(
+    client.send('Runtime.structuredFailure'),
+    error => error instanceof CDPError && error.code === -32602 &&
+      error.message === 'Invalid execution context' && error.data?.contextId === 77,
+  );
+});
+
+test('janitor client preserves the CDP handshake timeout code during startup', async t => {
+  const cdp = await startHangingHandshakeFixture();
+  const client = new ManagedTargetJanitorClient({
+    workerPath: WORKER,
+    cdpOptions: {
+      handshakeTimeoutMs: 30,
+      pingIntervalMs: 100,
+      pongTimeoutMs: 25,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await cdp.close();
+  });
+
+  await assert.rejects(
+    client.connect(cdp.wsUrl),
+    error => error instanceof CDPError && error.code === CDP_HANDSHAKE_TIMEOUT_CODE,
+  );
 });

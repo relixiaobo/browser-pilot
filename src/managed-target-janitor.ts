@@ -1,4 +1,9 @@
-import { CDPClient } from './cdp.js';
+import {
+  CDPClient,
+  CDPError,
+  type CDPClientOptions,
+} from './cdp.js';
+import { BrowserPilotError } from './protocol/errors.js';
 
 const MAX_LINE_BYTES = 64 * 1024;
 const MAX_TRACKED_TARGETS = 4096;
@@ -16,11 +21,25 @@ if (!wsUrl || !/^wss?:\/\//.test(wsUrl)) {
   process.exit(2);
 }
 
-const cdp = new CDPClient();
+function clientOptions(value: string | undefined): CDPClientOptions {
+  if (!value) return {};
+  const parsed = JSON.parse(value) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Invalid managed target janitor CDP options');
+  }
+  const allowed = new Set(['handshakeTimeoutMs', 'pingIntervalMs', 'pongTimeoutMs']);
+  if (Object.keys(parsed).some(key => !allowed.has(key))) {
+    throw new Error('Invalid managed target janitor CDP options');
+  }
+  return parsed as CDPClientOptions;
+}
+
+const cdp = new CDPClient(clientOptions(process.argv[3]));
 const ownedTargets = new Map<string, string | undefined>();
 let pending: Buffer = Buffer.alloc(0);
 let commandTail = Promise.resolve();
 let finishing = false;
+let shutdownRequested = false;
 let outputAvailable = true;
 
 function emit(value: unknown): void {
@@ -35,6 +54,26 @@ function emit(value: unknown): void {
 function boundedMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.slice(0, 1024);
+}
+
+interface SerializedError {
+  code: number | string;
+  message: string;
+  data?: unknown;
+}
+
+function serializeError(error: unknown, fallbackCode: string): SerializedError {
+  if (error instanceof CDPError) {
+    return {
+      code: error.code,
+      message: boundedMessage(error),
+      ...(error.data !== undefined ? { data: error.data } : {}),
+    };
+  }
+  if (error instanceof BrowserPilotError) {
+    return { code: error.code, message: boundedMessage(error) };
+  }
+  return { code: fallbackCode, message: boundedMessage(error) };
 }
 
 function validateRequest(value: unknown): RequestMessage {
@@ -163,10 +202,9 @@ async function handle(request: RequestMessage): Promise<void> {
   } catch (error) {
     emit({
       id: request.id,
-      error: {
-        code: request.method === 'cdp.send' ? 'cdp_error' : 'janitor_error',
-        message: boundedMessage(error),
-      },
+      error: request.method === 'cdp.send'
+        ? serializeError(error, 'cdp_error')
+        : { code: 'janitor_error', message: boundedMessage(error) },
     });
   }
 }
@@ -215,11 +253,26 @@ async function finish(cleanup: boolean, exitCode = 0): Promise<void> {
 async function main(): Promise<void> {
   process.stdout.on('error', () => { outputAvailable = false; });
   process.stderr.on('error', () => {});
-  process.stdin.on('end', () => { void commandTail.finally(() => finish(true)); });
-  process.stdin.on('error', () => { void finish(true, 1); });
-  process.on('disconnect', () => { void commandTail.finally(() => finish(true)); });
-  process.on('SIGTERM', () => { void finish(true); });
-  process.on('SIGINT', () => { void finish(true); });
+  process.stdin.on('end', () => {
+    shutdownRequested = true;
+    void commandTail.finally(() => finish(true));
+  });
+  process.stdin.on('error', () => {
+    shutdownRequested = true;
+    void finish(true, 1);
+  });
+  process.on('disconnect', () => {
+    shutdownRequested = true;
+    void commandTail.finally(() => finish(true));
+  });
+  process.on('SIGTERM', () => {
+    shutdownRequested = true;
+    void finish(true);
+  });
+  process.on('SIGINT', () => {
+    shutdownRequested = true;
+    void finish(true);
+  });
   process.stdin.resume();
   cdp.on('Target.targetCreated', params => {
     const info = params?.targetInfo;
@@ -286,6 +339,9 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
+  if (!shutdownRequested) {
+    emit({ event: 'startup_error', error: serializeError(error, 'janitor_error') });
+  }
   if (!finishing) process.stderr.write(`${boundedMessage(error)}\n`);
   void finish(false, 1);
 });
