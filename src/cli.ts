@@ -22,6 +22,7 @@ import {
   type CompatibilityProfile,
   type CompatibilityTarget,
 } from './compatibility-broker-client.js';
+import { serializeStructuralText } from './structural-text.js';
 
 const program = new Command();
 program.exitOverride();
@@ -176,7 +177,10 @@ function emitObservation(result: Record<string, JsonValue>): void {
         : {}),
     }));
   } else {
-    const lines = [`[page] ${title} | ${url}`, ''];
+    const lines = [
+      `[page] ${serializeStructuralText(title)} | ${serializeStructuralText(url, 2_048)}`,
+      '',
+    ];
     const page = result.page && typeof result.page === 'object' && !Array.isArray(result.page)
       ? result.page as Record<string, JsonValue>
       : undefined;
@@ -188,8 +192,10 @@ function emitObservation(result: Record<string, JsonValue>): void {
       lines.push('(no interactive elements)');
     } else {
       for (const element of elements) {
-        let line = `[${element.ref}] ${element.role} "${element.name}"`;
-        if (element.value !== undefined && element.value !== '') line += ` value="${element.value}"`;
+        let line = `[${element.ref}] ${serializeStructuralText(element.role, 128)} "${serializeStructuralText(element.name)}"`;
+        if (element.value !== undefined && element.value !== '') {
+          line += ` value="${serializeStructuralText(element.value)}"`;
+        }
         if (element.checked) line += ' checked';
         lines.push(line);
       }
@@ -853,8 +859,8 @@ program.command('profiles')
       const name = profile.profileName ?? profile.displayName;
       const account = profile.accountEmail ?? profile.accountName;
       const identity = name
-        ? `  ${name}${account ? ` (${account})` : ''}  [${profile.label}]`
-        : `  ${profile.label}${profile.identityStatus === 'unavailable' ? ' (identity unavailable)' : ''}`;
+        ? `  ${serializeStructuralText(name)}${account ? ` (${serializeStructuralText(account)})` : ''}  [${serializeStructuralText(profile.label)}]`
+        : `  ${serializeStructuralText(profile.label)}${profile.identityStatus === 'unavailable' ? ' (identity unavailable)' : ''}`;
       console.log(`${profile.selected ? '*' : ' '} ${profile.index}${identity}  ${profile.tabCount} tab(s)`);
     }
   }));
@@ -878,7 +884,7 @@ program.command('profile <selector>')
         ...(selected.profileDirectory ? { profileDirectory: selected.profileDirectory } : {}),
         ...(selected.identityErrorCode ? { identityErrorCode: selected.identityErrorCode } : {}),
       },
-      `\u2713 Selected ${selected.profileName ?? selected.displayName ?? selected.label}`,
+      `\u2713 Selected ${serializeStructuralText(selected.profileName ?? selected.displayName ?? selected.label)}`,
     );
   }));
 
@@ -1169,7 +1175,7 @@ When to use which command:
       if (useJson()) {
         console.log(JSON.stringify({ ok: true, title: data.title, url: data.url, text: data.text, length: data.length, truncated: data.truncated }));
       } else {
-        console.log(`${data.title}\n${data.url}\n${'─'.repeat(60)}\n${data.text}${data.truncated === true ? '\n... [truncated]' : ''}`);
+        console.log(`${serializeStructuralText(data.title)}\n${serializeStructuralText(data.url, 2_048)}\n${'─'.repeat(60)}\n${data.text}${data.truncated === true ? '\n... [truncated]' : ''}`);
       }
     });
   }));
@@ -1198,11 +1204,11 @@ program.command('search <query>')
         return;
       }
       const matches = Array.isArray(result.matches) ? result.matches : [];
-      console.log(`${result.title}\n${result.url}\n${'─'.repeat(60)}`);
+      console.log(`${serializeStructuralText(result.title)}\n${serializeStructuralText(result.url, 2_048)}\n${'─'.repeat(60)}`);
       if (matches.length === 0) console.log('(no matches)');
       for (const match of matches) {
         if (!match || typeof match !== 'object' || Array.isArray(match)) continue;
-        console.log(`[${match.index}] ${match.context}`);
+        console.log(`[${match.index}] ${serializeStructuralText(match.context)}`);
       }
       if (result.truncated === true) console.log('... [truncated]');
     });
@@ -1235,7 +1241,7 @@ program.command('find <selector>')
       for (const element of elements) {
         if (!element || typeof element !== 'object' || Array.isArray(element)) continue;
         const state = `${element.visible === true ? 'visible' : 'hidden'}, ${element.enabled === true ? 'enabled' : 'disabled'}`;
-        console.log(`[${element.index}] <${element.tagName}> ${element.role || ''} "${element.name || ''}" (${state})`);
+        console.log(`[${element.index}] <${serializeStructuralText(element.tagName, 128)}> ${serializeStructuralText(element.role || '', 128)} "${serializeStructuralText(element.name || '')}" (${state})`);
       }
       if (result.truncated === true) console.log('... [truncated]');
     });
@@ -1316,7 +1322,7 @@ program.command('dropdown <target>')
       if (options.length === 0) console.log('(no exposed options)');
       for (const option of options) {
         if (!option || typeof option !== 'object' || Array.isArray(option)) continue;
-        console.log(`${option.selected === true ? '*' : ' '} ${option.index}  ${option.label}  value=${JSON.stringify(option.value)}`);
+        console.log(`${option.selected === true ? '*' : ' '} ${option.index}  ${serializeStructuralText(option.label)}  value="${serializeStructuralText(option.value)}"`);
       }
       if (result.truncated === true) console.log('... [truncated]');
     });
@@ -1393,7 +1399,7 @@ program.command('downloads')
       console.log('No completed downloads.');
     } else {
       for (const download of downloads) {
-        console.log(`${download.index}  ${download.fileName ?? download.id}  ${download.sizeBytes} bytes`);
+        console.log(`${download.index}  ${serializeStructuralText(download.fileName ?? download.id)}  ${download.sizeBytes} bytes`);
       }
     }
   }));
@@ -1509,7 +1515,7 @@ program.command('cookies [domain]')
         for (const c of cookies) {
           const expires = Number(c.expires);
           const exp = expires === -1 ? 'Session' : new Date(expires * 1000).toISOString().slice(0, 10);
-          console.log(`${String(c.name ?? '').padEnd(30)} ${String(c.domain ?? '').padEnd(25)} ${exp}`);
+          console.log(`${serializeStructuralText(c.name).padEnd(30)} ${serializeStructuralText(c.domain).padEnd(25)} ${exp}`);
         }
       }
     });
@@ -1532,7 +1538,7 @@ program.command('frame [target]')
           console.log(JSON.stringify({ ok: true, frames: list }));
         } else {
           for (const [i, f] of frames.entries()) {
-            console.log(`${i === 0 ? '* ' : '  '}${i}  ${f.url}  ${f.name}`);
+            console.log(`${i === 0 ? '* ' : '  '}${i}  ${serializeStructuralText(f.url, 2_048)}  ${serializeStructuralText(f.name)}`);
           }
         }
       } else {
@@ -1549,7 +1555,7 @@ program.command('frame [target]')
           : { frameId: requireString(frame.frameId, 'frameId') }, controlledTarget.targetId);
         emit(
           { ok: true, frame: idx, url: frame.url },
-          `\u2713 Switched to frame ${idx}: ${frame.url}`,
+          `\u2713 Switched to frame ${idx}: ${serializeStructuralText(frame.url, 2_048)}`,
         );
       }
     });
@@ -1588,7 +1594,7 @@ program.command('dialogs')
       console.log('No pending dialogs.');
     } else {
       for (const dialog of dialogs) {
-        console.log(`${dialog.dialogId}  ${dialog.type}  ${dialog.message}`);
+        console.log(`${dialog.dialogId}  ${dialog.type}  ${serializeStructuralText(dialog.message)}`);
       }
     }
   }));
@@ -1640,7 +1646,9 @@ program.command('tabs')
     } else if (tabs.length === 0) {
       console.log('No controllable tabs open.');
     } else {
-      for (const t of tabs) console.log(`${t.selected ? '*' : ' '} ${t.index}  ${t.url}  ${t.title}`);
+      for (const t of tabs) {
+        console.log(`${t.selected ? '*' : ' '} ${t.index}  ${serializeStructuralText(t.url, 2_048)}  ${serializeStructuralText(t.title)}`);
+      }
     }
   }));
 
@@ -1787,7 +1795,7 @@ const netCmd = program.command('net')
       for (const r of requests) {
         const time = r.time ? `${r.time}ms` : r.error ? 'FAIL' : '...';
         const status = r.status ? String(r.status) : r.error ? 'ERR' : '...';
-        console.log(` ${String(r.id).padStart(4)}  ${String(r.method ?? '').padEnd(7)} ${status.padEnd(7)} ${String(r.type ?? '').padEnd(8)} ${time.padEnd(8)} ${r.url}`);
+        console.log(` ${String(r.id).padStart(4)}  ${serializeStructuralText(r.method).padEnd(7)} ${status.padEnd(7)} ${serializeStructuralText(r.type).padEnd(8)} ${time.padEnd(8)} ${serializeStructuralText(r.url, 2_048)}`);
       }
     }
   }));
@@ -1835,11 +1843,11 @@ netCmd.command('show <id>')
     if (useJson()) {
       console.log(JSON.stringify({ ok: true, ...detail, responseBody }));
     } else {
-      console.log(`#${detail.id} ${detail.method} ${detail.url}`);
-      console.log(`Status: ${detail.status ?? 'pending'} ${detail.statusText ?? ''}`);
+      console.log(`#${detail.id} ${serializeStructuralText(detail.method)} ${serializeStructuralText(detail.url, 2_048)}`);
+      console.log(`Status: ${detail.status ?? 'pending'} ${serializeStructuralText(detail.statusText)}`);
       if (detail.postData) console.log(`\nRequest Body:\n${detail.postData}`);
       if (responseBody) {
-        console.log(`\nResponse (${detail.mimeType}):`);
+        console.log(`\nResponse (${serializeStructuralText(detail.mimeType)}):`);
         console.log(responseBody.length > 2000 ? responseBody.slice(0, 2000) + '\n... (truncated)' : responseBody);
       }
     }

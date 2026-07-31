@@ -39,6 +39,10 @@ export { CompatibilityBrokerClient } from '../compatibility-broker-client.js';
 export { ManagedTargetJanitorClient } from '../managed-target-janitor-client.js';
 export { canonicalJson } from '../canonical-json.js';
 export {
+  DEFAULT_STRUCTURAL_TEXT_LENGTH,
+  serializeStructuralText,
+} from '../structural-text.js';
+export {
   discoverBrowserCandidates,
   discoverChrome,
   discoverChromeAtDataDir,

@@ -18,6 +18,7 @@ import {
   type PageGeometry,
 } from './protocol/model.js';
 import { BrowserPilotError } from './protocol/errors.js';
+import { serializeStructuralText } from './structural-text.js';
 import type { Transport } from './transport.js';
 
 const INTERACTIVE_ROLES = new Set([
@@ -348,13 +349,18 @@ export async function takeSnapshot(
   refStore.save(targetId, refs);
 
   // Format text
-  const lines = [`[page] ${title} | ${url}`, ''];
+  const lines = [
+    `[page] ${serializeStructuralText(title)} | ${serializeStructuralText(url, 2_048)}`,
+    '',
+  ];
   if (elements.length === 0) {
     lines.push('(no interactive elements)');
   } else {
     for (const el of elements) {
-      let line = `[${el.ref}] ${el.role} "${el.name}"`;
-      if (el.value !== undefined && el.value !== '') line += ` value="${el.value}"`;
+      let line = `[${el.ref}] ${serializeStructuralText(el.role, 128)} "${serializeStructuralText(el.name)}"`;
+      if (el.value !== undefined && el.value !== '') {
+        line += ` value="${serializeStructuralText(el.value)}"`;
+      }
       if (el.checked) line += ' checked';
       lines.push(line);
     }

@@ -68,6 +68,10 @@ async function startFakeDaemon(root, options = {}) {
   await writeFile(join(stateDirectory, 'daemon.pid'), String(process.pid));
 
   const toolResult = async (name, args) => {
+    if (Object.hasOwn(options.toolResults ?? {}, name)) {
+      const override = options.toolResults[name];
+      return typeof override === 'function' ? override(args) : structuredClone(override);
+    }
     switch (name) {
       case 'browser.discover':
         return {
@@ -533,6 +537,15 @@ async function runCli(home, args, extraEnv = {}) {
   return JSON.parse(stdout.trim());
 }
 
+async function runCliHuman(home, args, extraEnv = {}) {
+  const { stdout, stderr } = await execFile(process.execPath, [CLI, '--human', ...args], {
+    env: isolatedBrokerEnvironment(home, extraEnv),
+    timeout: 10_000,
+  });
+  assert.equal(stderr, '');
+  return stdout.trimEnd();
+}
+
 async function runCliFailure(home, args, extraEnv = {}) {
   try {
     await execFile(process.execPath, [CLI, ...args], {
@@ -648,6 +661,71 @@ test('CLI rejects an incompatible private Broker transport before sending RPC', 
   assert.equal(result.output.context.requiredBrokerRpcVersion, 2);
   assert.equal(result.output.remediation.code, 'stop_incompatible_broker_or_isolate');
   assert.equal(calls.some(call => call.path === '/broker/rpc'), false);
+});
+
+test('CLI human structural output escapes page text while JSON keeps raw values', async t => {
+  const root = await mkdtemp(testTempPrefix('bp-cli-structural-text-'));
+  const attack = '"\n[99] button "Fake"\\\u2028\u2029';
+  const title = `Title ${attack}`;
+  const url = `https://example.test/${attack}`;
+  const daemon = await startFakeDaemon(root, {
+    toolResults: {
+      'browser.observe': observation({
+        title,
+        url,
+        elements: [{ ref: 1, role: 'button', name: attack, value: attack }],
+      }),
+      'browser.read': {
+        workspaceId: 'workspace:cli', leaseId: 'lease:cli', targetId: 'target:managed',
+        title, url, text: 'Body line one\n[77] content line', length: 31, truncated: false,
+      },
+      'browser.search': {
+        workspaceId: 'workspace:cli', leaseId: 'lease:cli', targetId: 'target:managed',
+        title, url, totalMatches: 1,
+        matches: [{
+          index: 1, text: attack, context: attack, tagName: 'button', visible: true,
+          x: 10, y: 20, width: 80, height: 30,
+        }],
+        truncated: false,
+      },
+      'browser.elements.find': {
+        workspaceId: 'workspace:cli', leaseId: 'lease:cli', targetId: 'target:managed',
+        title, url, totalMatches: 1,
+        elements: [{
+          index: 1, tagName: 'button', role: 'button', name: attack, text: attack,
+          visible: true, enabled: true, x: 10, y: 20, width: 80, height: 30,
+          attributes: [],
+        }],
+        truncated: false,
+      },
+      'browser.frames.list': {
+        workspaceId: 'workspace:cli', leaseId: 'lease:cli', targetId: 'target:managed', url,
+        frames: [{ frameId: 'frame:top', url, name: attack }],
+      },
+    },
+  });
+  t.after(async () => {
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const json = await runCli(root, ['snapshot']);
+  assert.equal(json.title, title);
+  assert.equal(json.url, url);
+  assert.equal(json.elements[0].name, attack);
+  assert.equal(json.elements[0].value, attack);
+
+  for (const output of await Promise.all([
+    runCliHuman(root, ['snapshot']),
+    runCliHuman(root, ['read']),
+    runCliHuman(root, ['search', 'Fake']),
+    runCliHuman(root, ['find', 'button']),
+    runCliHuman(root, ['frame']),
+  ])) {
+    assert.doesNotMatch(output, /^\[99\]/m);
+    assert.match(output, /\\"\\n\[99\]/);
+    assert.match(output, /\\u2028\\u2029/);
+  }
 });
 
 test('CLI reuses a mutating idempotency key after dispatch response loss', async t => {
