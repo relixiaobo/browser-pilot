@@ -6,7 +6,10 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SUPPORTED_PROTOCOL_VERSIONS } from '../dist/protocol.js';
-import { releaseVersionMetadata } from './release-version-utils.mjs';
+import {
+  browserPilotCliMetadata,
+  releaseVersionMetadata,
+} from './release-version-utils.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const assetsIndex = process.argv.indexOf('--assets');
@@ -31,12 +34,7 @@ assert.equal(
   cliCompatibility.supportedVersionRange,
 );
 assert.equal(skillCompatibility.skillVersion, version);
-assert.deepEqual(skillCompatibility.browserPilotCli, {
-  testedVersion: version,
-  ...cliCompatibility,
-  requiredNodeVersion: packageJson.engines.node,
-  installCommand: `npm install --global browser-pilot-cli@${version}`,
-});
+assert.deepEqual(skillCompatibility.browserPilotCli, browserPilotCliMetadata(packageJson));
 
 async function sha256(path) {
   return createHash('sha256').update(await readFile(path)).digest('hex');

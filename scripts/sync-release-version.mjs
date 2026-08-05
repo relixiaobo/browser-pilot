@@ -4,7 +4,10 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { releaseVersionMetadata } from './release-version-utils.mjs';
+import {
+  browserPilotCliMetadata,
+  releaseVersionMetadata,
+} from './release-version-utils.mjs';
 
 const rootIndex = process.argv.indexOf('--root');
 if (rootIndex !== -1 && !process.argv[rootIndex + 1]) {
@@ -47,6 +50,10 @@ if (await syncJson(join(root, 'package-lock.json'), manifest => {
 if (await syncJson(join(root, 'plugin', 'package.json'), manifest => {
   manifest.version = version;
   manifest.peerDependencies['browser-pilot-cli'] = cliCompatibility.supportedVersionRange;
+  manifest.peerDependenciesMeta = {
+    ...manifest.peerDependenciesMeta,
+    'browser-pilot-cli': { optional: true },
+  };
   return manifest;
 })) changed.push('plugin/package.json');
 
@@ -63,14 +70,9 @@ if (await syncJson(join(root, '.claude-plugin', 'marketplace.json'), manifest =>
 })) changed.push('.claude-plugin/marketplace.json');
 
 if (await syncJson(join(root, 'plugin', 'skills', 'browser-pilot', 'compatibility.json'), manifest => {
-  manifest.schemaVersion = 2;
+  manifest.schemaVersion = 3;
   manifest.skillVersion = version;
-  manifest.browserPilotCli = {
-    testedVersion: version,
-    ...cliCompatibility,
-    requiredNodeVersion: packageManifest.engines.node,
-    installCommand: `npm install --global browser-pilot-cli@${version}`,
-  };
+  manifest.browserPilotCli = browserPilotCliMetadata(packageManifest);
   return manifest;
 })) changed.push('plugin/skills/browser-pilot/compatibility.json');
 

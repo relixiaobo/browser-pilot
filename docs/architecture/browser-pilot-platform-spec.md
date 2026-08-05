@@ -64,9 +64,9 @@ A shell-capable Agent host needs only:
 
 - a normal local command execution tool;
 - the complete Browser Pilot skill;
-- permission for the Agent to install the skill's exact npm CLI through the
-  normal shell approval flow, or a compatible `bp` executable already on
-  `PATH`;
+- permission for the Agent to install the skill's exact tested native CLI (or
+  its pinned npm fallback) through the normal shell approval flow, or a
+  compatible `bp` executable already on `PATH`;
 - a stable `BROWSER_PILOT_CLIENT_KEY` per independent Agent;
 - an absolute task-owned `BROWSER_PILOT_OUTPUT_DIR` when file results are used;
 - ordinary access to returned task files.
@@ -79,6 +79,13 @@ Managed skill installations must track `plugin/skills/browser-pilot` from the
 `skill-stable` branch, which advances only after the matching npm package and
 GitHub Release are public. Pre-provisioned installations should pin a CLI
 version inside the skill's declared compatible range.
+
+The managed preflight accepts an existing CLI anywhere in that range. When it
+must install, it selects the exact version tested with the skill, prefers the
+self-contained native release, verifies the archive checksum, and uses npm only
+when that OS/architecture has no native asset. It must not follow mutable
+`latest` targets or hide an integrity, extraction, command-conflict, or
+filesystem failure behind the npm fallback.
 
 ## 5. Browser Scope and Authorization
 
@@ -414,7 +421,7 @@ leaves the Broker running.
 
 Supported distributions are:
 
-- managed Agent skill with an exact npm CLI preflight;
+- managed Agent skill with a native-first, exact-version CLI preflight;
 - global npm install;
 - local npm install or `npx --no-install`;
 - product-bundled npm package with pinned Node runtime;
@@ -428,7 +435,8 @@ Every release includes:
 - versioned native archives;
 - archive checksum sidecars;
 - per-file checksums and licenses inside native archives;
-- an Agent skill/plugin archive and checksum;
+- an Agent skill/plugin archive with deterministic POSIX and Windows native
+  installers, plus its checksum;
 - a release index binding CLI version, protocol range, skill compatibility
   range, tested version, supported platforms, asset sizes, and hashes.
 
@@ -439,6 +447,8 @@ release commit advances the non-force-updated `skill-stable` branch.
 ## 20. Security and Privacy Invariants
 
 - No browser extension is used or required.
+- Managed installers never overwrite unmanaged command entries or silently
+  modify shell startup files or system `PATH` configuration.
 - Broker runtime directories and files are private to the OS user.
 - Public results never expose raw CDP target/session/node IDs.
 - Cross-Agent object access fails closed.
@@ -540,6 +550,8 @@ A release is acceptable only when all of the following hold:
 - Local Playwright core, compatibility, and network suites pass.
 - npm global, local, and product-bundled distributions pass black-box tests.
 - Native self-contained verification passes on release platforms.
+- Managed native installers pass checksum, versioned-directory, `PATH`,
+  command-conflict, and repeat-install tests on their release platforms.
 - CLI help exposes `--client-key`, `--request-id`, `--timeout`, status, wait,
   command recovery, and file commands.
 - No removed persistent adapter command is present.

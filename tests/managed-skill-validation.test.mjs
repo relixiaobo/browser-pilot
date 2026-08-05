@@ -3,7 +3,6 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import {
-  managedSkillGitModes,
   validateManagedSkillDirectory,
 } from '../scripts/validate-managed-skill.mjs';
 import { testTempPrefix } from './helpers/platform.mjs';
@@ -26,12 +25,10 @@ async function fixture(parent, name) {
 }
 
 test('managed Browser Pilot skill satisfies the repository distribution contract', async () => {
-  const result = await validateManagedSkillDirectory(managedSkill, {
-    gitModes: await managedSkillGitModes(managedSkill),
-  });
+  const result = await validateManagedSkillDirectory(managedSkill);
   assert.equal(result.ok, true);
   assert.equal(result.name, 'browser-pilot');
-  assert.equal(result.files, 7);
+  assert.equal(result.files, 9);
   assert.equal(result.totalBytes < 16 * 1024 * 1024, true);
 });
 

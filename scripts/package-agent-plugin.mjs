@@ -29,6 +29,11 @@ assert.equal(
   cliCompatibility.supportedVersionRange,
   'plugin CLI peer range must match the release compatibility policy',
 );
+assert.equal(
+  pluginPackage.peerDependenciesMeta?.['browser-pilot-cli']?.optional,
+  true,
+  'plugin npm CLI peer must be optional when the native CLI is used',
+);
 
 await mkdir(outputDirectory, { recursive: true });
 const npmArguments = [
@@ -62,6 +67,8 @@ for (const required of [
   'skills/browser-pilot/references/async.md',
   'skills/browser-pilot/references/embedding.md',
   'skills/browser-pilot/references/recovery.md',
+  'skills/browser-pilot/scripts/install-native.ps1',
+  'skills/browser-pilot/scripts/install-native.sh',
 ]) {
   assert.ok(paths.has(required), `plugin archive is missing ${required}`);
 }

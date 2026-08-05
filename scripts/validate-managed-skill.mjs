@@ -13,7 +13,7 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = new Set([
   '.bash', '.cjs', '.gif', '.jpeg', '.jpg', '.js', '.json', '.md', '.mjs',
-  '.pdf', '.png', '.py', '.sh', '.ts', '.txt', '.webp', '.yaml', '.yml', '.zsh',
+  '.pdf', '.png', '.ps1', '.py', '.sh', '.ts', '.txt', '.webp', '.yaml', '.yml', '.zsh',
 ]);
 const BINARY_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.pdf', '.png', '.webp']);
 

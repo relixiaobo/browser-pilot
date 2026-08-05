@@ -108,4 +108,10 @@ test('release publication is one tag-gated draft to npm to public state machine'
   assert.doesNotMatch(publish, /npm publish/);
   assert.doesNotMatch(build, /-print -quit/);
   assert.match(build, /for ARCHIVE in "\$\{ARCHIVES\[@\]\}"/);
+  const standalonePackage = build.indexOf('run: npm run package:standalone');
+  const nativeInstaller = build.indexOf('run: npm run verify:native-installer');
+  assert.ok(
+    nativeInstaller > standalonePackage,
+    'release platforms must verify the managed installer against their packaged native archive',
+  );
 });

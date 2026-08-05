@@ -3,13 +3,17 @@
 Give an AI Agent control of the user's real Chrome browser, including existing
 logins, cookies, profiles, and extensions. No browser extension is required.
 
+Install the Agent skill below and let its version-pinned preflight install the
+self-contained native CLI. Node.js is not required on Apple Silicon macOS, x64
+Linux, or x64 Windows. The npm distribution remains available for other
+platforms with Node.js 22 or newer:
+
 ```bash
 npm install -g browser-pilot-cli@latest
 bp --version
 ```
 
-Native releases support Apple Silicon macOS, x64 Linux, and x64 Windows. Intel
-Mac is not supported.
+Intel Mac does not have a native release.
 
 ## Agent Setup
 
@@ -88,9 +92,10 @@ guidance. The CLI provides stable JSON, errors, state, files, waiting, and
 recovery. The background service is private implementation detail shared by all
 compatible CLI installations for the current OS user.
 
-This same path supports both installation modes:
+This same path supports every installation mode:
 
-- An Agent installs `browser-pilot-cli` itself.
+- An Agent installs the exact native CLI selected by its skill, with npm as an
+  unsupported-platform fallback.
 - A product bundles a pinned CLI and places its directory on the Agent command
   environment's `PATH`.
 
@@ -363,6 +368,7 @@ Build and verify a native artifact with an SEA-capable Node runtime:
 BROWSER_PILOT_SEA_NODE=/absolute/path/to/node npm run build:standalone
 npm run verify:standalone
 npm run package:standalone
+npm run verify:native-installer
 npm run release:prune -- --dry-run # preview local artifact retention
 npm run release:prune              # retain the two newest version groups
 ```
