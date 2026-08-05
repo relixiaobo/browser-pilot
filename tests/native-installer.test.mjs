@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readFile,
   readlink,
+  realpath,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -215,7 +216,15 @@ test('native installer reports a command directory that is not on PATH', {
   );
   assert.match(result.stdout, /^ok=true$/m);
   assert.match(result.stdout, /^path_ready=false$/m);
-  assert.match(result.stdout, new RegExp(`^bin_directory=${binDirectory.replaceAll('\\', '\\\\')}$`, 'm'));
+  const reportedBinDirectory = /^bin_directory=([^\r\n]+)$/m.exec(result.stdout)?.[1];
+  assert.ok(reportedBinDirectory, 'installer must report bin_directory');
+  const expectedBinDirectory = process.platform === 'win32'
+    ? await realpath(binDirectory)
+    : binDirectory;
+  assert.equal(
+    process.platform === 'win32' ? reportedBinDirectory.toLowerCase() : reportedBinDirectory,
+    process.platform === 'win32' ? expectedBinDirectory.toLowerCase() : expectedBinDirectory,
+  );
 });
 
 test('native installer refuses to replace an unmanaged command before installing a version', {
