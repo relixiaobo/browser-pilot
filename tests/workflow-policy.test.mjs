@@ -92,6 +92,11 @@ test('release publication is one tag-gated draft to npm to public state machine'
   assert.match(publish, /^    if: startsWith\(github\.ref, 'refs\/tags\/v'\)$/m);
   assert.match(publish, /^    needs: build$/m);
   assert.match(publish, /permissions:[\s\S]*contents: write[\s\S]*id-token: write/);
+  assert.match(
+    publish,
+    /uses: actions\/checkout@v4\n        with:\n          fetch-depth: 0/,
+    'release publication must fetch enough history to fast-forward skill-stable',
+  );
   const skillValidation = publish.indexOf('npm run validate:skill');
   const plugin = publish.indexOf('npm run package:agent-plugin');
   const index = publish.indexOf('npm run package:release-index');
