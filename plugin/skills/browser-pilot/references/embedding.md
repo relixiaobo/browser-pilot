@@ -14,21 +14,25 @@ server, a persistent protocol adapter, or Agent-specific browser runtime.
 Choose one provisioning mode without changing the skill workflow:
 
 - **Managed skill:** install only the complete skill directory. The Agent runs
-  the mandatory preflight in `SKILL.md` and installs the exact tested npm CLI
-  through its ordinary shell and approval flow when needed. The host does not
-  need Browser Pilot-specific code or a bundled executable.
+  the mandatory preflight in `SKILL.md` and installs the exact tested native
+  CLI through its ordinary shell and approval flow when supported. npm is the
+  fallback for platforms without a native release. The host does not need
+  Browser Pilot-specific code or a bundled executable.
 - **Pre-provisioned CLI:** place a compatible native executable or a pinned
   `browser-pilot-cli` installation on `PATH`. The npm form requires Node.js 22
   or newer. Native releases support Apple Silicon macOS, x64 Linux, and x64
   Windows; Intel Mac is unsupported.
 
-For a pre-provisioned native executable, verify the release index and checksums
-before packaging. For either mode, the Agent still runs `bp --version` and
-refuses an incompatible CLI. Do not teach it a host-specific executable path.
+The managed installer verifies the native archive checksum before extraction,
+keeps the complete versioned release directory, and refuses to overwrite an
+unmanaged command entry. For a pre-provisioned native executable, verify the
+release index and checksums before packaging. For either mode, the Agent still
+runs `bp --version` and refuses an incompatible CLI. Do not teach it a
+host-specific executable path.
 
 For a remotely managed skill installation, select the repository subdirectory
 `plugin/skills/browser-pilot` and track the `skill-stable` branch. That branch
-advances only after its exact npm CLI version and GitHub Release are public.
+advances only after its exact tested CLI version and GitHub Release are public.
 Do not track the development branch, where compatibility metadata can refer to
 an unpublished CLI version.
 
@@ -96,8 +100,10 @@ when browser state is relevant; it may establish the Agent's logical state in
 the already running service.
 
 In managed-skill mode, let the mandatory preflight reconcile skill and CLI
-updates. In pre-provisioned mode, pin a version accepted by the skill's declared
-range and update the executable when that range advances.
+updates. The preflight accepts any installed version in the declared range but
+installs the exact tested version when installation is needed; it never follows
+a mutable `latest` target. In pre-provisioned mode, pin a version accepted by
+the skill's declared range and update the executable when that range advances.
 
 Compatible installations reuse one per-user service through protocol
 negotiation. A product-bundled CLI may release its own Agent state but cannot

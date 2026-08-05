@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { releaseVersionMetadata } from './release-version-utils.mjs';
+import {
+  browserPilotCliMetadata,
+  NATIVE_INSTALL_UNSUPPORTED_EXIT_CODE,
+  releaseVersionMetadata,
+} from './release-version-utils.mjs';
 
 async function readJson(path) {
   return JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'));
@@ -13,6 +17,14 @@ const pluginManifest = await readJson('../plugin/.claude-plugin/plugin.json');
 const skillCompatibility = await readJson('../plugin/skills/browser-pilot/compatibility.json');
 const marketplace = await readJson('../.claude-plugin/marketplace.json');
 const skill = await readFile(new URL('../plugin/skills/browser-pilot/SKILL.md', import.meta.url), 'utf8');
+const posixInstaller = await readFile(
+  new URL('../plugin/skills/browser-pilot/scripts/install-native.sh', import.meta.url),
+  'utf8',
+);
+const windowsInstaller = await readFile(
+  new URL('../plugin/skills/browser-pilot/scripts/install-native.ps1', import.meta.url),
+  'utf8',
+);
 const openAiMetadata = await readFile(
   new URL('../plugin/skills/browser-pilot/agents/openai.yaml', import.meta.url),
   'utf8',
@@ -31,20 +43,30 @@ assert.equal(
   cliCompatibility.supportedVersionRange,
   'agent plugin CLI peer range must match the release compatibility policy',
 );
+assert.equal(
+  agentPluginPackage.peerDependenciesMeta?.['browser-pilot-cli']?.optional,
+  true,
+  'agent plugin npm CLI peer must be optional when the native CLI is used',
+);
 assert.equal(pluginManifest.version, version, 'plugin manifest version must match package.json');
-assert.equal(skillCompatibility.schemaVersion, 2, 'skill compatibility schema must be current');
+assert.equal(skillCompatibility.schemaVersion, 3, 'skill compatibility schema must be current');
 assert.equal(skillCompatibility.skillVersion, version, 'skill version must match package.json');
-assert.deepEqual(skillCompatibility.browserPilotCli, {
-  testedVersion: version,
-  ...cliCompatibility,
-  requiredNodeVersion: packageManifest.engines.node,
-  installCommand: `npm install --global browser-pilot-cli@${version}`,
-}, 'skill CLI compatibility must match package.json');
+assert.deepEqual(
+  skillCompatibility.browserPilotCli,
+  browserPilotCliMetadata(packageManifest),
+  'skill CLI compatibility must match package.json',
+);
 assert.ok(
   skill.includes('[compatibility.json](compatibility.json)') &&
-    skill.includes('browserPilotCli.installCommand') &&
+    skill.includes('browserPilotCli.installation') &&
+    skill.includes('unsupportedPlatformExitCode') &&
     skill.includes('bp --version'),
   'skill instructions must load and enforce its compatibility manifest',
+);
+assert.ok(
+  posixInstaller.includes(`UNSUPPORTED_PLATFORM_EXIT_CODE=${NATIVE_INSTALL_UNSUPPORTED_EXIT_CODE}`) &&
+    windowsInstaller.includes(`$UnsupportedPlatformExitCode = ${NATIVE_INSTALL_UNSUPPORTED_EXIT_CODE}`),
+  'native installers must keep their unsupported-platform exit code synchronized',
 );
 assert.ok(
   openAiMetadata.includes('display_name: "Browser Pilot"') &&

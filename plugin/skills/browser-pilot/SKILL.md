@@ -22,10 +22,10 @@ Browser-internal and extension-owned pages are excluded.
 
 Browser Pilot requires the `bp` executable. Before the first browser operation
 in every task, read [compatibility.json](compatibility.json), then check the
-resolved command and version:
+resolved command and version with the current shell (`command -v bp` on POSIX
+or `Get-Command bp` on PowerShell), followed by:
 
 ```bash
-command -v bp
 bp --version
 ```
 
@@ -33,14 +33,25 @@ Continue only when the reported semantic version is inside
 `browserPilotCli.supportedVersionRange`, whose lower bound is the required
 minimum version. If `bp` is absent or outside that range:
 
-1. Run `node --version` and `npm --version`. Node.js must satisfy
-   `browserPilotCli.requiredNodeVersion`.
-2. Run the exact `browserPilotCli.installCommand` from `compatibility.json`
-   through the Agent's normal shell approval flow. This command installs or
-   upgrades Browser Pilot; do not replace its pinned version with `@latest`.
-3. Run `bp --version` again and re-check the supported range. If the command is
-   still absent or incompatible, stop and report the failed prerequisite. Do
-   not attempt browser commands with the wrong CLI.
+1. Read `browserPilotCli.installation`. Use its exact native version and
+   repository; never substitute GitHub `latest` or npm `@latest`.
+2. Invoke the installer path declared for the current shell, resolved relative
+   to this `SKILL.md`, through the Agent's normal shell approval flow:
+
+   ```text
+   POSIX: sh <posixInstaller> --version <native.version> --repository <native.repository>
+   Windows: powershell.exe -NoProfile -ExecutionPolicy Bypass -File <windowsInstaller> -Version <native.version> -Repository <native.repository>
+   ```
+
+3. Fall back to npm only when the native installer exits with the exact
+   `native.unsupportedPlatformExitCode`. Check `node --version` and
+   `npm --version`, require `npmFallback.requiredNodeVersion`, then run the
+   exact `npmFallback.installCommand`. Do not fall back after a download,
+   checksum, extraction, command-conflict, or filesystem failure.
+4. Resolve `bp` again and re-check `bp --version` against the supported range.
+   If the installer reports `path_ready=false`, or another command still wins
+   on `PATH`, stop and report the returned `bin_directory`; do not edit shell
+   startup files or the system `PATH` silently.
 
 Do not assume the Agent host installs Browser Pilot. A compatible executable
 already on `PATH` may be used regardless of whether a user, the Agent, or the

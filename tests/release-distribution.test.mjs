@@ -6,7 +6,10 @@ import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { publishRelease } from '../scripts/release-publish.mjs';
-import { releaseVersionMetadata } from '../scripts/release-version-utils.mjs';
+import {
+  browserPilotCliMetadata,
+  releaseVersionMetadata,
+} from '../scripts/release-version-utils.mjs';
 import { testTempPrefix } from './helpers/platform.mjs';
 
 const execFile = promisify(execFileCallback);
@@ -197,6 +200,16 @@ test('CLI compatibility range advances from the release version without an exact
     maximumVersionExclusive: '2.0.0',
     supportedVersionRange: '>=1.2.3-rc.1 <2.0.0',
   });
+  assert.equal(
+    browserPilotCliMetadata({ version: '0.7.2', engines: { node: '>=22' } })
+      .installation.native.version,
+    '0.7.2',
+  );
+  assert.equal(
+    browserPilotCliMetadata({ version: '0.7.2', engines: { node: '>=22' } })
+      .installation.npmFallback.installCommand,
+    'npm install --global browser-pilot-cli@0.7.2',
+  );
 });
 
 test('npm version stages every manifest synchronized by the version hook', () => {
@@ -271,17 +284,32 @@ test('release sync advances every active manifest from the root package version'
   assert.equal(lock.packages[''].version, '0.5.0');
   assert.equal(plugin.version, '0.5.0');
   assert.equal(plugin.peerDependencies['browser-pilot-cli'], '>=0.5.0 <1.0.0');
+  assert.equal(plugin.peerDependenciesMeta['browser-pilot-cli'].optional, true);
   assert.equal(claudePlugin.version, '0.5.0');
   assert.equal(marketplace.plugins[0].version, '0.5.0');
-  assert.equal(compatibility.schemaVersion, 2);
+  assert.equal(compatibility.schemaVersion, 3);
   assert.equal(compatibility.skillVersion, '0.5.0');
   assert.deepEqual(compatibility.browserPilotCli, {
     testedVersion: '0.5.0',
     minimumVersion: '0.5.0',
     maximumVersionExclusive: '1.0.0',
     supportedVersionRange: '>=0.5.0 <1.0.0',
-    requiredNodeVersion: '>=22',
-    installCommand: 'npm install --global browser-pilot-cli@0.5.0',
+    installation: {
+      strategy: 'native-first',
+      native: {
+        repository: 'relixiaobo/browser-pilot',
+        version: '0.5.0',
+        installers: {
+          posix: 'scripts/install-native.sh',
+          windows: 'scripts/install-native.ps1',
+        },
+        unsupportedPlatformExitCode: 10,
+      },
+      npmFallback: {
+        requiredNodeVersion: '>=22',
+        installCommand: 'npm install --global browser-pilot-cli@0.5.0',
+      },
+    },
   });
 });
 

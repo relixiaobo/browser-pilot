@@ -4,17 +4,17 @@ Agent-neutral skill that teaches shell-capable AI agents to control eligible
 tabs in your real Chrome browser through the `bp` CLI. Product-bundled and
 Agent-installed CLIs use the same skill and command workflow.
 
-## Install browser-pilot-cli first
+## CLI provisioning
 
-```bash
-npm install -g browser-pilot-cli@latest
-bp --version
-```
+The bundled skill reads `compatibility.json`, accepts any CLI in its declared
+compatible range, and installs its exact tested native release when `bp` is
+missing or incompatible. npm is used only as the fallback on platforms without
+a native release and requires Node.js 22 or newer. Automated installation never
+follows a mutable `latest` version.
 
-The bundled skill reads `compatibility.json`, accepts the declared compatible
-CLI range, and rejects versions outside it. Each plugin release records the CLI
-version it was tested with; embedded products should pin that exact version.
-Native macOS releases support Apple Silicon only.
+Native releases support Apple Silicon macOS, x64 Linux, and x64 Windows. Intel
+Mac does not have a native release. Embedded products should pre-provision the
+exact tested native CLI or an accepted pinned npm CLI.
 
 Enable Chrome remote debugging: open `chrome://inspect/#remote-debugging` and toggle ON.
 
