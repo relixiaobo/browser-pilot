@@ -30,6 +30,22 @@ function Stop-Install {
   exit $ExitCode
 }
 
+function Get-FileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $stream = [IO.File]::OpenRead($Path)
+  try {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+      return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '')
+    } finally {
+      $algorithm.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Test-PathEntry {
   param([Parameter(Mandatory = $true)][string]$Candidate)
 
@@ -192,7 +208,7 @@ try {
   if ($checksumParts[1] -ne $archiveName) {
     Stop-Install 'invalid_checksum' "Checksum sidecar names $($checksumParts[1]) instead of $archiveName"
   }
-  $actualChecksum = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+  $actualChecksum = Get-FileSha256 -Path $archivePath
   if (-not $actualChecksum.Equals($checksumParts[0], [StringComparison]::OrdinalIgnoreCase)) {
     Stop-Install 'checksum_mismatch' "SHA-256 verification failed for $archiveName"
   }

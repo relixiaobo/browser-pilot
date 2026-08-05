@@ -124,8 +124,10 @@ test('native installers are version-parameterized and contain no package-version
   ]);
   assert.equal(posix.includes(packageJson.version), false);
   assert.equal(windows.includes(packageJson.version), false);
+  assert.equal(windows.includes('Get-FileHash'), false);
   assert.match(posix, /--version/);
   assert.match(windows, /\[string\]\$Version/);
+  assert.match(windows, /\[Security\.Cryptography\.SHA256\]::Create\(\)/);
   assert.match(
     windows,
     /function Install-Shim[\s\S]*?\$shim = Join-Path \$Directory "\$Name\.cmd"/,
