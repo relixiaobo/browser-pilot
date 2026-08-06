@@ -28,7 +28,7 @@ test('managed Browser Pilot skill satisfies the repository distribution contract
   const result = await validateManagedSkillDirectory(managedSkill);
   assert.equal(result.ok, true);
   assert.equal(result.name, 'browser-pilot');
-  assert.equal(result.files, 9);
+  assert.equal(result.files, 10);
   assert.equal(result.totalBytes < 16 * 1024 * 1024, true);
 });
 
