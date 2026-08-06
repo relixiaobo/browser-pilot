@@ -18,12 +18,10 @@ persistent Browser Pilot client process.
 Browser Pilot can control eligible user-opened tabs as well as tabs it creates.
 Browser-internal and extension-owned pages are excluded.
 
-## Check and Install the CLI
+## Check the CLI
 
 Browser Pilot requires the `bp` executable. Before the first browser operation
-in every task, read [compatibility.json](compatibility.json), then check the
-resolved command and version with the current shell (`command -v bp` on POSIX
-or `Get-Command bp` on PowerShell), followed by:
+in every task, read [compatibility.json](compatibility.json) and check:
 
 ```bash
 bp --version
@@ -31,32 +29,13 @@ bp --version
 
 Continue only when the reported semantic version is inside
 `browserPilotCli.supportedVersionRange`, whose lower bound is the required
-minimum version. If `bp` is absent or outside that range:
+minimum version. A compatible executable already on `PATH` may be used
+regardless of whether a user, the Agent, or the host provided it.
 
-1. Read `browserPilotCli.installation`. Use its exact native version and
-   repository; never substitute GitHub `latest` or npm `@latest`.
-2. Invoke the installer path declared for the current shell, resolved relative
-   to this `SKILL.md`, through the Agent's normal shell approval flow:
-
-   ```text
-   POSIX: sh <posixInstaller> --version <native.version> --repository <native.repository>
-   Windows: powershell.exe -NoProfile -ExecutionPolicy Bypass -File <windowsInstaller> -Version <native.version> -Repository <native.repository>
-   ```
-
-3. Fall back to npm only when the native installer exits with the exact
-   `native.unsupportedPlatformExitCode`. Check `node --version` and
-   `npm --version`, require `npmFallback.requiredNodeVersion`, then run the
-   exact `npmFallback.installCommand`. Do not fall back after a download,
-   checksum, extraction, command-conflict, or filesystem failure.
-4. Resolve `bp` again and re-check `bp --version` against the supported range.
-   If the installer reports `path_ready=false`, or another command still wins
-   on `PATH`, stop and report the returned `bin_directory`; do not edit shell
-   startup files or the system `PATH` silently.
-
-Do not assume the Agent host installs Browser Pilot. A compatible executable
-already on `PATH` may be used regardless of whether a user, the Agent, or the
-host provided it. Native macOS releases require Apple Silicon; Intel Mac is
-unsupported.
+If `bp` is absent or outside the supported range, read
+[references/setup.md](references/setup.md) and follow it exactly. Never
+substitute GitHub `latest` or npm `@latest`, and never edit shell startup files
+or the system `PATH` silently.
 
 ## Connect Deliberately
 
@@ -164,8 +143,24 @@ bp type 5 "hello" --clear
 bp press Enter
 ```
 
-Read [references/commands.md](references/commands.md) when an option or command
-is not covered here.
+### Command Reference
+
+| Purpose | Commands |
+|---|---|
+| Connection and state | `bp browsers` · `bp connect` · `bp status` · `bp profiles` · `bp profile <selector>` · `bp disconnect` |
+| Tabs, frames, navigation | `bp tabs` · `bp tab <index>` · `bp open <url> [--new]` · `bp close [--all]` · `bp frame [<index>]` |
+| Observation | `bp snapshot` · `bp read [selector]` · `bp search <text>` · `bp find <selector>` · `bp locate <selector>` · `bp screenshot [file]` |
+| Interaction | `bp click <ref>` · `bp type <ref> <text>` · `bp keyboard <text>` · `bp press <key>` · `bp scroll` · `bp dropdown <ref>` · `bp select <ref> <option>` · `bp upload <path>` · `bp eval [expression]` |
+| Dialogs | `bp dialogs` · `bp dialog <id> --accept` · `bp dialog <id> --dismiss` |
+| Files and captures | `bp pdf [file]` · `bp downloads` · `bp download <index> [file]` |
+| Async and recovery | `bp wait` · `bp commands` · `bp command <id>` · `bp cancel <id>` |
+| Cookies, auth, network | `bp cookies [domain]` · `bp auth <username> <password>` · `bp net <subcommand>` |
+
+Global options precede the command: `--client-key`, `--request-id`,
+`--timeout`, `--human`.
+
+Read [references/commands.md](references/commands.md) for exact options and
+semantics. `bp --help` is the canonical runtime inventory.
 
 ## Handle Tabs, Frames, and Dialogs
 
@@ -176,6 +171,11 @@ an extension; group membership does not affect control of an eligible tab.
 `bp close` explicitly closes the selected tab, including a user-owned tab.
 `bp close --all` closes only Browser Pilot-created tabs. Leave user tabs open
 unless the request requires closing them.
+
+On the first `bp open --new` of a task, tell the user once that this task's
+pages open as Browser Pilot tabs and that you can close them together whenever
+they ask. Closing stays user-initiated: run `bp close --all` when the user asks
+to clear them, not as routine end-of-task cleanup.
 
 Use `bp frame`, `bp frame <index>`, and `bp frame 0` to list, select, and leave
 frames. Refresh the snapshot after changing frames.

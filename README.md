@@ -327,6 +327,31 @@ Python Agent runtime: adaptive DOM/accessibility observation, fresh state after
 actions, input readback, obstruction checks, stale-state invalidation,
 watchdogs, and bounded outputs. The Agent interface remains the CLI.
 
+### Compared With Extension-Based Bridges
+
+Another common shape pairs a browser extension with a local background service.
+It reaches the same signed-in browser, at two costs Browser Pilot does not pay.
+
+**Input fidelity.** Extension bridges typically dispatch page-level synthetic
+events, which arrive with `isTrusted=false` and are ignored by sites that check
+it, including some banking portals and captcha flows. An extension can reach
+trusted input only by attaching the debugger, which makes Chrome display a
+persistent "is debugging this browser" banner for as long as it is attached.
+Browser Pilot clicks, key events, and text insertion always go through the
+browser's own input pipeline (`Input.dispatchMouseEvent`,
+`Input.dispatchKeyEvent`, `Input.insertText`), so actions are trusted by
+default and the authorization cost is paid once at `bp connect`.
+
+**Local trust boundary.** A bridge that accepts commands on an unauthenticated
+loopback port lets any local process drive the user's signed-in browser, and
+lets any local process impersonate the service to the extension. Browser
+Pilot's service listens on a private per-user endpoint — a `0700` Unix socket
+where available — requires a per-user token recorded in a protected locator,
+verifies an owner lock before startup, and restricts its state directory with
+Windows ACLs.
+
+Browser Pilot sends no telemetry.
+
 ## Product Embedding
 
 Bundle the native CLI or `browser-pilot-cli` plus a pinned Node runtime. Verify
