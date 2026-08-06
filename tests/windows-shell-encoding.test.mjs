@@ -48,6 +48,12 @@ function quotePosix(value) {
 // Each shell receives one command string. Node passes that string to the shell
 // through CreateProcessW as UTF-16, so the node -> shell leg is lossless by
 // construction and the shell -> node leg is the only variable under test.
+//
+// cmd.exe needs `verbatim`: Node's default argument quoting escapes inner
+// double quotes as `\"` per MSVCRT rules, but cmd.exe does not parse its
+// command line that way and would receive the escapes literally. Passing the
+// arguments verbatim with the whole command wrapped in one more quote pair is
+// what `/s` expects, and is how Node itself spawns `shell: true` on Windows.
 const SHELLS = [
   {
     id: 'powershell.exe',
@@ -59,7 +65,8 @@ const SHELLS = [
     id: 'cmd.exe',
     executable: 'cmd.exe',
     args: ['/d', '/s', '/c'],
-    build: parts => parts.map(quoteCmd).join(' '),
+    verbatim: true,
+    build: parts => `"${parts.map(quoteCmd).join(' ')}"`,
   },
   {
     id: 'pwsh',
@@ -77,9 +84,12 @@ const SHELLS = [
 
 const REQUIRED_SHELLS = new Set(['powershell.exe', 'cmd.exe']);
 
-function runShell(executable, args) {
+function runShell(executable, args, verbatim = false) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true });
+    const child = spawn(executable, args, {
+      windowsHide: true,
+      windowsVerbatimArguments: verbatim,
+    });
     const stdout = [];
     const stderr = [];
     child.stdout.on('data', chunk => stdout.push(chunk));
@@ -123,7 +133,7 @@ test('Windows shells deliver non-ASCII text to the CLI without re-encoding it', 
 
     let result;
     try {
-      result = await runShell(shell.executable, [...shell.args, command]);
+      result = await runShell(shell.executable, [...shell.args, command], shell.verbatim === true);
     } catch (error) {
       if (error.code === 'ENOENT' && !REQUIRED_SHELLS.has(shell.id)) {
         t.diagnostic(`${shell.id}: not installed, skipped`);
