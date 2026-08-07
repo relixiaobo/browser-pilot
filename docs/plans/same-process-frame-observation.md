@@ -1,6 +1,6 @@
 # Same-Process Frame Observation and Selector Routing
 
-Status: **F0 measured — F1 and F2 rescoped**
+Status: **F1 implemented — F3 partially closed**
 Baseline: `v0.6.2` @ `a4032bf`
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
 
@@ -138,20 +138,26 @@ identity becomes a prerequisite rather than a refinement.
 
 ### F1. Observe the same-process document set
 
-- [ ] **F1.1** Walk the documents reachable from the selected frame's document
-  through `contentDocumentFrameId`, instead of a single document. The reachable
-  set, not every captured document — a selected subframe must not observe its
-  parent.
-- [ ] **F1.2** Carry the owning `frameId` on every emitted element so an action
-  can be routed to the frame that owns the node.
-- [ ] **F1.3** Transform child-document layout bounds into page coordinates by
-  offsetting through the owning iframe element's bounds. Required for
-  `bp click --xy`, occlusion checks, and annotated screenshots; a child document's
-  bounds are otherwise relative to its own viewport and would silently point at
-  the wrong pixels.
-- [ ] **F1.4** Keep the document-set walk inside the existing work budget and
-  emit the established truncation reasons. A frame-heavy page must degrade the
-  way a large page already does, not by exceeding limits.
+- [x] **F1.1** Walk the documents reachable from the selected frame's document
+  through `contentDocumentFrameId`, via a new `frameView` on the parsed DOM
+  snapshot. Descends only, so a selected subframe never observes its parent,
+  and visits each document once so a malformed capture cannot cycle.
+- [x] **F1.2** Carry the owning frame and its offset on `RefEntry`, which is
+  internal. The public Observation v1 element shape is unchanged, so this is not
+  a protocol change.
+- [x] **F1.3** Compose the offsets at dispatch rather than rewriting bounds:
+  `offsetPointerPoint` now adds the session's observed-root offset **and** the
+  ref's offset from its document up to that root. Both degenerate to the prior
+  behavior when observing a single frame.
+- [x] **F1.4** Share the existing byte, element, and depth budgets across the
+  document walk, and cap nested accessibility fetches, reporting the existing
+  `work_limit` reason. No new truncation vocabulary, so the frozen contract is
+  untouched.
+- [x] **F1.5** Fetch a nested frame's accessibility tree. Discovered during
+  verification: `Accessibility.getFullAXTree` returns one frame only, so a plain
+  `<button>` with no listener stayed invisible inside a frame while a clickable
+  `<div>` beside it was reported. Each frame's tree is linked separately,
+  because accessibility node ids are unique only within their own frame.
 
 ### F2. Route actions to the owning frame
 

@@ -187,6 +187,29 @@ const SUPPORT_PAGES = new Map([
 <button id="cross-frame-button">Cross Frame Command</button>`],
   ['/capability/navigation-next', `<title>Navigation complete</title>
 <main id="navigation-complete">navigation complete</main>`],
+
+  // Nested same-process frames, used to pin observation and pointer accuracy
+  // across frame boundaries. The offsets are deliberately non-zero at both
+  // levels: a frame parked at the page origin would let a missing coordinate
+  // transform pass by accident.
+  ['/capability/frame-nested-host', `<title>Nested frame host</title>
+<button id="nested-top">Nested Top Command</button>
+<iframe id="nested-child" src="/capability/frame-nested-inner"
+  style="position:absolute;left:137px;top:211px;width:420px;height:320px;border:0"></iframe>`],
+
+  // The plain button carries no listener on purpose: Chrome does not mark it
+  // clickable, so it can only be observed through the frame's own accessibility
+  // tree, while the div beside it is reachable only through DOM supplementation.
+  // Both must appear, or frame observation is unpredictable rather than absent.
+  ['/capability/frame-nested-inner', `<title>Nested inner frame</title>
+<button id="nested-ax">Nested AX Command</button>
+<div id="nested-dom" role="button" tabindex="0"
+  onclick="window.nestedDomActivated = true" style="cursor:pointer;margin-top:48px">Nested DOM Command</div>
+<iframe id="nested-grandchild" src="/capability/frame-nested-deep"
+  style="position:absolute;left:23px;top:150px;width:220px;height:130px;border:0"></iframe>`],
+
+  ['/capability/frame-nested-deep', `<title>Nested deep frame</title>
+<button id="nested-deep" onclick="window.nestedDeepActivated = true">Nested Deep Command</button>`],
 ]);
 
 export function renderBrowserCapabilityFixture(path, options = {}) {
