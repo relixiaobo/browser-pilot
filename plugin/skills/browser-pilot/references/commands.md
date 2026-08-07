@@ -173,21 +173,37 @@ modify globals. Use only when a dedicated command is insufficient.
 - `bp dialog <id> --accept [--prompt <text>]` accepts one dialog.
 - `bp dialog <id> --dismiss` dismisses one dialog.
 
-Known frame limitation:
+Frame coverage. What a snapshot reaches is decided by the renderer process, and
+origin is the practical proxy: a same-origin frame is a same-process iframe,
+while Chrome's site isolation puts a cross-origin frame in its own process.
 
-- Observation covers one document at a time. A snapshot taken from the top
-  frame contains no part of a same-process iframe, and a snapshot taken with a
-  frame selected contains only that frame. Nested frames behave the same way at
-  each level.
+- A snapshot descends into every same-process iframe, at any nesting depth.
+  Their controls arrive as ordinary refs, including DOM-only controls the
+  accessibility tree does not expose, and `bp click` reaches them without
+  selecting the frame first.
+- A snapshot never includes a cross-origin iframe. Nothing in the result reports
+  the omission, so an absent control is indistinguishable from a control that
+  does not exist.
+- `bp frame` lists same-process frames only. A cross-origin frame cannot be
+  listed or selected, so `bp frame` is not a way to discover what a snapshot
+  left out.
+- Selecting a frame narrows observation to that frame and its own descendants;
+  it never widens it to the parent.
 
-Select the frame before observing it. Once selected, its controls are fully
-observable and actionable, including DOM-only controls the accessibility tree
-does not expose. Selector-based commands, coordinates from `bp locate`, and
-`bp click --xy` are all scoped to the selected subframe, and a selector naming
-a top-frame element does not resolve while a subframe is selected.
+Selector-based commands, coordinates from `bp locate`, and `bp click --xy` are
+all scoped to the selected subframe, and a selector naming a top-frame element
+does not resolve while a subframe is selected.
 
-Do not infer from a top-frame snapshot that a page's iframes have no controls.
-Run `bp frame` to list them and select the one you need.
+To reach a cross-origin frame, discover its source and open it as its own page:
+
+```bash
+bp find "iframe" --attributes src
+bp open "<the cross-origin src>" --new
+```
+
+The page then loads as a top-level document, where its controls observe and act
+normally. A frame that only renders correctly when embedded is the exception;
+report that to the user rather than working around it.
 
 ## Files and Captures
 

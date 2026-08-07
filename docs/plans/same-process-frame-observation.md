@@ -176,12 +176,55 @@ F2 no longer includes a selector-routing fix: F0.2 found nothing to fix.
 
 ### F3. Close the contract
 
-- [ ] **F3.1** Convert `test.todo` at `tests/observation-contract.test.mjs:167`
-  and the subframe-selector todo into asserting tests.
-- [ ] **F3.2** Verify an OOPIF still degrades as documented rather than
-  silently producing a partial snapshot.
+- [x] **F3.1** The iframe `test.todo` now asserts, and a browser-level test
+  pins nested observation and pointer accuracy against real Chrome. The
+  subframe-selector todo stays a todo deliberately: F0.2 found nothing to fix,
+  so it is retained as a regression guard rather than converted.
+- [x] **F3.2** Measured. An OOPIF degrades **silently**, which is worse than
+  the plan assumed. See below.
 - [ ] **F3.3** Record the observation-recall change against the quantitative
-  baselines from B0.4.
+  baselines from B0.4, and graduate the nested-frame fixtures into
+  `REQUIRED_BROWSER_CAPABILITY_SCENARIOS` with that baseline update.
+
+### F3.2 findings: cross-origin frames degrade silently
+
+Measured on a host page with a cross-origin iframe:
+
+| Probe | Result |
+|---|---|
+| Top-frame snapshot | host controls only |
+| `truncationReasons` | `null` — **no marker that anything was omitted** |
+| Documents in the capture | host only; the frame is a separate target |
+| `FrameService.list()` | **does not list the cross-origin frame** |
+
+Two consequences the plan did not anticipate:
+
+1. Making same-origin frames automatic sharpens the trap. Guidance used to send
+   an Agent to `bp frame` for every frame; now that same-origin frames need no
+   selection, an Agent can reasonably conclude frames are handled and read an
+   empty cross-origin result as "no controls there".
+2. `bp frame` is not a fallback. It lists same-process frames only, so it can
+   neither reveal nor select what the snapshot omitted. Guidance drafted around
+   `bp frame` as the escape hatch was wrong and was corrected before shipping;
+   the only route is `bp find "iframe" --attributes src` followed by opening
+   that URL as its own page.
+
+Still open: whether to emit a signal rather than rely on documentation. The
+repository already has a typed `AgentHint` union carrying codes such as
+`access_blocked` and `modal_overlay`, which would let an observation say that a
+cross-origin frame was present and excluded, without touching the frozen
+Observation v1 element shape. That extends a public union, so it needs a
+decision on how existing consumers treat an unknown hint code.
+
+### Pending release note
+
+`SKILL.md` and `references/commands.md` frame guidance changed twice in this
+plan, and the shipped skill now describes behavior that does not exist in any
+release. The next version needs an entry covering: same-origin frames observed
+and clickable at any depth without selecting them, and cross-origin frames
+excluded with no marker and no `bp frame` fallback. The version number is not
+decided here -- v0.6.2 is released, and writing into its notes is the mistake
+this plan's predecessor already made once.
 
 ## Risks
 
