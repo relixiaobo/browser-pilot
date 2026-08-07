@@ -9,6 +9,7 @@ import {
   FrameService,
   MemoryRefStore,
   ObservationService,
+  PageInspectionService,
   RefRevalidationService,
 } from '../dist/services.js';
 import { OBSERVATION_V1_LIMITS } from '../dist/protocol.js';
@@ -514,6 +515,66 @@ test('nested same-process frames are observed and clicked from the top frame', a
         await innerFrame().evaluate(() => document.activeElement?.id),
         'nested-ax',
         'click on a nested AX-exposed control did not focus the element',
+      );
+    } finally {
+      await client.detach();
+    }
+  } finally {
+    await page.close();
+  }
+});
+
+test('selector queries reach nested frames and report page coordinates', async () => {
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${primaryOrigin}/capability/frame-nested-host`);
+    await page.waitForSelector('#nested-child');
+    const client = await page.context().newCDPSession(page);
+    try {
+      const inspection = new PageInspectionService(
+        { send: (method, params) => client.send(method, params), close() {} },
+        undefined,
+      );
+
+      // A snapshot reports these controls, so a selector for one of them must
+      // resolve. Returning nothing is worse than an error: it reads as "the
+      // element does not exist" to an Agent that just saw it.
+      const nested = await inspection.find('#nested-dom', {});
+      assert.equal(nested.elements.length, 1, 'selector did not reach the nested frame');
+      const deep = await inspection.find('#nested-deep', {});
+      assert.equal(deep.elements.length, 1, 'selector did not reach the twice-nested frame');
+
+      // Coordinates must be page-relative. The host frame sits at 137,211 and
+      // the inner frame at a further 23,150, so a frame-relative leak shows up
+      // as coordinates far smaller than the frame offsets themselves.
+      const frameOffsets = await page.evaluate(() => {
+        const outer = document.querySelector('#nested-child').getBoundingClientRect();
+        return { x: outer.x, y: outer.y };
+      });
+      assert.ok(
+        nested.elements[0].x >= frameOffsets.x && nested.elements[0].y >= frameOffsets.y,
+        `nested element reported ${nested.elements[0].x},${nested.elements[0].y} which is above its own frame at ${frameOffsets.x},${frameOffsets.y}`,
+      );
+      assert.equal(nested.elements[0].visible, true, 'nested element must resolve computed style in its own document');
+
+      // The host document still resolves, and cross-origin frames still do not:
+      // spanning same-process frames must not widen the origin boundary.
+      const host = await inspection.find('#nested-top', {});
+      assert.equal(host.elements.length, 1);
+
+      // locate must reach the same elements as find, or two selector commands
+      // disagree about what exists. Its coordinates stay in the observed
+      // frame's space, which is what bp click --xy adds the session offset to.
+      const observation = new ObservationService(
+        { send: (method, params) => client.send(method, params), close() {} },
+        'isolated-session',
+        'nested-frames',
+        { refStore: new MemoryRefStore() },
+      );
+      const located = await observation.locate('#nested-deep');
+      assert.ok(
+        located.x >= frameOffsets.x && located.y >= frameOffsets.y,
+        `locate reported ${located.x},${located.y} above its own frame at ${frameOffsets.x},${frameOffsets.y}`,
       );
     } finally {
       await client.detach();
