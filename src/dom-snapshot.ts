@@ -88,10 +88,24 @@ export interface DomSnapshotWorkBudget {
   onDescendantTextNode?: () => void;
 }
 
+/**
+ * A document and every same-process document nested inside it, with the page
+ * offset each one sits at. Layout bounds inside a child document are relative
+ * to that document's own viewport, so the offset is what makes coordinates
+ * from different documents comparable.
+ */
+export interface DomSnapshotFrameView {
+  root: DomSnapshotDocument;
+  documents: readonly DomSnapshotDocument[];
+  byBackendNodeId: ReadonlyMap<number, DomSnapshotNodeFact>;
+  offsetOf(document: DomSnapshotDocument): { x: number; y: number };
+}
+
 export interface ParsedDomSnapshot {
   documents: DomSnapshotDocument[];
   byFrameId: ReadonlyMap<string, DomSnapshotDocument>;
   document(frameId?: string): DomSnapshotDocument | undefined;
+  frameView(frameId?: string): DomSnapshotFrameView | undefined;
 }
 
 export interface DomElementState {
@@ -292,11 +306,60 @@ export function parseDomSnapshot(raw: unknown): ParsedDomSnapshot {
   }
 
   const byFrameId = new Map(documents.filter(document => document.frameId).map(document => [document.frameId, document]));
+  const byIndex = new Map(documents.map(document => [document.index, document]));
   return {
     documents,
     byFrameId,
     document(frameId?: string) {
       return frameId ? byFrameId.get(frameId) : documents[0];
+    },
+    frameView(frameId?: string): DomSnapshotFrameView | undefined {
+      const root = frameId ? byFrameId.get(frameId) : documents[0];
+      if (!root) return undefined;
+
+      // Same-process child documents arrive in the same capture, linked from the
+      // owning iframe node. Walk down from the root only: a selected subframe
+      // must not observe its parent. Each document carries the page offset of
+      // the iframe chain above it, because its own layout bounds are relative to
+      // its own viewport.
+      const included: DomSnapshotDocument[] = [];
+      const offsets = new Map<number, DomSnapshotBounds>();
+      const byBackendNodeId = new Map<number, DomSnapshotNodeFact>();
+      const seen = new Set<number>();
+      const queue: { document: DomSnapshotDocument; x: number; y: number }[] = [
+        { document: root, x: 0, y: 0 },
+      ];
+
+      while (queue.length > 0) {
+        const { document, x, y } = queue.shift()!;
+        // A malformed capture could link a document twice or cycle; visiting
+        // each document once keeps the walk finite.
+        if (seen.has(document.index)) continue;
+        seen.add(document.index);
+        included.push(document);
+        offsets.set(document.index, { x, y, width: 0, height: 0 });
+        for (const node of document.nodes) {
+          if (!byBackendNodeId.has(node.backendNodeId)) byBackendNodeId.set(node.backendNodeId, node);
+          if (node.contentDocumentIndex === undefined) continue;
+          const child = byIndex.get(node.contentDocumentIndex);
+          if (!child || seen.has(child.index)) continue;
+          queue.push({
+            document: child,
+            x: x + (node.bounds?.x ?? 0),
+            y: y + (node.bounds?.y ?? 0),
+          });
+        }
+      }
+
+      return {
+        root,
+        documents: included,
+        byBackendNodeId,
+        offsetOf(document: DomSnapshotDocument) {
+          const offset = offsets.get(document.index);
+          return { x: offset?.x ?? 0, y: offset?.y ?? 0 };
+        },
+      };
     },
   };
 }

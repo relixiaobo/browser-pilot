@@ -627,7 +627,7 @@ export class ActionService {
               context,
             });
           }
-          const point = await this.offsetPointerPoint(state.x, state.y);
+          const point = await this.offsetPointerPoint(state.x, state.y, resolved.entry);
           await this.checkpoint(run, 'pointer_dispatch');
           this.willDispatch();
           await this.input.click(point.x, point.y, { button, clickCount });
@@ -661,12 +661,35 @@ export class ActionService {
     }
   }
 
-  private async offsetPointerPoint(x: number, y: number): Promise<{ x: number; y: number }> {
+  /**
+   * Pointer coordinates arrive relative to the viewport of the document that
+   * owns the node. Two offsets close the gap and compose:
+   *
+   * - the session offset, from the observed root frame to the page, and
+   * - the ref's own offset, from its document up to that observed root, which
+   *   is present only for a ref inside a nested same-process frame.
+   *
+   * Observing the top frame makes the first zero; observing a subframe whose
+   * refs all belong to it makes the second absent, which is the behavior that
+   * existed before nested documents were observable.
+   */
+  private async offsetPointerPoint(
+    x: number,
+    y: number,
+    entry?: RefEntry,
+  ): Promise<{ x: number; y: number }> {
     const offset = await this.pointerOffset();
     if (!Number.isFinite(offset?.x) || !Number.isFinite(offset?.y)) {
       throw new BrowserPilotError('internal_error', 'Browser returned an invalid frame pointer offset');
     }
-    return { x: x + offset.x, y: y + offset.y };
+    const frame = entry?.frameOffset;
+    if (frame && (!Number.isFinite(frame.x) || !Number.isFinite(frame.y))) {
+      throw new BrowserPilotError('internal_error', 'Observation returned an invalid frame offset');
+    }
+    return {
+      x: x + offset.x + (frame?.x ?? 0),
+      y: y + offset.y + (frame?.y ?? 0),
+    };
   }
 
   private async validateRef(

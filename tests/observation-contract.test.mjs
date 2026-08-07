@@ -164,7 +164,7 @@ function domSnapshotFixture(elements, frameId = 'frame:test') {
   };
 }
 
-test.todo('same-process iframe DOM-only controls appear in top-frame snapshots', async () => {
+test('same-process iframe DOM-only controls appear in top-frame snapshots', async () => {
   const domSnapshot = domSnapshotFixture([{
     backendNodeId: 501,
     nodeName: 'BUTTON',

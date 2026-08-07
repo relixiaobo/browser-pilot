@@ -10,6 +10,8 @@ import {
   domElementValue,
   isDomOnlyCandidate,
   parseDomSnapshot,
+  type DomSnapshotDocument,
+  type DomSnapshotNodeFact,
   type DomSnapshotWorkBudget,
 } from './dom-snapshot.js';
 import {
@@ -37,10 +39,26 @@ const ALLOW_EMPTY_NAME = new Set([
 
 // ── Types ───────────────────────────────────────────
 
+/**
+ * How many nested same-process frames contribute an accessibility tree to one
+ * observation. Each costs a round trip, so the cap bounds a pathological page
+ * without changing the frozen Observation v1 limit vocabulary; exceeding it
+ * reports the existing work_limit truncation reason.
+ */
+const MAX_NESTED_AX_FRAMES = 16;
+
 export interface RefEntry {
   backendNodeId: number;
   role: string;
   name: string;
+  /**
+   * The frame that owns this node, and the page offset of that frame. A node
+   * inside a same-process iframe reports coordinates relative to its own
+   * viewport, so dispatch needs this offset rather than the session's single
+   * active-frame offset, which is only correct while every ref shares one frame.
+   */
+  frameId?: string;
+  frameOffset?: { x: number; y: number };
 }
 
 export interface AxElementSemantic {
@@ -210,17 +228,52 @@ export async function takeSnapshot(
     transport.send('DOMSnapshot.captureSnapshot', DOM_SNAPSHOT_CAPTURE_PARAMS, sessionId),
   ]);
   const nodes = Array.isArray(axSnapshot.nodes) ? axSnapshot.nodes : [];
-  const domDocument = parseDomSnapshot(rawDomSnapshot).document(context.frameId);
+  // The DOM capture already contains every same-process document and links each
+  // iframe node to its child, so the document walk costs no extra round trip.
+  const domView = parseDomSnapshot(rawDomSnapshot).frameView(context.frameId);
+  const documentByIndex = new Map((domView?.documents ?? []).map(document => [document.index, document]));
+  const documentOf = (node: DomSnapshotNodeFact): DomSnapshotDocument | undefined =>
+    documentByIndex.get(node.documentIndex);
 
-  // Build tree using childIds ordering
-  const map = new Map<string, any>();
-  for (const n of nodes) map.set(n.nodeId, { ...n, children: [] as any[] });
-  const roots: any[] = [];
-  for (const [, node] of map) {
-    if (node.childIds) {
-      node.children = node.childIds.map((id: string) => map.get(id)).filter(Boolean);
+  // Accessibility.getFullAXTree returns one frame's tree, so a control that the
+  // accessibility tree describes but Chrome does not mark clickable -- a plain
+  // <button> with no listener -- would be invisible inside a nested frame while
+  // a clickable <div> beside it was reported. Fetch the nested trees too, but
+  // only when nested documents exist, so a frameless page keeps its single
+  // parallel round trip.
+  const nestedFrameIds = (domView?.documents ?? [])
+    .filter(document => document !== domView?.root && document.frameId)
+    .map(document => document.frameId)
+    .slice(0, MAX_NESTED_AX_FRAMES);
+  // Reuses the existing work_limit reason rather than adding a truncation
+  // vocabulary entry, which would change the frozen Observation v1 contract.
+  if (nestedFrameIds.length < ((domView?.documents.length ?? 1) - 1)) truncation.add('work_limit');
+  const nestedAxNodeSets = await Promise.all(nestedFrameIds.map(async frameId => {
+    try {
+      const nested = await transport.send('Accessibility.getFullAXTree', { frameId }, sessionId);
+      return Array.isArray(nested.nodes) ? nested.nodes : [];
+    } catch {
+      // A frame can detach between the DOM capture and this call. Its DOM-only
+      // controls still surface below; losing its accessibility names is a
+      // smaller failure than losing the whole observation.
+      return [];
     }
-    if (!node.parentId) roots.push(node);
+  }));
+
+  // Build tree using childIds ordering. Each frame's tree is linked on its own,
+  // because accessibility node ids are only unique within the frame that
+  // produced them and merging the sets would let one frame's id shadow
+  // another's.
+  const roots: any[] = [];
+  for (const axNodes of [nodes, ...nestedAxNodeSets]) {
+    const map = new Map<string, any>();
+    for (const n of axNodes) map.set(n.nodeId, { ...n, children: [] as any[] });
+    for (const [, node] of map) {
+      if (node.childIds) {
+        node.children = node.childIds.map((id: string) => map.get(id)).filter(Boolean);
+      }
+      if (!node.parentId) roots.push(node);
+    }
   }
 
   // Walk depth-first, collect interactive elements
@@ -244,6 +297,7 @@ export async function takeSnapshot(
     checked?: boolean;
     autocomplete?: string;
     insideDialog: boolean;
+    owner?: { node: DomSnapshotNodeFact; document: DomSnapshotDocument };
   }): void {
     const effectiveRole = input.role.slice(0, 128);
     if (emittedBackendNodeIds.has(input.backendNodeId) || byteBudgetExhausted) return;
@@ -272,7 +326,17 @@ export async function takeSnapshot(
 
     serializedBytes += elementBytes;
     emittedBackendNodeIds.add(input.backendNodeId);
-    refs.push({ backendNodeId: input.backendNodeId, role: effectiveRole, name });
+    const ownerOffset = input.owner && domView ? domView.offsetOf(input.owner.document) : undefined;
+    refs.push({
+      backendNodeId: input.backendNodeId,
+      role: effectiveRole,
+      name,
+      // Only carried when the node sits below the observed root; a ref in the
+      // root document keeps the existing session-offset behavior.
+      ...(input.owner && ownerOffset && (ownerOffset.x !== 0 || ownerOffset.y !== 0)
+        ? { frameId: input.owner.node.frameId, frameOffset: ownerOffset }
+        : input.owner?.node.frameId ? { frameId: input.owner.node.frameId } : {}),
+    });
     elements.push(el);
     const ref = el.ref;
     const autocomplete = input.autocomplete?.trim().toLowerCase() ?? '';
@@ -312,8 +376,9 @@ export async function takeSnapshot(
         const { backendNodeId } = semantic;
         if (Number.isSafeInteger(backendNodeId) && backendNodeId > 0) {
           axClaimedBackendNodeIds.add(backendNodeId);
-          const domFact = domDocument?.byBackendNodeId.get(backendNodeId);
-          const domState = domFact && domDocument ? domElementState(domDocument, domFact) : undefined;
+          const domFact = domView?.byBackendNodeId.get(backendNodeId);
+          const domOwner = domFact ? documentOf(domFact) : undefined;
+          const domState = domFact && domOwner ? domElementState(domOwner, domFact) : undefined;
           const checked = props.checked === true || props.checked === 'true'
             ? true
             : props.checked === false || props.checked === 'false'
@@ -330,10 +395,11 @@ export async function takeSnapshot(
               role: semantic.role,
               rawName: () => semantic.name !== undefined
                 ? semantic.name
-                : domFact && domDocument ? domElementName(domDocument, domFact, domWork) : '',
+                : domFact && domOwner ? domElementName(domOwner, domFact, domWork) : '',
               rawValue: () => typeof node.value?.value === 'string'
                 ? node.value.value
-                : domFact && domDocument ? domElementValue(domDocument, domFact, domWork) : undefined,
+                : domFact && domOwner ? domElementValue(domOwner, domFact, domWork) : undefined,
+              owner: domFact && domOwner ? { node: domFact, document: domOwner } : undefined,
               checked,
               autocomplete: typeof props.autocomplete === 'string'
                 ? props.autocomplete
@@ -351,25 +417,31 @@ export async function takeSnapshot(
 
   for (const root of roots) walk(root);
 
-  if (domDocument) {
-    for (const node of domDocument.nodes) {
-      if (byteBudgetExhausted || truncation.has('element_limit')) break;
+  // Every document in the view, not just the root: a control inside a
+  // same-process iframe is otherwise unreachable without selecting that frame.
+  // The shared budget checks below stop the walk across documents exactly as
+  // they stopped it within one, so a frame-heavy page truncates rather than
+  // exceeding its limits.
+  outer: for (const document of domView?.documents ?? []) {
+    for (const node of document.nodes) {
+      if (byteBudgetExhausted || truncation.has('element_limit')) break outer;
       if (axClaimedBackendNodeIds.has(node.backendNodeId)) continue;
       if (node.depth > OBSERVATION_V1_LIMITS.maxTreeDepth) {
         truncation.add('depth_limit');
         continue;
       }
-      if (!isDomOnlyCandidate(domDocument, node)) continue;
+      if (!isDomOnlyCandidate(document, node)) continue;
       addElement({
         backendNodeId: node.backendNodeId,
         role: domElementRole(node),
-        rawName: () => domElementName(domDocument, node, domWork),
-        rawValue: () => domElementValue(domDocument, node, domWork),
+        rawName: () => domElementName(document, node, domWork),
+        rawValue: () => domElementValue(document, node, domWork),
         checked: domElementChecked(node),
         autocomplete: node.attributes.get('autocomplete'),
-        insideDialog: domElementInsideDialog(domDocument, node),
+        insideDialog: domElementInsideDialog(document, node),
+        owner: { node, document },
       });
-      if (truncation.has('element_limit')) break;
+      if (truncation.has('element_limit')) break outer;
     }
   }
   if (domWork.exhausted) truncation.add('work_limit');
