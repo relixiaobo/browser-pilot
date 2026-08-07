@@ -446,6 +446,80 @@ test('same-origin frames and forced cross-origin OOPIFs are independently observ
   }
 });
 
+test('nested same-process frames are observed and clicked from the top frame', async () => {
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${primaryOrigin}/capability/frame-nested-host`);
+    await page.waitForSelector('#nested-child');
+    const client = await page.context().newCDPSession(page);
+    try {
+      const transport = { send: (method, params) => client.send(method, params), close() {} };
+      const refStore = new MemoryRefStore();
+      const observation = new ObservationService(transport, 'isolated-session', 'nested-frames', {
+        refStore,
+      });
+      const action = new ActionService(transport, 'isolated-session', 'nested-frames', {
+        refStore,
+        observationService: observation,
+      });
+
+      const observed = await observation.observe(50);
+      const names = observed.data.elements.map(element => element.name);
+      // Reachable only through the nested frame's own accessibility tree: the
+      // button carries no listener, so Chrome never marks it clickable.
+      assert.ok(names.includes('Nested AX Command'), `missing AX-exposed frame control: ${names}`);
+      // Reachable only through DOM supplementation inside the nested document.
+      assert.ok(names.includes('Nested DOM Command'), `missing DOM-only frame control: ${names}`);
+      // Two frames deep, so a walk that stops after one level fails here.
+      assert.ok(names.includes('Nested Deep Command'), `missing twice-nested control: ${names}`);
+
+      // Re-observe before each click: a click re-populates the ref store, so a
+      // ref captured from an earlier snapshot is not guaranteed to survive.
+      const clickByName = async name => {
+        const snapshot = await observation.observe(50);
+        const element = snapshot.data.elements.find(candidate => candidate.name === name);
+        assert.ok(element, `${name} must stay observable from the top frame`);
+        await action.click({ kind: 'ref', ref: String(element.ref) });
+      };
+      const innerFrame = () => page.frames()
+        .find(frame => frame.url().endsWith('/capability/frame-nested-inner'));
+      const deepFrame = () => page.frames()
+        .find(frame => frame.url().endsWith('/capability/frame-nested-deep'));
+
+      // Dispatch succeeding proves nothing about where the pointer landed, so
+      // every assertion below reads state the real element changed. Both frames
+      // sit at non-zero offsets, and a dropped coordinate transform lands these
+      // clicks in the host document instead.
+      await clickByName('Nested DOM Command');
+      assert.equal(
+        await innerFrame().evaluate(() => window.nestedDomActivated === true),
+        true,
+        'click on a nested DOM-only control did not reach the element',
+      );
+
+      await clickByName('Nested Deep Command');
+      assert.equal(
+        await deepFrame().evaluate(() => window.nestedDeepActivated === true),
+        true,
+        'click on a twice-nested control did not reach the element',
+      );
+
+      // The AX-exposed button has no listener by design, so its landing is read
+      // through the focus a real click produces.
+      await clickByName('Nested AX Command');
+      assert.equal(
+        await innerFrame().evaluate(() => document.activeElement?.id),
+        'nested-ax',
+        'click on a nested AX-exposed control did not focus the element',
+      );
+    } finally {
+      await client.detach();
+    }
+  } finally {
+    await page.close();
+  }
+});
+
 test('navigation and same-URL document replacement fixtures produce distinct transitions', async () => {
   const page = await browser.newPage();
   try {
