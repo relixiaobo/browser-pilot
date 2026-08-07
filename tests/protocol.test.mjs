@@ -266,7 +266,11 @@ test('canonical schemas propagate field-level sensitivity without changing value
   const observe = tool('browser.observe');
   const element = observe.outputSchema.properties.elements.items;
   assert.deepEqual(sensitivity(element.properties.value), ['browser_data', 'credential']);
-  assert.deepEqual(observe.sensitivity.output, ['browser_data', 'credential']);
+  // Observations also carry site knowledge, which is the user's own file content.
+  assert.deepEqual(observe.sensitivity.output, ['browser_data', 'credential', 'user_file']);
+  const site = observe.outputSchema.properties.site.items.oneOf;
+  assert.deepEqual(sensitivity(site[0].properties.body), ['user_file']);
+  assert.deepEqual(sensitivity(site[1].properties.path), ['user_file']);
 
   const auth = tool('browser.auth.set');
   assert.deepEqual(sensitivity(auth.inputSchema.properties.username), ['credential']);

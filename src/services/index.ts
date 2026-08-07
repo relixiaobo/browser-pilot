@@ -22,6 +22,7 @@ export * from './frame-service.js';
 export * from './cookie-service.js';
 export * from './workspace-network-controller.js';
 export * from './site-knowledge-store.js';
+export * from './site-knowledge-delivery.js';
 export { wildcardMatch } from '../wildcard.js';
 export * from './browser-control-policy.js';
 export * from './broker-runtime.js';

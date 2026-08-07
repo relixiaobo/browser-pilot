@@ -217,7 +217,7 @@ test('simultaneous CLI processes start and reuse exactly one per-user Broker', a
   assert.equal('wsUrl' in health, false);
   assert.equal(locator.serviceVersion, locator.executable.version);
   assert.deepEqual(locator.protocol, {
-    min: { major: 1, minor: 0 }, max: { major: 1, minor: 3 },
+    min: { major: 1, minor: 0 }, max: { major: 1, minor: 4 },
   });
 
   forceKillProcess(locator.pid);

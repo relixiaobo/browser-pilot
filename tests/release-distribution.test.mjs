@@ -167,7 +167,7 @@ test('release distribution binds tested and compatible CLI versions, skill, prot
   assert.equal(index.version, version);
   assert.deepEqual(index.protocol, {
     min: { major: 1, minor: 0 },
-    max: { major: 1, minor: 3 },
+    max: { major: 1, minor: 4 },
   });
   assert.deepEqual(index.npm, {
     package: 'browser-pilot-cli',

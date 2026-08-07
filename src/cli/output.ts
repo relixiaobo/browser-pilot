@@ -11,6 +11,31 @@ interface CliObservationElement {
   checked?: boolean;
 }
 
+interface CliSiteEntry {
+  status: 'full' | 'seen' | 'invalid';
+  name?: string;
+  summary?: string;
+  path?: string;
+  reason?: string;
+  body?: string;
+}
+
+/**
+ * Human mode summarises site knowledge; the full body is only worth printing
+ * for the JSON consumer that acts on it.
+ */
+function renderSiteEntry(entry: CliSiteEntry): string {
+  if (entry.status === 'invalid') {
+    return `[site] unusable ${serializeStructuralText(entry.path ?? '', 512)} - ${serializeStructuralText(entry.reason ?? '')}`;
+  }
+  const name = serializeStructuralText(entry.name ?? '', 128);
+  const summary = serializeStructuralText(entry.summary ?? '');
+  const detail = entry.status === 'full'
+    ? `${entry.body ? `${Buffer.byteLength(entry.body, 'utf8')} bytes` : 'empty'} inlined`
+    : serializeStructuralText(entry.path ?? '', 512);
+  return `[site] ${name} "${summary}" (${entry.status}: ${detail})`;
+}
+
 export interface CliOutput {
   useJson(): boolean;
   emit(data: Record<string, any>, human?: string): void;
@@ -71,6 +96,7 @@ export function createCliOutput(
         truncated,
         truncationReasons,
         ...(Array.isArray(result.hints) ? { hints: result.hints } : {}),
+        ...(Array.isArray(result.site) ? { site: result.site } : {}),
         ...(result.evidence && typeof result.evidence === 'object' ? { evidence: result.evidence } : {}),
         ...(typeof result.profileContextId === 'string'
           ? { profileContextId: result.profileContextId }
@@ -101,6 +127,11 @@ export function createCliOutput(
         if (element.checked) line += ' checked';
         lines.push(line);
       }
+    }
+    const site = Array.isArray(result.site) ? result.site as unknown as CliSiteEntry[] : [];
+    if (site.length > 0) {
+      lines.push('');
+      for (const entry of site) lines.push(renderSiteEntry(entry));
     }
     const suffix = truncated
       ? `\n\n[truncated: ${truncationReasons.join(', ')}]`
