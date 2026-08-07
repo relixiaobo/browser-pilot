@@ -35,7 +35,7 @@ test('CI runs browser gates after validation and preserves failure diagnostics',
   assert.ok(build > install, 'browser job must build dist after installing dependencies');
   assert.ok(playwright > build, 'Playwright gates must run after dist is built');
   assert.ok(browserTests > playwright, 'browser node tests must run after Playwright gates');
-  assert.match(browser, /if: failure\(\)[\s\S]*uses: actions\/upload-artifact@v4/);
+  assert.match(browser, /if: failure\(\)[\s\S]*uses: actions\/upload-artifact@v7/);
   assert.match(browser, /path: playwright-report\//);
 });
 
@@ -60,7 +60,7 @@ test('CI exercises the portable unit and distribution contracts on Windows', () 
   const windows = jobs.get('windows');
   assert.ok(windows, 'CI must define a Windows job');
   assert.match(windows, /^    runs-on: windows-latest$/m);
-  assert.match(windows, /uses: actions\/setup-node@v4[\s\S]*node-version: 22\.17\.0/);
+  assert.match(windows, /uses: actions\/setup-node@v7[\s\S]*node-version: 22\.17\.0/);
   assert.match(windows, /run: npm run test:unit/);
   assert.match(windows, /run: npx tsc --noEmit/);
   assert.match(windows, /run: npm run test:distribution/);
@@ -94,7 +94,7 @@ test('release publication is one tag-gated draft to npm to public state machine'
   assert.match(publish, /permissions:[\s\S]*contents: write[\s\S]*id-token: write/);
   assert.match(
     publish,
-    /uses: actions\/checkout@v4\n        with:\n          fetch-depth: 0/,
+    /uses: actions\/checkout@v7\n        with:\n          fetch-depth: 0/,
     'release publication must fetch enough history to fast-forward skill-stable',
   );
   const skillValidation = publish.indexOf('npm run validate:skill');
