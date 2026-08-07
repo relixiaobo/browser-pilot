@@ -561,6 +561,21 @@ test('selector queries reach nested frames and report page coordinates', async (
       // spanning same-process frames must not widen the origin boundary.
       const host = await inspection.find('#nested-top', {});
       assert.equal(host.elements.length, 1);
+
+      // locate must reach the same elements as find, or two selector commands
+      // disagree about what exists. Its coordinates stay in the observed
+      // frame's space, which is what bp click --xy adds the session offset to.
+      const observation = new ObservationService(
+        { send: (method, params) => client.send(method, params), close() {} },
+        'isolated-session',
+        'nested-frames',
+        { refStore: new MemoryRefStore() },
+      );
+      const located = await observation.locate('#nested-deep');
+      assert.ok(
+        located.x >= frameOffsets.x && located.y >= frameOffsets.y,
+        `locate reported ${located.x},${located.y} above its own frame at ${frameOffsets.x},${frameOffsets.y}`,
+      );
     } finally {
       await client.detach();
     }

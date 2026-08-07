@@ -131,7 +131,9 @@ state. Use `bp click --xy x,y` only for visual surfaces without semantic refs.
 
 ### `bp locate <selector>`
 
-Return viewport coordinates and size for a CSS-selected element.
+Return viewport coordinates and size for a CSS-selected element. Searches the
+selected frame and the same-process frames below it, reporting coordinates in
+the selected frame's space so `bp click --xy` can use them directly.
 
 ### `bp type <ref> <text> [--clear] [--submit] [--limit <n>]`
 
@@ -190,9 +192,17 @@ while Chrome's site isolation puts a cross-origin frame in its own process.
 - Selecting a frame narrows observation to that frame and its own descendants;
   it never widens it to the parent.
 
-Selector-based commands, coordinates from `bp locate`, and `bp click --xy` are
-all scoped to the selected subframe, and a selector naming a top-frame element
-does not resolve while a subframe is selected.
+`bp find` and `bp locate` search the selected subframe and every same-process
+frame below it, so a selector for a control a snapshot reported resolves without
+selecting its frame. They never reach upward: a selector naming a top-frame
+element does not resolve while a subframe is selected.
+
+`bp locate` reports coordinates relative to the selected subframe, which is the
+space `bp click --xy` expects, so the two compose across a frame boundary
+without adjustment.
+
+`bp read` and `bp search` remain limited to the selected frame's own document
+and do not descend into nested frames.
 
 To reach a cross-origin frame, discover its source and open it as its own page:
 

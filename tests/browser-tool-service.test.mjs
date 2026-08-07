@@ -241,7 +241,12 @@ class BrowserFixtureTransport {
         }
         if (params.expression === '6 * 7') return { result: { value: 42 } };
         if (params.expression === 'location.href') return { result: { value: target.url } };
-        if (String(params.expression).startsWith('JSON.stringify((function(){var el=document.querySelector(')) {
+        // Keyed on scrollIntoView, which only the locate expression performs,
+        // rather than on its opening characters: matching a prefix made this
+        // fake silently stop recognizing locate when the query gained frame
+        // traversal, and the test failed with an undefined coordinate instead
+        // of anything pointing at the cause.
+        if (String(params.expression).includes('scrollIntoView')) {
           return { result: { value: JSON.stringify({ x: 60, y: 35, top: 20, left: 10, width: 100, height: 30 }) } };
         }
         if (String(params.expression).startsWith("JSON.stringify(Array.from(document.querySelectorAll('input[type=file]'))")) {
