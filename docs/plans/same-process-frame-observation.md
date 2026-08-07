@@ -1,6 +1,6 @@
 # Same-Process Frame Observation and Selector Routing
 
-Status: **F1 implemented — F3 partially closed**
+Status: **Complete — pending a release**
 Baseline: `v0.6.2` @ `a4032bf`
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
 
@@ -182,9 +182,21 @@ F2 no longer includes a selector-routing fix: F0.2 found nothing to fix.
   so it is retained as a regression guard rather than converted.
 - [x] **F3.2** Measured. An OOPIF degrades **silently**, which is worse than
   the plan assumed. See below.
-- [ ] **F3.3** Record the observation-recall change against the quantitative
-  baselines from B0.4, and graduate the nested-frame fixtures into
-  `REQUIRED_BROWSER_CAPABILITY_SCENARIOS` with that baseline update.
+- [x] **F3.3** The nested-frame fixture is now a required capability scenario
+  with benchmark ground truth, and the stored baseline moved with it:
+
+  | Metric | Before | After |
+  |---|---|---|
+  | Observation cases | 10 | 11 |
+  | Observable target recall | 10/10 | 14/14 |
+  | False-interactable rate | 2/12 | 2/16 |
+  | Max normalized Observation bytes | 426 | 514 |
+
+  Recall holds at 100% with four more targets demanded, and the
+  false-interactable rate improves because the added targets are all genuine.
+  The output-size maximum rises because the nested fixture legitimately returns
+  more elements; the gate treats that as a regression unless the baseline is
+  updated deliberately, which is what this is.
 
 ### F3.2 findings: cross-origin frames degrade silently
 

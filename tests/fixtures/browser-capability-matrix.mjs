@@ -3,6 +3,7 @@ export const REQUIRED_BROWSER_CAPABILITY_SCENARIOS = Object.freeze([
   'dom_only',
   'shadow_dom',
   'same_origin_iframe',
+  'nested_same_process_frames',
   'cross_origin_oopif',
   'overlay',
   'contenteditable',
@@ -56,6 +57,17 @@ export const BROWSER_CAPABILITY_FIXTURES = Object.freeze([
     signals: ['same_origin_frame', 'frame_control'],
     html: () => `<title>Same-origin frame host</title>
 <iframe id="same-frame" src="/capability/frame-same-inner"></iframe>`,
+  },
+  {
+    // Frames at non-zero offsets on both levels: a frame parked at the page
+    // origin would let a dropped coordinate transform pass unnoticed.
+    id: 'nested_same_process_frames',
+    path: '/capability/frame-nested-host',
+    signals: ['nested_frame_control', 'frame_control'],
+    html: () => `<title>Nested frame host</title>
+<button id="nested-top">Nested Top Command</button>
+<iframe id="nested-child" src="/capability/frame-nested-inner"
+  style="position:absolute;left:137px;top:211px;width:420px;height:320px;border:0"></iframe>`,
   },
   {
     id: 'cross_origin_oopif',
@@ -141,6 +153,19 @@ export const BROWSER_CAPABILITY_BENCHMARK_CASES = Object.freeze([
     falseInteractableTargets: [],
   },
   {
+    // Observed from the top frame, so this case measures whether nested
+    // documents contribute at all -- the host control alone would still look
+    // like a healthy Observation.
+    id: 'nested_same_process_frames',
+    actionableTargets: [
+      'button\0Nested Top Command',
+      'button\0Nested AX Command',
+      'button\0Nested DOM Command',
+      'button\0Nested Deep Command',
+    ],
+    falseInteractableTargets: [],
+  },
+  {
     id: 'cross_origin_oopif',
     actionableTargets: ['button\0Cross Frame Command'],
     falseInteractableTargets: [],
@@ -187,15 +212,6 @@ const SUPPORT_PAGES = new Map([
 <button id="cross-frame-button">Cross Frame Command</button>`],
   ['/capability/navigation-next', `<title>Navigation complete</title>
 <main id="navigation-complete">navigation complete</main>`],
-
-  // Nested same-process frames, used to pin observation and pointer accuracy
-  // across frame boundaries. The offsets are deliberately non-zero at both
-  // levels: a frame parked at the page origin would let a missing coordinate
-  // transform pass by accident.
-  ['/capability/frame-nested-host', `<title>Nested frame host</title>
-<button id="nested-top">Nested Top Command</button>
-<iframe id="nested-child" src="/capability/frame-nested-inner"
-  style="position:absolute;left:137px;top:211px;width:420px;height:320px;border:0"></iframe>`],
 
   // The plain button carries no listener on purpose: Chrome does not mark it
   // clickable, so it can only be observed through the frame's own accessibility

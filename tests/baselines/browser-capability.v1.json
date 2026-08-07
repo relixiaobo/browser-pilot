@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "corpus": {
-    "observationCases": 10,
+    "observationCases": 11,
     "actionFailureCases": 2,
     "staleRefCases": 2
   },
   "observableTargetRecall": {
-    "matchedTargets": 10,
-    "expectedTargets": 10
+    "matchedTargets": 14,
+    "expectedTargets": 14
   },
   "falseInteractableRate": {
     "falseInteractableTargets": 2,
-    "observedTargets": 12
+    "observedTargets": 16
   },
   "actionFailureDetection": {
     "detectedFailures": 2,
@@ -22,8 +22,8 @@
     "expectedStaleRefs": 2
   },
   "outputSize": {
-    "samples": 10,
-    "maxNormalizedObservationBytes": 426,
+    "samples": 11,
+    "maxNormalizedObservationBytes": 514,
     "protocolBudgetBytes": 2097152
   }
 }
