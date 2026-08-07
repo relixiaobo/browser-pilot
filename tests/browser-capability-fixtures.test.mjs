@@ -464,6 +464,9 @@ test('nested same-process frames are observed and clicked from the top frame', a
       });
 
       const observed = await observation.observe(50);
+      // Recorded once, before any click mutates the page, so the benchmark
+      // measures observation rather than post-action state.
+      recordBenchmarkObservation('nested_same_process_frames', observed);
       const names = observed.data.elements.map(element => element.name);
       // Reachable only through the nested frame's own accessibility tree: the
       // button carries no listener, so Chrome never marks it clickable.
