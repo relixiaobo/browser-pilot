@@ -173,21 +173,21 @@ modify globals. Use only when a dedicated command is insufficient.
 - `bp dialog <id> --accept [--prompt <text>]` accepts one dialog.
 - `bp dialog <id> --dismiss` dismisses one dialog.
 
-Known frame limitations:
+Known frame limitation:
 
-- Snapshot DOM supplementation currently scans only the top document in one
-  CDP target. In a same-process iframe, interactive controls can be absent from
-  `bp snapshot`, and iframe elements do not receive the complete DOM
-  visibility and disabled-state checks.
-- Selector resolution currently uses the top frame's main JavaScript world.
-  After `bp frame <index>` selects a subframe, selector-based commands may
-  resolve the selector in the top frame instead of the selected subframe.
+- Observation covers one document at a time. A snapshot taken from the top
+  frame contains no part of a same-process iframe, and a snapshot taken with a
+  frame selected contains only that frame. Nested frames behave the same way at
+  each level.
 
-When either limitation applies, do not infer that a control is absent and do
-not act on a same-named top-frame selector. Prefer a fresh semantic ref when
-one is returned. Otherwise use `bp eval` in the selected frame or a verified
-visual coordinate action until frame-aware DOM scanning and selector routing
-are implemented.
+Select the frame before observing it. Once selected, its controls are fully
+observable and actionable, including DOM-only controls the accessibility tree
+does not expose. Selector-based commands, coordinates from `bp locate`, and
+`bp click --xy` are all scoped to the selected subframe, and a selector naming
+a top-frame element does not resolve while a subframe is selected.
+
+Do not infer from a top-frame snapshot that a page's iframes have no controls.
+Run `bp frame` to list them and select the one you need.
 
 ## Files and Captures
 
