@@ -893,6 +893,10 @@ test('CLI preserves specific browser setup remediation without suggesting anothe
   const status = await runCli(root, ['status'], env);
   assert.equal(status.recovery.required, true);
   assert.equal(status.recovery.action, setupError.remediation.message);
+  // The Agent locates the site knowledge corpus from status rather than
+  // assuming a path, so it must be reported even while the browser is down and
+  // must honour an embedding host's BROWSER_PILOT_HOME.
+  assert.equal(status.paths.sites, join(root, '.browser-pilot', 'sites'));
 
   const human = await runCliFailure(root, ['--human', 'tabs'], env);
   assert.match(human.stderr, /action: Open chrome:\/\/inspect\/#remote-debugging/);
@@ -1160,6 +1164,7 @@ test('CLI JSON output contract covers every command', async t => {
 
   const outputs = {};
   outputs.status = await runCli(root, ['status']);
+  outputs.status.paths.sites = '<sitesDir>';
   outputs.commands = await runCli(root, ['commands']);
   outputs.command = await runCli(root, ['command', 'command:recent']);
   outputs.cancel = await runCli(root, ['cancel', 'command:running']);
@@ -1325,6 +1330,7 @@ test('CLI JSON output contract covers every command', async t => {
         },
       },
       commands: { active: [], uncertain: [] },
+      paths: { sites: '<sitesDir>' },
       recovery: { required: false },
     },
     commands: { ok: true, commands: [commandDescriptor] },
@@ -1730,6 +1736,7 @@ test('CLI uses only canonical Broker and file operations', async t => {
   assert.equal(status.session.target.url, 'https://example.test/form');
   assert.equal('eventCursor' in status, false);
   assert.equal(status.recovery.required, false);
+  assert.equal(status.paths.sites, join(testBrokerPaths(root).stateDir, 'sites'));
   assert.deepEqual(
     calls
       .filter(call => call.body?.method === 'commands/list')

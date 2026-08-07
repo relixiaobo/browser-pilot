@@ -8,6 +8,7 @@ import {
   type CompatibilityProfile,
   type CompatibilityTarget,
 } from '../../compatibility-broker-client.js';
+import { SITES_DIR } from '../../paths.js';
 import { BrowserPilotError, invalidArgument } from '../../protocol/errors.js';
 import type {
   CommandDescriptor,
@@ -88,6 +89,7 @@ program.command('status')
         browser: { state: 'disconnected' },
         browsers,
         session: { state: 'unavailable' },
+        paths: { sites: SITES_DIR },
         recovery: {
           required: true,
           code: 'browser_disconnected',
@@ -155,6 +157,7 @@ program.command('status')
         active: activeCommands.map(cliCommand),
         uncertain: uncertainCommands.map(cliCommand),
       },
+      paths: { sites: SITES_DIR },
       recovery,
     }, `Browser Pilot: ${browser?.state ?? 'disconnected'}; ${tabs.length} tab(s); ${activeCommands.length} active command(s)`);
   }));
