@@ -17,6 +17,10 @@ const pluginManifest = await readJson('../plugin/.claude-plugin/plugin.json');
 const skillCompatibility = await readJson('../plugin/skills/browser-pilot/compatibility.json');
 const marketplace = await readJson('../.claude-plugin/marketplace.json');
 const skill = await readFile(new URL('../plugin/skills/browser-pilot/SKILL.md', import.meta.url), 'utf8');
+const skillSetup = await readFile(
+  new URL('../plugin/skills/browser-pilot/references/setup.md', import.meta.url),
+  'utf8',
+);
 const posixInstaller = await readFile(
   new URL('../plugin/skills/browser-pilot/scripts/install-native.sh', import.meta.url),
   'utf8',
@@ -56,12 +60,22 @@ assert.deepEqual(
   browserPilotCliMetadata(packageManifest),
   'skill CLI compatibility must match package.json',
 );
+// SKILL.md owns the compatibility gate an Agent hits on every task; the
+// installation contract it guards lives in references/setup.md, which the gate
+// makes mandatory reading whenever `bp` is missing or out of range. Assert both
+// halves plus the link between them, so the contract can be reorganized but not
+// dropped.
 assert.ok(
   skill.includes('[compatibility.json](compatibility.json)') &&
-    skill.includes('browserPilotCli.installation') &&
-    skill.includes('unsupportedPlatformExitCode') &&
-    skill.includes('bp --version'),
-  'skill instructions must load and enforce its compatibility manifest',
+    skill.includes('bp --version') &&
+    skill.includes('[references/setup.md](references/setup.md)'),
+  'skill instructions must load its compatibility manifest and route to the installation contract',
+);
+assert.ok(
+  skillSetup.includes('browserPilotCli.installation') &&
+    skillSetup.includes('unsupportedPlatformExitCode') &&
+    skillSetup.includes('bp --version'),
+  'skill installation reference must enforce the compatibility manifest',
 );
 assert.ok(
   posixInstaller.includes(`UNSUPPORTED_PLATFORM_EXIT_CODE=${NATIVE_INSTALL_UNSUPPORTED_EXIT_CODE}`) &&
@@ -76,7 +90,11 @@ assert.ok(
 assert.ok(marketplacePlugin, 'browser-pilot marketplace entry is required');
 assert.equal(marketplacePlugin.version, version, 'marketplace version must match package.json');
 
-if (process.env.GITHUB_REF_NAME) {
+// Only a tag ref carries a release version to compare. Keying on the ref type
+// rather than merely on GITHUB_REF_NAME lets continuous integration run every
+// other assertion here on a branch, so manifest drift is caught before a tag is
+// cut instead of failing the release build.
+if (process.env.GITHUB_REF_TYPE === 'tag') {
   assert.equal(process.env.GITHUB_REF_NAME, `v${version}`, `release tag must equal v${version}`);
 }
 
