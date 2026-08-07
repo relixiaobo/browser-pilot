@@ -1,6 +1,6 @@
 # Same-Process Frame Observation and Selector Routing
 
-Status: **Design — not started**
+Status: **F0 measured — F1 and F2 rescoped**
 Baseline: `v0.6.2` @ `a4032bf`
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
 
@@ -60,22 +60,81 @@ that bypass `ActionService`. **The first deliverable is a reproduction, not a
 fix.** Writing the fix against a limitation that no longer reproduces would add
 untested code and leave the real gap — wherever it is — in place.
 
+## F0 measurement results
+
+Measured against real Chrome on a host page whose iframe sits at a non-zero
+page offset (`left: 137px, top: 211px`), with an inner frame carrying an
+accessibility-exposed `<button>`, a DOM-only clickable `<div>`, and a further
+nested frame.
+
+### Limitation A reproduces, and is stronger than documented
+
+| Observation context | Elements returned |
+|---|---|
+| Top frame | `button\0Top Command` only |
+| Child frame selected | `button\0Inner AX Command`, `button\0Inner DOM Command` |
+| Nested frame selected | `button\0Deep Command` |
+
+Same-process iframe content is not merely *sometimes omitted* from a top-frame
+snapshot — it is **entirely absent**, at every nesting level. The documented
+wording understated this.
+
+The inverse is also true and was not documented: once a frame is selected, its
+controls are observed correctly, **including the DOM-only control**. DOM
+supplementation works fine; it is scoped to one document, not broken.
+
+### Limitation B does not reproduce
+
+| Probe | Result |
+|---|---|
+| `locate('#inner-ax')`, child selected | resolves at `x=74 y=19` |
+| `locate('#top-button')`, child selected | `invalid_argument` — does **not** leak to the top frame |
+| `locate('#inner-ax')`, top frame | `invalid_argument` |
+| `locate('#top-button')`, top frame | resolves at `x=59 y=19` |
+
+Selector resolution is correctly scoped to the selected frame in **both**
+directions. The documented claim that selectors "can resolve against the top
+frame after selecting a subframe" is not accurate.
+
+Scope of that finding: `locate` was measured end to end. `read`, `search`, and
+`elements.find` were verified by inspection to receive the same
+`observationContext.executionContextId`
+(`src/services/browser-tool-service.ts:1173,1196,1218`), so they share the
+mechanism rather than having been individually measured.
+
+### Coordinates are frame-relative by design, and consistent
+
+`locate` returns `getBoundingClientRect` values from inside the frame's
+execution context, so `x=74 y=19` is relative to the frame, not the page. This
+initially looked like a wrong-pixel defect. It is not: `ActionService`
+dispatches pointer input through `offsetPointerPoint`, which adds the active
+frame's offset (`action-service.ts:664`, injected at
+`browser-tool-service.ts:2844`). `bp locate` → `bp click --xy` is therefore
+coherent today.
+
+The design consequence is real, though: that offset is **session-wide, keyed to
+the one active frame**. The moment observation returns elements from several
+frames at once, a single offset can no longer be correct, so per-element frame
+identity becomes a prerequisite rather than a refinement.
+
 ## Delivery Order
 
-### F0. Establish what actually reproduces
+### F0. Establish what actually reproduces — done
 
-- [ ] **F0.1** Extend the fixture catalog with a same-origin iframe whose
-  interactive control is DOM-only, one whose control is exposed through the
-  accessibility tree, and one nested two frames deep.
-- [ ] **F0.2** For each public command that accepts a selector, record whether
-  it resolves inside a selected subframe today. Produce a table of command →
-  reproduces / does not reproduce.
-- [ ] **F0.3** Rewrite the `SKILL.md` and `references/commands.md` limitation
-  text to match F0.2. If a documented limitation does not reproduce, removing
-  the workaround guidance is itself a shipped correction.
-
-Gate: F1 and F2 are scoped by F0.2. Do not implement against the current
-documentation wording.
+- [x] **F0.1** Measure a same-origin iframe at a non-zero page offset carrying a
+  DOM-only control, an accessibility-exposed control, and a nested frame.
+- [x] **F0.2** Record whether selector resolution reaches the selected subframe
+  today. It does; see the results above.
+- [x] **F0.3** Rewrite the `SKILL.md` and `references/commands.md` limitation
+  text to match the measurement. The selector-routing claim is removed because
+  it does not reproduce, and the observation limitation is restated as total
+  rather than partial. This is a user-visible skill change and needs a
+  release-note entry when the next version is cut.
+- [ ] **F0.4** Promote the measurement fixtures into
+  `tests/fixtures/browser-capability-matrix.mjs` as durable scenarios. They
+  cannot join `REQUIRED_BROWSER_CAPABILITY_SCENARIOS` until F1 lands, because
+  that list is asserted to match the benchmark cases exactly, so they graduate
+  with F3.1.
 
 ### F1. Observe the same-process document set
 
@@ -99,10 +158,15 @@ documentation wording.
 - [ ] **F2.1** For a ref whose owning frame is not the selected frame, resolve
   that frame's isolated world before dispatching, reusing `FrameService`'s
   existing per-frame world rather than adding a second mechanism.
-- [ ] **F2.2** Confirm ref invalidation still fires per frame. Ref identity
+- [ ] **F2.2** Replace the session-wide pointer offset with a per-element one.
+  `offsetPointerPoint` currently adds the single active frame's offset, which is
+  correct only while every element comes from that frame. This is the concrete
+  form of the F1.3 risk and the reason F1.2 is a prerequisite.
+- [ ] **F2.3** Confirm ref invalidation still fires per frame. Ref identity
   already binds frame and loader (Workstream B0.3), so a subframe navigating
   must invalidate only its own refs.
-- [ ] **F2.3** Fix whatever F0.2 shows is genuinely routing to the top frame.
+
+F2 no longer includes a selector-routing fix: F0.2 found nothing to fix.
 
 ### F3. Close the contract
 

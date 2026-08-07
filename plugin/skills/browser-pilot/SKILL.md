@@ -180,12 +180,12 @@ to clear them, not as routine end-of-task cleanup.
 Use `bp frame`, `bp frame <index>`, and `bp frame 0` to list, select, and leave
 frames. Refresh the snapshot after changing frames.
 
-Known limitations: snapshots can omit controls inside same-process iframes,
-and selector-based commands can resolve against the top frame after selecting
-a subframe. Prefer fresh semantic refs when they are present. Otherwise use
-`bp eval` in the selected frame or a visual coordinate action, verify the
-result, and do not assume an empty snapshot proves that the iframe has no
-controls.
+Known limitation: a snapshot taken from the top frame does not include the
+contents of a same-process iframe at all. Select the frame with `bp frame
+<index>` first, then snapshot; controls inside it are then observable and
+actionable, including controls the accessibility tree does not expose on its
+own. An empty or control-free top-frame snapshot never proves that a page's
+iframes have no controls — check `bp frame` for frames worth selecting.
 
 JavaScript dialogs remain pending until explicitly handled:
 
