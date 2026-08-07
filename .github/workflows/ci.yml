@@ -28,6 +28,7 @@ jobs:
       - run: npm ci
       - run: npm run validate:skill
       - run: npm run release:check-version
+      - run: node scripts/verify-release-version.mjs
       - run: npm run lint
       - run: npm run test:unit
       - run: npx tsc --noEmit

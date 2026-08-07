@@ -46,11 +46,16 @@ test('CI rejects release manifest drift before validation', () => {
   const install = validate.indexOf('run: npm ci');
   const skillValidation = validate.indexOf('run: npm run validate:skill');
   const versionCheck = validate.indexOf('run: npm run release:check-version');
+  const releaseManifests = validate.indexOf('run: node scripts/verify-release-version.mjs');
   const lint = validate.indexOf('run: npm run lint');
   const unit = validate.indexOf('run: npm run test:unit');
   assert.ok(install >= 0, 'validation must install dependencies');
   assert.ok(skillValidation > install, 'managed skill validation must run after install');
   assert.ok(versionCheck > skillValidation, 'version sync must be checked after skill validation');
+  assert.ok(
+    releaseManifests > versionCheck,
+    'CI must verify release manifests so tag-only drift cannot reach a release build',
+  );
   assert.ok(lint > versionCheck, 'lint must run after the version sync check');
   assert.ok(unit > lint, 'lint must run before unit tests');
 });
