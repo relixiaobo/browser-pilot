@@ -105,6 +105,11 @@ test('release publication is one tag-gated draft to npm to public state machine'
     'git push origin "${GITHUB_SHA}:refs/heads/skill-stable"',
   );
   assert.ok(skillValidation >= 0 && plugin > skillValidation && index > plugin && stateMachine > index);
+  assert.match(
+    publish,
+    /if: \$\{\{ !contains\(github\.ref_name, '-'\) }}\n        run: git push origin "\$\{GITHUB_SHA}:refs\/heads\/skill-stable"/,
+    'a prerelease must not advance the stable managed skill branch',
+  );
   assert.ok(
     stableSkillBranch > stateMachine,
     'managed skill branch must advance only after release publication succeeds',
