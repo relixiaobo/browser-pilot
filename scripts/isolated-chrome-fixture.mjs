@@ -1,10 +1,20 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 const forceKillSignal = process.platform === 'win32' ? 'SIGTERM' : 'SIGKILL';
+
+// Chrome startup competes with everything else on a CI runner, and a cold
+// runner image can leave it well short of a tight budget. The old 15s deadline
+// began expiring on hosted runners while Chrome was still alive and starting,
+// so allow for a genuinely slow start.
+const CHROME_STARTUP_TIMEOUT_MS = 60_000;
+
+// A Chrome that never finishes starting is indistinguishable from a slow one
+// unless its stderr survives, so keep a bounded tail for the failure message.
+const CHROME_STDERR_CAPTURE_BYTES = 8_192;
 
 async function firstExecutable(candidates) {
   for (const candidate of candidates.filter(Boolean)) {
@@ -66,12 +76,45 @@ function chromeProfile(testHome) {
   return join(testHome, '.config', 'google-chrome');
 }
 
-async function waitForDevToolsPort(profile, chrome) {
+// Drains Chrome's stderr so its pipe cannot fill and stall startup, while
+// retaining only the tail needed to explain a failure.
+function captureStderr(child) {
+  const chunks = [];
+  let size = 0;
+  child.stderr?.on('data', chunk => {
+    chunks.push(chunk);
+    size += chunk.length;
+    while (size > CHROME_STDERR_CAPTURE_BYTES && chunks.length > 1) {
+      size -= chunks.shift().length;
+    }
+  });
+  return () => Buffer.concat(chunks).toString('utf8').trim();
+}
+
+function describeStderr(readStderr) {
+  const stderr = readStderr?.() ?? '';
+  return stderr ? `; Chrome stderr tail: ${stderr}` : '; Chrome wrote nothing to stderr';
+}
+
+async function describeProfile(profile) {
+  try {
+    const entries = await readdir(profile);
+    return entries.length ? entries.sort().join(', ') : '(empty)';
+  } catch (error) {
+    return `(unreadable: ${error?.code ?? error})`;
+  }
+}
+
+async function waitForDevToolsPort(profile, chrome, readStderr) {
   const portFile = join(profile, 'DevToolsActivePort');
-  const deadline = Date.now() + 15_000;
+  const startedAt = Date.now();
+  const deadline = startedAt + CHROME_STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (chrome.exitCode !== null || chrome.signalCode !== null) {
-      throw new Error(`isolated Chrome exited before creating ${portFile}`);
+      throw new Error(
+        `isolated Chrome exited before creating ${portFile} ` +
+        `(code ${chrome.exitCode}, signal ${chrome.signalCode})${describeStderr(readStderr)}`,
+      );
     }
     try {
       const [port, path] = (await readFile(portFile, 'utf8')).trim().split(/\r?\n/);
@@ -80,7 +123,13 @@ async function waitForDevToolsPort(profile, chrome) {
     } catch { /* Chrome has not finished starting. */ }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  throw new Error(`isolated Chrome did not create ${portFile}`);
+  // Reaching here means Chrome stayed alive for the whole budget without
+  // publishing a port, so report what it was doing rather than only the path.
+  throw new Error(
+    `isolated Chrome did not create ${portFile} within ${Date.now() - startedAt}ms ` +
+    `(pid ${chrome.pid} still running; profile contains ${await describeProfile(profile)})` +
+    describeStderr(readStderr),
+  );
 }
 
 async function waitForChildExit(child, timeoutMs) {
@@ -185,10 +234,10 @@ export async function startIsolatedChromeFixture(prefix = 'browser-pilot-test-')
       // Chrome already has an explicit user-data-dir. Keep its real OS home;
       // the isolated HOME below is only for Browser Pilot discovery/state.
       env: process.env,
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
     });
-    await waitForDevToolsPort(profile, chrome);
+    await waitForDevToolsPort(profile, chrome, captureStderr(chrome));
   };
 
   const stopBrowser = async () => {
