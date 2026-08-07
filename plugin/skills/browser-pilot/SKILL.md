@@ -180,12 +180,22 @@ to clear them, not as routine end-of-task cleanup.
 Use `bp frame`, `bp frame <index>`, and `bp frame 0` to list, select, and leave
 frames. Refresh the snapshot after changing frames.
 
-Known limitation: a snapshot taken from the top frame does not include the
-contents of a same-process iframe at all. Select the frame with `bp frame
-<index>` first, then snapshot; controls inside it are then observable and
-actionable, including controls the accessibility tree does not expose on its
-own. An empty or control-free top-frame snapshot never proves that a page's
-iframes have no controls — check `bp frame` for frames worth selecting.
+A snapshot covers same-process iframes automatically, at any nesting depth —
+in practice, every frame sharing the page's origin. Their controls appear as
+ordinary refs and are clicked the same way, so selecting a frame is not required
+to reach them. Select a frame only to narrow what a snapshot returns, or to
+scope a selector.
+
+Cross-origin iframes are different, and nothing reports the difference. Their
+contents are never in a snapshot, `bp frame` does not list them, and the result
+carries no marker of the omission — so a missing control is indistinguishable
+from a control that does not exist. To reach one, find it and open it in its own
+tab:
+
+```bash
+bp find "iframe" --attributes src
+bp open "<the cross-origin src>" --new
+```
 
 JavaScript dialogs remain pending until explicitly handled:
 
