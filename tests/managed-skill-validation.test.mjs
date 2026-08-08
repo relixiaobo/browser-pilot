@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { SiteKnowledgeStore } from '../dist/services.js';
 import {
   validateManagedSkillDirectory,
 } from '../scripts/validate-managed-skill.mjs';
@@ -28,7 +29,7 @@ test('managed Browser Pilot skill satisfies the repository distribution contract
   const result = await validateManagedSkillDirectory(managedSkill);
   assert.equal(result.ok, true);
   assert.equal(result.name, 'browser-pilot');
-  assert.equal(result.files, 10);
+  assert.equal(result.files, 12);
   assert.equal(result.totalBytes < 16 * 1024 * 1024, true);
 });
 
@@ -139,4 +140,40 @@ test('managed skill validation rejects executable files and symbolic links', {
   const linked = await fixture(parent, 'linked');
   await symlink(join(linked, 'SKILL.md'), join(linked, 'linked.md'));
   await assert.rejects(validateManagedSkillDirectory(linked), /symbolic link/);
+});
+
+test('every shipped seed is accepted by the store that will read it', async () => {
+  const store = new SiteKnowledgeStore({ directory: join(managedSkill, 'sites') });
+  const { records, invalid } = await store.scan();
+
+  assert.deepEqual(invalid, [], 'a shipped seed the store rejects would be seeded and then ignored');
+  assert.ok(records.length > 0, 'the seed directory must not ship empty');
+
+  for (const record of records) {
+    assert.ok(record.body.length > 0, `${record.name} has no notes`);
+    assert.ok(
+      record.summary.length <= 120,
+      `${record.name} has a summary too long for the one-line delivered form`,
+    );
+    // Seeds are the format exemplar Agents copy, so they must model the rule
+    // that notes outlive the markup they describe.
+    assert.doesNotMatch(
+      record.body,
+      /querySelector|\[data-|\bclass="/,
+      `${record.name} records a selector; seeds must model durable notes, not markup`,
+    );
+  }
+});
+
+test('seeds match the hosts they claim and nothing adjacent', async () => {
+  const store = new SiteKnowledgeStore({ directory: join(managedSkill, 'sites') });
+  const named = async url => (await store.match(url)).matches.map(match => match.record.name);
+
+  assert.deepEqual(await named('https://docs.google.com/spreadsheets/d/abc/edit'), ['google-docs-editors']);
+  assert.deepEqual(await named('https://docs.google.com/document/create'), ['google-docs-editors']);
+  assert.deepEqual(await named('https://www.google.com/search?q=browser+pilot'), ['google-search']);
+  assert.deepEqual(await named('https://google.de/search?q=test'), ['google-search']);
+  // The bare Google home page is not a results page, and Docs is not a search.
+  assert.deepEqual(await named('https://www.google.com/'), []);
+  assert.deepEqual(await named('https://mail.google.com/mail/u/0/'), []);
 });

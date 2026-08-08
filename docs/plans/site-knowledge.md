@@ -1,6 +1,6 @@
 # Site Knowledge Plan
 
-Status: **Proposed**
+Status: **Implemented except the S7 benchmark**
 Baseline: `v0.7.0`
 Target: Browser Pilot `v0.8.0`, protocol `1.4` (additive)
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
@@ -297,24 +297,48 @@ A new "Site Knowledge" section, normative content:
 
 ## Workstreams
 
-- [ ] **S1** Broker site store: read `stateDir/sites`, parse frontmatter,
+- [x] **S1** Broker site store: read `stateDir/sites`, parse frontmatter,
   match host/path with lenient normalization. Unit tests: subdomain, `www.`
   stripping, path globs, case, invalid-frontmatter exclusion, missing
   directory.
-- [ ] **S2** Delivery: `site` field on observation-bearing results, mtime
+  - Complete: `src/services/site-knowledge-store.ts`. The frontmatter parser
+    is hand-written because the runtime carries no YAML dependency and only
+    four fields are machine-consumed.
+- [x] **S2** Delivery: `site` field on observation-bearing results, mtime
   dedup in client-key session state, specificity ordering, ~2KB budget with
   overflow-to-seen, invalid-file diagnostics once per session. Protocol
   `1.4` additive. Tests: full-then-seen transition, redelivery after edit
   (mtime bump), cross-Agent redelivery, budget overflow.
-- [ ] **S3** CLI output: render `site` entries in JSON and human modes.
-- [ ] **S4** Plugin: SKILL.md "Site Knowledge" section with the doctrine
+  - Complete: `src/services/site-knowledge-delivery.ts`, scoped to the
+    Workspace. Site content is classified `user_file`, which the nine
+    observation-bearing tools now declare.
+- [x] **S3** CLI output: render `site` entries in JSON and human modes.
+  - Complete: delivered with S2, since the JSON path was needed to observe
+    the field at all.
+- [x] **S4** Plugin: SKILL.md "Site Knowledge" section with the doctrine
   above, including the seeding instruction; update `compatibility.json` for
   the paired versions.
-- [ ] **S5** Seeds: author 4–6 files meeting the selection criteria;
+  - Complete. `bp status` also reports `paths.sites`: the corpus location
+    differs per platform and moves with `BROWSER_PILOT_HOME`, so a hardcoded
+    path in the doctrine would have been wrong on Windows.
+- [x] **S5** Seeds: author 4–6 files meeting the selection criteria;
   validate the validatable ones against the real-site canary suite; review
   each as a format exemplar.
-- [ ] **S6** Guardrails: assert no install/upgrade/uninstall path writes to
+  - Complete at two files, not four to six, and the shortfall is the honest
+    result of the selection criteria rather than an omission. The real-site
+    canary suite covers exactly one synthetic host
+    (`the-internet.herokuapp.com`), so its branch of the criteria yields
+    nothing a user would ever visit. Only the capability-warning branch was
+    shippable: `google-docs-editors` and `google-search`, whose every claim
+    rests on Browser Pilot's own documented behaviour or on a stable public
+    URL contract. Site-specific DOM and flow claims were deliberately not
+    written, because inventing them would break the same doctrine S4 ships —
+    record only what was reproduced. Growing the set needs live verification
+    with a real browser, or new canary hosts.
+- [x] **S6** Guardrails: assert no install/upgrade/uninstall path writes to
   `sites/`; document the user-data (not cache) classification for future
   uninstall work.
+  - Complete: `tests/site-knowledge-guardrails.test.mjs`. Each assertion was
+    checked by violating the property it protects.
 - [ ] **S7** Agent-task benchmark: a task on a seeded site measuring
   turn-count delta with and without delivery (extends `tests/agent/`).

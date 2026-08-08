@@ -69,6 +69,10 @@ for (const required of [
   'skills/browser-pilot/references/recovery.md',
   'skills/browser-pilot/scripts/install-native.ps1',
   'skills/browser-pilot/scripts/install-native.sh',
+  // Seeds must reach the archive: an Agent copies them once, and a seed missing
+  // from the package is never noticed afterwards.
+  'skills/browser-pilot/sites/google-docs-editors.md',
+  'skills/browser-pilot/sites/google-search.md',
 ]) {
   assert.ok(paths.has(required), `plugin archive is missing ${required}`);
 }
