@@ -182,3 +182,31 @@ test('no match and no diagnostics deliver nothing at all', () => {
   const tracker = new SiteKnowledgeDeliveryTracker();
   assert.deepEqual(tracker.deliver(AGENT, matched([])), []);
 });
+
+test('delivery honours the cap its own result schema declares, and says what it dropped', () => {
+  const tracker = new SiteKnowledgeDeliveryTracker();
+  // The store admits many more files than a result may carry, so a corpus this
+  // size is reachable and would otherwise emit a schema-violating array.
+  const many = Array.from({ length: 40 }, (_, index) => record({ name: `site-${index}` }));
+
+  const entries = tracker.deliver(AGENT, matched(many));
+  assert.equal(entries.length, 32, 'the array must fit the declared maxItems');
+
+  const notice = entries[entries.length - 1];
+  assert.equal(notice.status, 'invalid');
+  assert.match(notice.reason, /9 further matches were not delivered/);
+  assert.equal(
+    entries.filter(entry => entry.status !== 'invalid').length,
+    31,
+    'the last slot is spent on the notice rather than on a silently dropped file',
+  );
+});
+
+test('a corpus that just fits is delivered whole, with no notice', () => {
+  const tracker = new SiteKnowledgeDeliveryTracker();
+  const exact = Array.from({ length: 32 }, (_, index) => record({ name: `site-${index}` }));
+
+  const entries = tracker.deliver(AGENT, matched(exact));
+  assert.equal(entries.length, 32);
+  assert.equal(entries.some(entry => entry.status === 'invalid'), false);
+});

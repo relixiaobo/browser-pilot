@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { SiteKnowledgeStore } from '../dist/services.js';
@@ -140,6 +140,23 @@ test('managed skill validation rejects executable files and symbolic links', {
   const linked = await fixture(parent, 'linked');
   await symlink(join(linked, 'SKILL.md'), join(linked, 'linked.md'));
   await assert.rejects(validateManagedSkillDirectory(linked), /symbolic link/);
+});
+
+test('the seeding instruction names a directory that actually ships', async () => {
+  const skill = await readFile(join(managedSkill, 'SKILL.md'), 'utf8');
+
+  // Shipping seeds an Agent cannot locate leaves every corpus empty with no
+  // error anywhere, which is exactly what 0.9.0 did. The instruction has to
+  // resolve, so it is pinned against the tree it resolves into.
+  assert.match(skill, /`sites\/` directory beside this file/);
+  assert.match(skill, /\$\{CLAUDE_PLUGIN_ROOT\}\/skills\/browser-pilot\/sites\//);
+
+  const siblings = await readdir(managedSkill);
+  assert.ok(siblings.includes('sites'), 'the directory the instruction names must exist');
+  assert.ok(
+    siblings.includes('compatibility.json') && siblings.includes('references'),
+    'the instruction resolves sites/ by the company it keeps, so that company must be there',
+  );
 });
 
 test('every shipped seed is accepted by the store that will read it', async () => {
