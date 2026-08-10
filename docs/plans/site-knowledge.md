@@ -400,5 +400,38 @@ A new "Site Knowledge" section, normative content:
   uninstall work.
   - Complete: `tests/site-knowledge-guardrails.test.mjs`. Each assertion was
     checked by violating the property it protects.
-- [ ] **S7** Agent-task benchmark: a task on a seeded site measuring
-  turn-count delta with and without delivery (extends `tests/agent/`).
+- [ ] **S7** Doctrine-adherence probes. Redefined: the original wording asked
+  for a turn-count delta and pointed at `tests/agent/`, and both were wrong.
+  `tests/agent/` is legacy — its README marks the JSON tasks non-authoritative
+  and the harness now lives in the separate caliper checkout under
+  `CALIPER_ROOT`. More importantly, turn count measures whether knowledge
+  *helps*, while the untested claims are about whether Agents *follow the
+  doctrine at all*. Those claims are the largest unverified surface in this
+  design; everything else has either shipped tests or field verification.
+
+  Each probe targets one rule, is scored by deterministic post-hoc shell
+  checks (caliper's `verify_commands`, no LLM judge), and reports a **rate over
+  N samples** rather than pass/fail, because adherence is probabilistic. All
+  three need the Broker built from this branch and `CALIPER_BP_SKILL_PATH`
+  pointed at its skill, with an isolated `BROWSER_PILOT_HOME` per sample so the
+  corpus starts in a known state.
+
+  - [ ] **S7.1** *Repair on contradiction* — the highest-stakes rule and the
+    easiest to score. Pre-seed a file whose note is demonstrably false for the
+    page. Give a task that must act on what the note describes. Afterwards,
+    check whether the false line was corrected. Three outcomes are worth
+    distinguishing and all are observable: corrected, silently worked around
+    (task done, file untouched), and obeyed anyway (task failed).
+  - [ ] **S7.2** *Read before acting* — pre-seed a note that is the only cheap
+    route to a correct answer, and pair every sample with a control run that
+    has an empty corpus. Without the control the probe proves nothing, because
+    a capable model may reach the answer unaided.
+  - [ ] **S7.3** *Write after recovery* — start from an empty corpus, give a
+    task containing a non-obvious trap, and check afterwards whether a file
+    appeared that the store accepts and whose patterns match the host. Expect a
+    low rate; the design only claims monotone accumulation, so the number to
+    record is the baseline, not a threshold to pass.
+
+  Implementation lives in caliper, not here. What belongs in this repo is the
+  fixture corpus each probe seeds, kept beside the tests rather than in
+  `plugin/.../sites/`, so probe fixtures are never confused with shipped seeds.
