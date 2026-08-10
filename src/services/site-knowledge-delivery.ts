@@ -14,6 +14,13 @@ import type { SiteKnowledgeMatchResult } from './site-knowledge-store.js';
  */
 
 const DEFAULT_INLINE_BUDGET_BYTES = 2_048;
+/**
+ * The result schema declares this cap, and the store admits far more files than
+ * it, so delivery has to enforce it or emit results its own contract rejects.
+ * One slot is kept for the notice, because a silently shortened list would read
+ * as a complete one.
+ */
+const MAX_DELIVERED_ENTRIES = 32;
 
 export interface SiteKnowledgeDeliveryOptions {
   inlineBudgetBytes?: number;
@@ -64,7 +71,24 @@ export class SiteKnowledgeDeliveryTracker {
     }
 
     entries.push(...this.invalidEntries(scope, result.invalid));
-    return entries;
+    return this.capped(entries);
+  }
+
+  /**
+   * Trims to the cap the result schema declares, spending the last slot on
+   * saying what was dropped. Matches arrive most specific first, so what falls
+   * off the end is the least relevant.
+   */
+  private capped(entries: SiteKnowledgeDelivery[]): SiteKnowledgeDelivery[] {
+    if (entries.length <= MAX_DELIVERED_ENTRIES) return entries;
+    const kept = entries.slice(0, MAX_DELIVERED_ENTRIES - 1);
+    const dropped = entries.length - kept.length;
+    kept.push({
+      status: 'invalid',
+      path: '(site knowledge)',
+      reason: `${dropped} further matches were not delivered; this URL matches more site files than one result carries`,
+    });
+    return kept;
   }
 
   /** Drops the memory for a scope whose workspace was released. */
