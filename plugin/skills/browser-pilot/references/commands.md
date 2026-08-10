@@ -201,8 +201,9 @@ element does not resolve while a subframe is selected.
 space `bp click --xy` expects, so the two compose across a frame boundary
 without adjustment.
 
-`bp read` and `bp search` remain limited to the selected frame's own document
-and do not descend into nested frames.
+`bp read` and `bp search` descend the same way. Frame text is read where the
+frame sits rather than appended, so page content stays in reading order, and a
+search match reports coordinates that include its frame's offset.
 
 To reach a cross-origin frame, discover its source and open it as its own page:
 
