@@ -29,7 +29,7 @@ test('managed Browser Pilot skill satisfies the repository distribution contract
   const result = await validateManagedSkillDirectory(managedSkill);
   assert.equal(result.ok, true);
   assert.equal(result.name, 'browser-pilot');
-  assert.equal(result.files, 13);
+  assert.equal(result.files, 15);
   assert.equal(result.totalBytes < 16 * 1024 * 1024, true);
 });
 
@@ -174,6 +174,11 @@ test('seeds match the hosts they claim and nothing adjacent', async () => {
     ['github-issues'],
   );
   assert.deepEqual(await named('https://github.com/vercel/next.js/pulls'), []);
+  assert.deepEqual(await named('https://www.youtube.com/watch?v=abc'), ['youtube']);
+  assert.deepEqual(await named('https://m.youtube.com/watch?v=abc'), ['youtube']);
+  assert.deepEqual(await named('https://youtu.be/abc'), ['youtube']);
+  assert.deepEqual(await named('https://www.npmjs.com/package/commander'), ['npm-package']);
+  assert.deepEqual(await named('https://www.npmjs.com/'), []);
   assert.deepEqual(await named('https://docs.google.com/spreadsheets/d/abc/edit'), ['google-docs-editors']);
   assert.deepEqual(await named('https://docs.google.com/document/create'), ['google-docs-editors']);
   assert.deepEqual(await named('https://www.google.com/search?q=browser+pilot'), ['google-search']);

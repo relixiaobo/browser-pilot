@@ -118,6 +118,11 @@ the resolved `bp` CLI through its ordinary shell tool.
      sign that anything is missing. Close it with `bp press Escape` or raise
      `--limit` before reading the page as empty.
    - Use `bp read [selector]` for readable page content.
+   - `bp read` picks a main-content region and can pick the wrong one, and it
+     also returns text that is in the DOM but not on screen. Text it omits may
+     still be found by `bp search`, and text it returns may be stale player or
+     dialog boilerplate. Never conclude content is absent, or report state such
+     as an error or a signed-out session, from a read alone.
    - Use `bp search <text>` for a phrase and nearby context.
    - Use `bp find <selector>` for bounded DOM metadata.
    - Use `bp screenshot --annotate` when layout, overlap, canvas content, or

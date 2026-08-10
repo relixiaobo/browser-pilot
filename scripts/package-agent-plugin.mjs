@@ -74,6 +74,8 @@ for (const required of [
   'skills/browser-pilot/sites/github-issues.md',
   'skills/browser-pilot/sites/google-docs-editors.md',
   'skills/browser-pilot/sites/google-search.md',
+  'skills/browser-pilot/sites/npm-package.md',
+  'skills/browser-pilot/sites/youtube.md',
 ]) {
   assert.ok(paths.has(required), `plugin archive is missing ${required}`);
 }
