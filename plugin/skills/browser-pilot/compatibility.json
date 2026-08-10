@@ -1,16 +1,16 @@
 {
   "schemaVersion": 3,
-  "skillVersion": "0.7.1",
+  "skillVersion": "0.8.0",
   "browserPilotCli": {
-    "testedVersion": "0.7.1",
-    "minimumVersion": "0.7.1",
+    "testedVersion": "0.8.0",
+    "minimumVersion": "0.8.0",
     "maximumVersionExclusive": "1.0.0",
-    "supportedVersionRange": ">=0.7.1 <1.0.0",
+    "supportedVersionRange": ">=0.8.0 <1.0.0",
     "installation": {
       "strategy": "native-first",
       "native": {
         "repository": "relixiaobo/browser-pilot",
-        "version": "0.7.1",
+        "version": "0.8.0",
         "installers": {
           "posix": "scripts/install-native.sh",
           "windows": "scripts/install-native.ps1"
@@ -19,7 +19,7 @@
       },
       "npmFallback": {
         "requiredNodeVersion": ">=22",
-        "installCommand": "npm install --global browser-pilot-cli@0.7.1"
+        "installCommand": "npm install --global browser-pilot-cli@0.8.0"
       }
     }
   },
