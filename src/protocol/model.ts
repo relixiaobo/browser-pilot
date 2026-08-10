@@ -39,6 +39,14 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [
   { major: 1, minor: 4 },
 ] as const satisfies readonly ProtocolVersion[];
 
+/**
+ * The newest version this build speaks. Clients must request exactly this as
+ * their maximum: asking for less silently disables every feature gated above
+ * the version they asked for, and nothing reports the mismatch.
+ */
+export const LATEST_PROTOCOL_VERSION: ProtocolVersion =
+  SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
+
 export const CAPABILITIES = [
   'browser.discovery',
   'browser.control',

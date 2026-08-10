@@ -3065,6 +3065,76 @@ test('an unusable site file is reported on the observation exactly once', async 
   assert.equal(again.site, undefined, 'the same complaint is not repeated on every observation');
 });
 
+test('an intermediate observation never spends the one inlined body', async t => {
+  // browser.dropdown.select on an ARIA control observes twice and returns only
+  // the second result. Consuming delivery inside createObservation would spend
+  // the body on the observation the Agent never sees, and the unchanged mtime
+  // would mean it was never inlined again for that Workspace.
+  const transport = new BrowserFixtureTransport();
+  transport.extraAxNodes = [
+    {
+      nodeId: 'city', parentId: 'root', ignored: false,
+      role: { value: 'combobox' }, name: { value: 'City' },
+      properties: [{ name: 'expanded', value: { value: true } }],
+      backendDOMNodeId: 302,
+    },
+    {
+      nodeId: 'owned-option', parentId: 'root', ignored: false,
+      role: { value: 'option' }, name: { value: 'Shanghai' }, properties: [],
+      backendDOMNodeId: 304,
+    },
+  ];
+  transport.onMouseReleased = () => { transport.ariaSelected = true; };
+  // The corpus starts empty so the select is the first result that could carry
+  // the body, which is what makes this discriminating.
+  const { directory, store } = await siteKnowledgeFixture(t, {});
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:site-knowledge-intermediate',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding, {
+      siteKnowledge: store,
+      loadWaiter: async () => {},
+    }),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:site-knowledge-intermediate',
+    'com.example.agent',
+    'instance:site-knowledge-intermediate',
+    4,
+  );
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(observed.site, undefined, 'nothing to deliver yet');
+  const dropdownRef = observed.elements.find(element => element.name === 'City').ref;
+
+  await writeFile(join(directory, 'example.md'), [
+    '---',
+    'name: example',
+    'domains: ["example.test"]',
+    'summary: The host the dropdown fixture serves',
+    '---',
+    '- A note that must survive an intermediate observation',
+    '',
+  ].join('\n'), 'utf8');
+
+  const selected = await tool(runtime, client, 'browser.dropdown.select', {
+    target: { observationId: observed.observationId, ref: dropdownRef },
+    choice: { by: 'label', label: 'Shanghai', exact: true },
+    observationLimit: 10,
+  }, targetId);
+
+  assert.equal(selected.evidence.status, 'verified');
+  assert.equal(selected.site.length, 1);
+  assert.equal(
+    selected.site[0].status,
+    'full',
+    'the body must reach the result the Agent receives, not an Observation it never sees',
+  );
+  assert.match(selected.site[0].body, /must survive an intermediate observation/);
+});
+
 test('an unreadable site corpus never fails an observation', async t => {
   const transport = new BrowserFixtureTransport();
   const { store } = await siteKnowledgeFixture(t, {});

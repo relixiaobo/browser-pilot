@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -276,4 +276,63 @@ test('the mtime changes when a file is edited so delivery can re-trigger', async
   const after = (await store.scan()).records[0];
   assert.ok(after.mtimeMs > before, 'an edit must bump the delivery de-duplication key');
   assert.match(after.body, /repaired/);
+});
+
+test('an uppercase extension is judged on its stem, not told to rename itself', async (t) => {
+  const { directory, store } = await fixture(t);
+  await write(directory, 'Mixed.MD', siteFile({ name: 'Mixed', domains: ['a.test'] }));
+
+  const { records, invalid } = await store.scan();
+  assert.deepEqual(invalid, [], 'a .MD file must be usable rather than permanently invalid');
+  assert.deepEqual(records.map(record => record.name), ['Mixed']);
+});
+
+test('frontmatter longer than the delivered schema allows is refused', async (t) => {
+  const { directory, store } = await fixture(t);
+  await write(directory, 'wordy.md', siteFile({
+    name: 'wordy',
+    domains: ['a.test'],
+    summary: 'x'.repeat(600),
+  }));
+
+  const { records, invalid } = await store.scan();
+  assert.deepEqual(records, []);
+  assert.match(invalid[0].reason, /summary exceeds 512 characters/);
+});
+
+test('a reported reason stays inside the bound the result schema declares', async (t) => {
+  const { directory, store } = await fixture(t);
+  // The name is author-controlled and gets quoted into the reason.
+  await write(directory, 'long.md', siteFile({ name: 'y'.repeat(400), domains: ['a.test'] }));
+
+  const { invalid } = await store.scan();
+  assert.ok(invalid[0].reason.length <= 512, `reason ran to ${invalid[0].reason.length} characters`);
+});
+
+test('an unchanged file is not re-read, and an edited one is', async (t) => {
+  const { directory, store } = await fixture(t);
+  const path = join(directory, 'cached.md');
+  // A whole-millisecond stamp, applied identically before and after the edit, so
+  // the two stats are byte-for-byte comparable and only the cache can explain a
+  // difference in what the scan returns.
+  const pinned = new Date(1_770_000_000_000);
+  await write(directory, 'cached.md', siteFile({ name: 'cached', domains: ['a.test'] }));
+  await utimes(path, pinned, pinned);
+  assert.equal((await store.scan()).records[0].body, '- A note');
+
+  await write(directory, 'cached.md', siteFile({
+    name: 'cached',
+    domains: ['a.test'],
+    body: '- Content the cache must still be hiding',
+  }));
+  await utimes(path, pinned, pinned);
+  assert.equal((await store.scan()).records[0].body, '- A note', 'an unchanged mtime must not re-read');
+
+  await new Promise(resolve => setTimeout(resolve, 10));
+  await write(directory, 'cached.md', siteFile({
+    name: 'cached',
+    domains: ['a.test'],
+    body: '- A repaired note',
+  }));
+  assert.equal((await store.scan()).records[0].body, '- A repaired note', 'a new mtime must re-read');
 });

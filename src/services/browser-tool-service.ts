@@ -3,7 +3,6 @@ import { BrowserPilotError, invalidArgument } from '../protocol/errors.js';
 import {
   OBSERVATION_V1_LIMITS,
   type AgentHint,
-  type SiteKnowledgeDelivery,
   type ArtifactDescriptor,
   type ArtifactId,
   type BrowserInstance,
@@ -46,7 +45,7 @@ import { createBrowserControlPolicy } from './browser-control-policy.js';
 import {
   observationAgentHints,
 } from './agent-hint-service.js';
-import { SiteKnowledgeStore } from './site-knowledge-store.js';
+import { SiteKnowledgeStore, type SiteKnowledgeMatchResult } from './site-knowledge-store.js';
 import { SiteKnowledgeDeliveryTracker } from './site-knowledge-delivery.js';
 import {
   BrowserWatchdogService,
@@ -209,7 +208,12 @@ interface CreatedObservation {
   snapshot: SnapshotResult;
   record: StoredObservation;
   hints: AgentHint[];
-  site: SiteKnowledgeDelivery[];
+  /**
+   * Matched knowledge, not yet delivered. Several tool paths create more than
+   * one Observation and return only the last, so consuming delivery state here
+   * would spend a file's one inlined body on a result the Agent never sees.
+   */
+  siteMatches?: SiteKnowledgeMatchResult;
 }
 
 interface ObservationContextIdentity {
@@ -2403,29 +2407,26 @@ export class BrowserToolService implements BrowserToolExecutor {
       previous && previous.frameId === frameId ? previous.guidance : undefined,
     );
     this.guidanceBySession.set(session.sessionId, { frameId, guidance: snapshot.guidance });
-    const site = await this.siteKnowledgeFor(context, snapshot.data.url);
-    return { snapshot, record, hints, site };
+    const siteMatches = await this.siteKnowledgeFor(context, snapshot.data.url);
+    return { snapshot, record, hints, ...(siteMatches ? { siteMatches } : {}) };
   }
 
   /**
-   * Resolves the site knowledge for an observed URL. Delivery is scoped to the
-   * Workspace because that is what a client key owns, so the same Agent keeps
-   * its de-duplication state across short-lived CLI processes. Reading the
-   * corpus must never fail an observation: knowledge is an aid, not a
-   * precondition.
+   * Matches site knowledge against an observed URL without consuming delivery
+   * state; `observationResult` decides what to hand over, because only the
+   * Observation actually returned reaches the Agent. Reading the corpus must
+   * never fail an observation: knowledge is an aid, not a precondition.
    */
   private async siteKnowledgeFor(
     context: BrokerToolCallContext,
     url: string,
-  ): Promise<SiteKnowledgeDelivery[]> {
-    if (context.connection.protocol.minor < SITE_KNOWLEDGE_PROTOCOL_MINOR) return [];
-    const workspaceId = context.workspace?.id;
-    if (!workspaceId) return [];
+  ): Promise<SiteKnowledgeMatchResult | undefined> {
+    if (context.connection.protocol.minor < SITE_KNOWLEDGE_PROTOCOL_MINOR) return undefined;
+    if (!context.workspace?.id) return undefined;
     try {
-      const matched = await this.siteKnowledge.match(url);
-      return this.siteKnowledgeDelivery.deliver(workspaceId, matched);
+      return await this.siteKnowledge.match(url);
     } catch {
-      return [];
+      return undefined;
     }
   }
 
@@ -2953,9 +2954,22 @@ export class BrowserToolService implements BrowserToolExecutor {
       truncated: created.record.truncated,
       truncationReasons: created.record.truncationReasons,
       hints: [...created.hints, ...additionalHints],
-      ...(created.site.length > 0 ? { site: created.site } : {}),
+      ...this.siteKnowledgeResult(context, created),
       ...(evidence ? { evidence } : {}),
     });
+  }
+
+  /**
+   * Consumes delivery state exactly once, for the Observation being returned.
+   */
+  private siteKnowledgeResult(
+    context: BrokerToolCallContext,
+    created: CreatedObservation,
+  ): Record<string, JsonValue> {
+    const workspaceId = context.workspace?.id;
+    if (!created.siteMatches || !workspaceId) return {};
+    const site = this.siteKnowledgeDelivery.deliver(workspaceId, created.siteMatches);
+    return site.length > 0 ? { site: site as unknown as JsonValue } : {};
   }
 
   private targetResult(

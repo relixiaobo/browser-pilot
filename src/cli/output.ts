@@ -30,10 +30,13 @@ function renderSiteEntry(entry: CliSiteEntry): string {
   }
   const name = serializeStructuralText(entry.name ?? '', 128);
   const summary = serializeStructuralText(entry.summary ?? '');
+  // The path is printed for every status: a human-mode reader is never shown the
+  // body, so without it they are told a note exists with no way to open it.
+  const path = serializeStructuralText(entry.path ?? '', 512);
   const detail = entry.status === 'full'
     ? `${entry.body ? `${Buffer.byteLength(entry.body, 'utf8')} bytes` : 'empty'} inlined`
-    : serializeStructuralText(entry.path ?? '', 512);
-  return `[site] ${name} "${summary}" (${entry.status}: ${detail})`;
+    : 'body withheld';
+  return `[site] ${name} "${summary}" (${entry.status}: ${detail}) ${path}`;
 }
 
 export interface CliOutput {

@@ -188,9 +188,11 @@ observation; never run a command to fetch them.
 Each entry carries a `status`:
 
 - `full` — the whole file body is included. Read it before acting.
-- `seen` — you already received this version in this task; act on what you read
-  earlier. The entry still carries `path`, so read the file with the Agent
-  host's own file tool if that content has left your context.
+- `seen` — the body was withheld, either because you already received this
+  version in this task or because the file was too large to inline. Act on what
+  you read earlier; if you do not have it, read `path` with the Agent host's own
+  file tool. Every entry carries `path`, so never treat a withheld body as a
+  reason to skip the note.
 - `invalid` — a file that could not be used, with the reason. Repair it if it is
   one you wrote; otherwise tell the user.
 

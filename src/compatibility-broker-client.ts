@@ -23,6 +23,7 @@ import {
   type CommandStatus,
   type ControlledTargetId,
   type ControlLease,
+  LATEST_PROTOCOL_VERSION,
   type InitializeResult,
   type JsonValue,
   type ObservationId,
@@ -159,7 +160,14 @@ export class CompatibilityBrokerClient {
         version: executableVersion,
         instanceId: identity.instanceId,
       },
-      protocol: { min: { major: 1, minor: 1 }, max: { major: 1, minor: 3 } },
+      // Must track the newest supported version. A CLI that asks for less than
+      // the Broker offers silently loses every feature gated above what it
+      // requested, with no error anywhere; `protocol.test.mjs` pins the two
+      // together so a future minor cannot drift them apart again.
+      protocol: {
+        min: { major: 1, minor: 1 },
+        max: { major: LATEST_PROTOCOL_VERSION.major, minor: LATEST_PROTOCOL_VERSION.minor },
+      },
       requestedCapabilities: [...CAPABILITIES],
     }), 'initialize') as unknown as InitializeResult;
     if (

@@ -14,6 +14,15 @@ const FRONTMATTER_DELIMITER = '---';
 const SITE_FILE_EXTENSION = '.md';
 const DEFAULT_MAX_FILES = 256;
 const DEFAULT_MAX_FILE_BYTES = 64 * 1024;
+// These mirror the bounds the delivered result schema declares. Enforcing them
+// here keeps that schema an honest contract for anyone who validates against it.
+const MAX_NAME_LENGTH = 128;
+const MAX_SUMMARY_LENGTH = 512;
+const MAX_REASON_LENGTH = 512;
+
+function bounded(reason: string): string {
+  return reason.length <= MAX_REASON_LENGTH ? reason : `${reason.slice(0, MAX_REASON_LENGTH - 1)}…`;
+}
 
 export interface SiteKnowledgeRecord {
   /** Identifier; always equal to the file's basename without extension. */
@@ -215,6 +224,8 @@ export class SiteKnowledgeStore {
   private readonly directory: string;
   private readonly maxFiles: number;
   private readonly maxFileBytes: number;
+  /** Parsed files keyed by path, valid while the file's mtime is unchanged. */
+  private readonly cache = new Map<string, { mtimeMs: number; value: SiteKnowledgeRecord }>();
 
   constructor(options: SiteKnowledgeStoreOptions = {}) {
     this.directory = options.directory ?? SITES_DIR;
@@ -265,9 +276,36 @@ export class SiteKnowledgeStore {
         continue;
       }
 
-      const record = await this.readRecord(path, entry.name);
-      if ('reason' in record) invalid.push(record);
-      else records.push(record);
+      let mtimeMs: number;
+      try {
+        const stats = await stat(path);
+        if (stats.size > this.maxFileBytes) {
+          invalid.push({ path, reason: `File exceeds the ${this.maxFileBytes}-byte site file limit` });
+          continue;
+        }
+        mtimeMs = stats.mtimeMs;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? 'unknown error';
+        invalid.push({ path, reason: `Cannot stat file: ${code}` });
+        continue;
+      }
+
+      const cached = this.cache.get(path);
+      const record = cached?.mtimeMs === mtimeMs
+        ? cached.value
+        : await this.readRecord(path, entry.name, mtimeMs);
+      if ('reason' in record) invalid.push({ ...record, reason: bounded(record.reason) });
+      else {
+        records.push(record);
+        // Re-reading the whole corpus on every observation would charge each
+        // click and scroll for it; the mtime that already gates delivery gates
+        // this too, so a repaired file is still picked up immediately.
+        this.cache.set(path, { mtimeMs: record.mtimeMs, value: record });
+      }
+    }
+
+    for (const path of [...this.cache.keys()]) {
+      if (!selected.some(entry => join(this.directory, entry.name) === path)) this.cache.delete(path);
     }
 
     return { records, invalid };
@@ -297,18 +335,8 @@ export class SiteKnowledgeStore {
   private async readRecord(
     path: string,
     fileName: string,
+    mtimeMs: number,
   ): Promise<SiteKnowledgeRecord | InvalidSiteKnowledgeFile> {
-    let mtimeMs: number;
-    try {
-      const stats = await stat(path);
-      if (stats.size > this.maxFileBytes) {
-        return { path, reason: `File exceeds the ${this.maxFileBytes}-byte site file limit` };
-      }
-      mtimeMs = stats.mtimeMs;
-    } catch (error) {
-      return { path, reason: `Cannot stat file: ${(error as NodeJS.ErrnoException).code ?? 'unknown error'}` };
-    }
-
     let content: string;
     try {
       content = await readFile(path, 'utf8');
@@ -321,11 +349,21 @@ export class SiteKnowledgeStore {
       return { path, reason: 'Missing a frontmatter block delimited by ---' };
     }
 
-    const expectedName = basename(fileName, SITE_FILE_EXTENSION);
+    // Strip whatever case the extension was actually written in, so `Notes.MD`
+    // is judged on `Notes` rather than being told to name itself `Notes.MD`.
+    const expectedName = basename(fileName, extname(fileName));
     const name = readString(parsed.fields, 'name');
     if (name === undefined) return { path, reason: 'Frontmatter is missing a non-empty name' };
+    if (name.length > MAX_NAME_LENGTH) {
+      return { path, reason: `Frontmatter name exceeds ${MAX_NAME_LENGTH} characters` };
+    }
     if (name !== expectedName) {
-      return { path, reason: `Frontmatter name "${name}" does not match the file name "${expectedName}"` };
+      // The name is author-controlled, so it is quoted through the same bound
+      // the delivered reason is declared to respect.
+      return {
+        path,
+        reason: `Frontmatter name "${name}" does not match the file name "${expectedName}"`,
+      };
     }
 
     const domains = readStringList(parsed.fields, 'domains');
@@ -335,6 +373,9 @@ export class SiteKnowledgeStore {
 
     const summary = readString(parsed.fields, 'summary');
     if (summary === undefined) return { path, reason: 'Frontmatter is missing a non-empty summary' };
+    if (summary.length > MAX_SUMMARY_LENGTH) {
+      return { path, reason: `Frontmatter summary exceeds ${MAX_SUMMARY_LENGTH} characters` };
+    }
 
     const updated = readString(parsed.fields, 'updated');
     return {
