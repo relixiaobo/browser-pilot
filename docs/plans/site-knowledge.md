@@ -22,6 +22,20 @@ additive field on observation results, and one SKILL.md section.
 The design follows a study of the two known prior systems. It bans repeating
 their failures, so the decisive findings are recorded here.
 
+Each finding carries how far it was actually checked, because the two are
+routinely confused and the weaker kinds have already produced wrong claims in
+this project:
+
+- **[ran]** — executed and observed directly.
+- **[read]** — read in the system's own source or shipped text, not executed.
+- **[absent]** — concluded from something *not* being found. The weakest kind:
+  a stripped symbol, an inlined function, or a name we did not think to grep
+  would all look identical to genuine absence.
+- **[inferred]** — reasoned from the above, never observed.
+
+Neither system was ever installed and operated. Every claim about how they
+behave in a user's hands is therefore [read] or weaker.
+
 ### Sitegeist (github.com/badlogic/sitegeist, AGPL-3.0)
 
 Per-domain "site skills": injected JavaScript `library` plus Markdown
@@ -29,55 +43,92 @@ Per-domain "site skills": injected JavaScript `library` plus Markdown
 
 What worked:
 
-- Agent-authored skills created during real sessions, with a per-capability
-  user-confirmation loop ("this should click Send" → test → "what did you
-  see?").
-- Progressive disclosure: full details on first navigation per session,
-  one-line summaries afterwards, `lastUpdated` as the cache-invalidation key.
-- Its only battle-tested workflow knowledge (the LinkedIn engagement flow) is
-  Markdown prose in the description — not structured steps.
+- **[read]** Agent-authored skills created during real sessions, with a
+  per-capability user-confirmation loop ("this should click Send" → test →
+  "what did you see?"). This is the prompt's instruction to the model; whether
+  agents and users actually follow it was never observed.
+- **[read]** Progressive disclosure: full details on first navigation per
+  session, one-line summaries afterwards, `lastUpdated` as the
+  cache-invalidation key.
+- **[read]** Its workflow knowledge for LinkedIn is Markdown prose in the
+  description, not structured steps. **[inferred]** that this is because prose
+  won in practice; it may simply be what the author wrote first.
 
 What failed or is hazardous:
 
-- The executable `library` decays with the DOM, needs sandbox validation
-  gates, and makes every imported skill arbitrary code running in the user's
-  logged-in pages.
-- Its documentation mis-states subdomain matching (bare domains do not match
-  subdomains under minimatch — verified empirically), forcing authors to
-  enumerate host variants; failures are silent.
-- Default-skill seeding is per-file copy-if-absent, so a deliberately deleted
-  default resurrects on the next initialization.
+- **[read]** The executable `library` needs sandbox validation gates.
+  **[inferred]** that it decays with the DOM and that every imported skill is
+  arbitrary code running in the user's logged-in pages. Both follow from what
+  the code does rather than from anything observed, and the second is a threat
+  model, which is not the sort of claim an experiment produces.
+- **[ran]** Its documentation mis-states subdomain matching: `minimatch` was
+  executed over the same normalisation the store applies, and bare domains do
+  not match subdomains. Authors must enumerate host variants, and a miss is
+  silent.
+- **[read]** Default-skill seeding is per-file copy-if-absent
+  (`initializeDefaultSkills`), and its only call site runs on every side panel
+  initialisation (`src/sidepanel.ts:946`), so a deliberately deleted default
+  returns on the next launch. The call site was traced only after the
+  conclusion had already been asserted from the function alone — the claim
+  survived, but the method did not earn it.
 
 ### Kimi WebBridge (closed-source Go daemon, v1.11.5)
 
 Findings from the official CDN artifacts (skill tarball; release binary,
-sha256-verified against `version.json`, symbol-table analysis only):
+sha256-verified against `version.json`, static analysis only — the daemon was
+never installed or run):
 
-- The daemon contains a complete structured site-knowledge model
-  (`sites.SiteKnowledge`, `Recipe`/`RecipeStep`/`RecipeParam`/`RecipeOutput`,
-  `ui_elements` with state texts, `api_patterns` with pagination
-  descriptors), loaded from a local sites directory and served over
-  `/sites?domain=`.
-- The store is read-only (`Get/All/MatchDomain/load/loadFile`; no save path),
-  the agent-facing SKILL.md never mentions the feature, and the CDN carries
-  no distribution channel for site files. The feature is structurally empty:
-  no author, no reader, no supply.
+- **[ran]** The binary contains a structured site-knowledge model:
+  `sites.SiteKnowledge`, `Recipe`/`RecipeStep`/`RecipeParam`/`RecipeOutput`,
+  `ui_elements` with state texts, `api_patterns` with pagination descriptors.
+  Strings show a local sites directory (`read sites dir`), a `/sites` route,
+  and `domain query parameter is required`.
+- **[ran]** The shipped agent-facing SKILL.md never mentions the feature: the
+  tarball was extracted and searched.
+- **[absent]** The store looks read-only: `Get/All/MatchDomain/load/loadFile`
+  appear and no save path does. **[absent]** No CDN path for site files
+  appears among the strings, only skill tarballs.
+- **[inferred]** The feature is therefore structurally empty — no author, no
+  reader, no supply. This headline conclusion rests on two absence findings, so
+  a save path under an unexpected name, or a distribution channel added since
+  v1.11.5, would weaken it. What is *not* absence-based, and what the design
+  actually leans on, is the [ran] finding that the agent is never told the
+  feature exists.
 
 ### Conclusions the design must not contradict
 
-1. Knowledge for models is prose. Structure is justified only where a
-   machine consumes the field. Kimi's schema had zero instances; sitegeist's
-   working flow knowledge was prose.
+Each one notes what it would take to overturn it, because several rest on the
+weaker evidence above and one has no external support at all.
+
+1. Knowledge for models is prose; structure is justified only where a machine
+   consumes the field. The prior-art support is thin — "Kimi's schema had zero
+   instances" is [absent]-based. The load-bearing argument is independent of
+   both systems: every field in a schema here would be read by a model, and a
+   model reads prose at least as well. *Overturned by* a consumer that parses
+   the field, which is why frontmatter stayed structured.
 2. The write path must exist from day one and belong to the party with the
-   motive: the Agent in the middle of a real task. A read-only store stays
-   empty forever.
-3. Delivery must be zero-friction and mechanically reliable: knowledge must
-   arrive with the observation, before the Agent acts. Instruction-dependent
-   lookup fails exactly when it matters.
-4. Stored executable code is banned. It decays, requires validation gates,
-   and turns file import into arbitrary-code execution in logged-in pages.
-5. Domain matching must be lenient and precisely documented; glob subtleties
-   are a proven author trap.
+   motive: the Agent mid-task. *Overturned by* evidence that agents do not in
+   fact write, which would make a curated corpus the only workable kind. This
+   is the claim S7 exists to test.
+3. Delivery must be zero-friction and mechanically reliable: knowledge arrives
+   with the observation, before the Agent acts. Instruction-dependent lookup
+   fails exactly when it matters. *Overturned by* observing agents read a
+   pointer reliably — cheap to measure, and worth measuring, because pointers
+   would remove the delivery state entirely.
+4. Stored executable code is banned: it decays, needs validation gates, and
+   turns file import into arbitrary-code execution in logged-in pages. The
+   decay is [inferred] and the threat model is reasoning, not observation —
+   correctly so, since the experiment for the latter is being compromised.
+5. Domain matching must be lenient and precisely documented. This is the one
+   conclusion resting on a [ran] finding.
+
+Field verification against real sites later contradicted three claims this
+project had written into its own doctrine as illustrative examples (see
+`plugin/skills/browser-pilot/sites/` and the commits that corrected them). The
+lesson is recorded here deliberately: **any claim cheap to test must be tested
+before it is written down, not after.** The doctrine in SKILL.md — when Agents
+read, write, and repair — is the largest body of claims in this design that no
+experiment has touched.
 
 ## Model
 
@@ -284,8 +335,17 @@ A new "Site Knowledge" section, normative content:
 
 ## Residual risks
 
+- **The doctrine itself is untested.** Whether Agents read a delivered entry
+  before acting, write at the two prescribed moments, and repair rather than
+  work around a stale note are all reasoned claims with no evidence behind
+  them. Sitegeist at least shipped its confirmation loop to users; this design
+  discarded that shape for a reasoned one and has measured nothing. This is the
+  largest unverified surface in the feature and the subject of S7.
 - **Quietly wrong conclusions.** A note like "absence of `rel=next` means
-  last page" can mislead after a redesign without producing an error.
+  last page" can mislead after a redesign without producing an error. This is
+  not hypothetical: that exact claim was written into this plan, and field
+  verification found the anchor still present on the last page with only its
+  `href` removed.
   Mitigated — not eliminated — by evidence-carrying notes and age
   discounting. Inherent to any stored knowledge, structured or not.
 - **Write rate depends on instruction adherence.** The design promises
