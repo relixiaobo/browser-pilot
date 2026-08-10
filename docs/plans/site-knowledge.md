@@ -333,8 +333,45 @@ A new "Site Knowledge" section, normative content:
 | Central registry / CDN distribution | Sharing is sending a file; Kimi's empty channel is the cautionary case |
 | Server-side disclosure state beyond mtime dedup | The client-key session already exists; anything more is machinery without a consumer |
 
+## Verify the shipped path, not only the mechanism
+
+This feature produced the same defect twice, and both times it reached users
+before anyone noticed.
+
+**Protocol negotiation.** The Broker advertised `1.4` while the CLI still asked
+for a hard-coded `1.3`, so delivery returned nothing for every real `bp`
+invocation. Every test passed, because the harness injects a connection pinned
+to the version the gate wanted.
+
+**Seed location.** `SKILL.md` told Agents to copy the shipped notes into the
+state directory without saying where those notes were, and
+`${CLAUDE_PLUGIN_ROOT}` appeared nowhere in that file. The archive was correct;
+the instruction was not actionable. Every corpus stayed empty.
+
+Both share a shape worth naming. Each layer of the mechanism was verified — the
+store against fixtures, delivery against scripted behaviours, the seeds against
+live sites — while the path a user actually takes was verified in neither case.
+Both failures were also silent: no error, no diagnostic, nothing that would
+surface in a log. A feature that is inert reports exactly what a feature with
+nothing to say reports.
+
+The practice this argues for is small and specific: **after shipping, use the
+shipped artifact the way a user would, before calling the work done.** Install
+it, start from the state a new user starts from, and run the first thing they
+would run. Both defects would have taken minutes to find that way, and neither
+was reachable from any test suite, because both lived in the seam between
+components that tests stub for each other.
+
+The two guards that now exist are narrow by design. `protocol.test.mjs` pins the
+CLI's requested maximum to `LATEST_PROTOCOL_VERSION` so that literal cannot
+return, and `managed-skill-validation.test.mjs` pins the seeding instruction to
+the tree it names. Neither generalises: a third seam will need its own guard, or
+the habit above.
+
 ## Residual risks
 
+- **Seams are still only guarded where they broke.** Two have guards; the rest
+  are covered by nothing but the practice above.
 - **The doctrine itself is untested.** Whether Agents read a delivered entry
   before acting, write at the two prescribed moments, and repair rather than
   work around a stale note are all reasoned claims with no evidence behind
