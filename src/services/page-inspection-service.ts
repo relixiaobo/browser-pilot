@@ -109,21 +109,37 @@ function searchScript(input: {
       }
       return element.getClientRects().length>0;
     };
-    const roots=[root];
+    // Roots carry the page offset of the frame holding them, so a match inside
+    // a same-origin frame reports where it actually sits. Text that a snapshot
+    // cannot surface -- a frame with prose and no controls -- is otherwise
+    // unsearchable, and a zero result reads as "not on this page".
+    const roots=[{node:root,dx:0,dy:0}];
     const matches=[];
     let totalMatches=0;
     let visitedNodes=0;
     let visitedCharacters=0;
     let scanTruncated=false;
     while(roots.length&&visitedNodes<20000&&visitedCharacters<2000000){
-      const currentRoot=roots.shift();
-      const walker=document.createTreeWalker(currentRoot,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
+      const currentEntry=roots.shift();
+      const currentRoot=currentEntry.node;
+      const dx=currentEntry.dx;
+      const dy=currentEntry.dy;
+      const ownerDocument=currentRoot.ownerDocument||currentRoot;
+      const walker=ownerDocument.createTreeWalker(currentRoot,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
       let node;
       while((node=walker.nextNode())){
         visitedNodes+=1;
         if(visitedNodes>=20000){scanTruncated=true;break;}
         if(node.nodeType===1){
-          if(node.shadowRoot)roots.push(node.shadowRoot);
+          if(node.shadowRoot)roots.push({node:node.shadowRoot,dx,dy});
+          if(String(node.tagName||'').toLowerCase()==='iframe'){
+            let childDocument=null;
+            try{childDocument=node.contentDocument;}catch(error){childDocument=null;}
+            if(childDocument){
+              const frameRect=node.getBoundingClientRect();
+              roots.push({node:childDocument,dx:dx+frameRect.x,dy:dy+frameRect.y});
+            }
+          }
           continue;
         }
         const parent=node.parentElement;
@@ -150,7 +166,7 @@ function searchScript(input: {
             text:text.slice(offset,offset+normalizedQuery.length).slice(0,4096),
             context:text.slice(contextStart,contextEnd).slice(0,500),
             tagName:tag.slice(0,64),visible:true,
-            x:Math.round(rect.x),y:Math.round(rect.y),
+            x:Math.round(rect.x+dx),y:Math.round(rect.y+dy),
             width:Math.max(0,Math.round(rect.width)),height:Math.max(0,Math.round(rect.height)),
           });
         }

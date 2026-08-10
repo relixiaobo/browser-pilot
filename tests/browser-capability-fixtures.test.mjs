@@ -9,6 +9,7 @@ import {
   FrameService,
   MemoryRefStore,
   ObservationService,
+  PageContentService,
   PageInspectionService,
   RefRevalidationService,
 } from '../dist/services.js';
@@ -575,6 +576,56 @@ test('selector queries reach nested frames and report page coordinates', async (
       assert.ok(
         located.x >= frameOffsets.x && located.y >= frameOffsets.y,
         `locate reported ${located.x},${located.y} above its own frame at ${frameOffsets.x},${frameOffsets.y}`,
+      );
+    } finally {
+      await client.detach();
+    }
+  } finally {
+    await page.close();
+  }
+});
+
+test('page text and search reach nested frames in reading order', async () => {
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${primaryOrigin}/capability/frame-nested-host`);
+    await page.waitForSelector('#nested-child');
+    const client = await page.context().newCDPSession(page);
+    try {
+      const transport = { send: (method, params) => client.send(method, params), close() {} };
+
+      const read = await new PageContentService(transport, undefined).read(undefined, 100_000, {});
+      const text = String(read.text ?? '');
+      assert.match(text, /Nested AX Command/u, 'frame text missing from page content');
+      assert.match(text, /Nested Deep Command/u, 'twice-nested frame text missing from page content');
+
+      // Order, not just presence. The host carries text after the frame, so
+      // frame content must land between the host's leading and trailing text.
+      // Anchoring only on text above the frame would pass just as happily when
+      // frame text is appended at the end, which reads the page out of order
+      // while satisfying every contains check.
+      const leading = text.indexOf('Nested Top Command');
+      const framed = text.indexOf('Nested AX Command');
+      const trailing = text.indexOf('Nested Tail Text');
+      assert.ok(trailing >= 0, 'fixture must carry host text after the frame');
+      assert.ok(
+        leading < framed && framed < trailing,
+        `frame text did not land in reading order: ${JSON.stringify(text.slice(0, 200))}`,
+      );
+
+      const inspection = new PageInspectionService(transport, undefined);
+      const searched = await inspection.search('Nested Deep Command', {});
+      assert.ok(searched.matches.length >= 1, 'search did not reach the twice-nested frame');
+
+      // Match coordinates carry the frame offset, so they stay usable with
+      // click --xy rather than pointing into the host document.
+      const frameOffsets = await page.evaluate(() => {
+        const outer = document.querySelector('#nested-child').getBoundingClientRect();
+        return { x: outer.x, y: outer.y };
+      });
+      assert.ok(
+        searched.matches[0].x >= frameOffsets.x && searched.matches[0].y >= frameOffsets.y,
+        `search match reported ${searched.matches[0].x},${searched.matches[0].y} above its own frame`,
       );
     } finally {
       await client.detach();
