@@ -1,7 +1,7 @@
 {
   "name": "browser-pilot",
   "description": "Control your real Chrome browser via CLI — navigate, click, type, screenshot, network monitoring. Uses your existing login sessions.",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "author": {
     "name": "browser-pilot"
   },
