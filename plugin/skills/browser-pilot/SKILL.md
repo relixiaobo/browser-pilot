@@ -113,6 +113,10 @@ the resolved `bp` CLI through its ordinary shell tool.
    - When a result carries `site`, read it before acting. See
      [Site Knowledge](#site-knowledge).
    - Use `bp snapshot` for controls and numbered refs.
+   - An open picker, menu, or combobox can fill a whole snapshot on its own: its
+     options crowd the page out, and `truncated` with `element_limit` is the only
+     sign that anything is missing. Close it with `bp press Escape` or raise
+     `--limit` before reading the page as empty.
    - Use `bp read [selector]` for readable page content.
    - Use `bp search <text>` for a phrase and nearby context.
    - Use `bp find <selector>` for bounded DOM metadata.
@@ -210,8 +214,9 @@ Two moments are worth writing at; there is no other end-of-task ritual:
 Attach the observable evidence to each claim so a later session can disprove it:
 
 ```markdown
-- Filter via URL query (`?q=is:open`), not the filter dropdown — clicking the
-  filter button hides the list, while a constructed URL shows it directly.
+- Do not decide that more pages exist by finding a next-page anchor: on the last
+  page that anchor is still present and visible, and only its `href` is gone.
+  The snapshot is reliable — the Next Page link is absent there on the last page.
 ```
 
 Record only causes you reproduced. A guess about a single failure becomes
@@ -229,11 +234,12 @@ Markdown prose:
 ---
 name: github-issues
 domains: ["github.com/*/*/issues*"]
-summary: Search, paginate, and extract GitHub issue lists
-updated: 2026-08-07
+summary: The list arrives after navigation returns
+updated: 2026-08-10
 ---
-- Filter via URL query, not the filter dropdown - the dropdown hides the list.
-- Anonymous sessions do not show the assignee control.
+- The list is fetched after the document loads, so the observation `bp open`
+  returns can hold the page chrome and no issues at all. Observe again before
+  concluding the query found nothing.
 ```
 
 `name` must equal the file name without `.md`, or the file is reported

@@ -71,6 +71,7 @@ for (const required of [
   'skills/browser-pilot/scripts/install-native.sh',
   // Seeds must reach the archive: an Agent copies them once, and a seed missing
   // from the package is never noticed afterwards.
+  'skills/browser-pilot/sites/github-issues.md',
   'skills/browser-pilot/sites/google-docs-editors.md',
   'skills/browser-pilot/sites/google-search.md',
 ]) {
