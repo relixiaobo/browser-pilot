@@ -72,9 +72,11 @@ for (const required of [
   // Seeds must reach the archive: an Agent copies them once, and a seed missing
   // from the package is never noticed afterwards.
   'skills/browser-pilot/sites/github-issues.md',
+  'skills/browser-pilot/sites/google-calendar.md',
   'skills/browser-pilot/sites/google-docs-editors.md',
   'skills/browser-pilot/sites/google-search.md',
   'skills/browser-pilot/sites/npm-package.md',
+  'skills/browser-pilot/sites/stackoverflow.md',
   'skills/browser-pilot/sites/youtube.md',
 ]) {
   assert.ok(paths.has(required), `plugin archive is missing ${required}`);

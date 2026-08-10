@@ -29,7 +29,7 @@ test('managed Browser Pilot skill satisfies the repository distribution contract
   const result = await validateManagedSkillDirectory(managedSkill);
   assert.equal(result.ok, true);
   assert.equal(result.name, 'browser-pilot');
-  assert.equal(result.files, 15);
+  assert.equal(result.files, 17);
   assert.equal(result.totalBytes < 16 * 1024 * 1024, true);
 });
 
@@ -179,6 +179,13 @@ test('seeds match the hosts they claim and nothing adjacent', async () => {
   assert.deepEqual(await named('https://youtu.be/abc'), ['youtube']);
   assert.deepEqual(await named('https://www.npmjs.com/package/commander'), ['npm-package']);
   assert.deepEqual(await named('https://www.npmjs.com/'), []);
+  assert.deepEqual(
+    await named('https://stackoverflow.com/questions/11227809/why-is-it-faster'),
+    ['stackoverflow'],
+  );
+  assert.deepEqual(await named('https://calendar.google.com/calendar/u/0/r/week'), ['google-calendar']);
+  // Calendar and Docs are distinct hosts and must not pick up each other's notes.
+  assert.deepEqual(await named('https://docs.google.com/document/d/x/edit'), ['google-docs-editors']);
   assert.deepEqual(await named('https://docs.google.com/spreadsheets/d/abc/edit'), ['google-docs-editors']);
   assert.deepEqual(await named('https://docs.google.com/document/create'), ['google-docs-editors']);
   assert.deepEqual(await named('https://www.google.com/search?q=browser+pilot'), ['google-search']);

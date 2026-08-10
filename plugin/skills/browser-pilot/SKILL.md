@@ -117,6 +117,10 @@ the resolved `bp` CLI through its ordinary shell tool.
      options crowd the page out, and `truncated` with `element_limit` is the only
      sign that anything is missing. Close it with `bp press Escape` or raise
      `--limit` before reading the page as empty.
+   - Some containers surface as one control whose name is everything inside them,
+     running to well over a thousand characters. Such an entry is an artifact of
+     the page's structure, not a control worth acting on; read the ordinary
+     elements around it instead.
    - Use `bp read [selector]` for readable page content.
    - `bp read` picks a main-content region and can pick the wrong one, and it
      also returns text that is in the DOM but not on screen. Text it omits may
