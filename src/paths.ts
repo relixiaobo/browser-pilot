@@ -16,6 +16,14 @@ export interface BrowserPilotPaths {
   versionHistoryFile: string;
   artifactDir: string;
   downloadDir: string;
+  /**
+   * Site knowledge written by the user and their Agents. Unlike every other
+   * path here, this is user data rather than runtime state or cache: a
+   * reinstall cannot recreate it. Nothing in the product may write to it — the
+   * Broker only reads, and seeding is an explicit Agent action. Any future
+   * uninstall or cleanup must leave it alone or ask first.
+   */
+  sitesDir: string;
 }
 
 export interface BrowserPilotPathOptions {
@@ -59,6 +67,7 @@ export function resolveBrowserPilotPaths(options: BrowserPilotPathOptions = {}):
       versionHistoryFile: win32.join(stateDir, 'broker-versions.json'),
       artifactDir: win32.join(stateDir, 'artifacts'),
       downloadDir: win32.join(stateDir, 'downloads'),
+      sitesDir: win32.join(stateDir, 'sites'),
     };
   }
 
@@ -91,6 +100,7 @@ export function resolveBrowserPilotPaths(options: BrowserPilotPathOptions = {}):
     versionHistoryFile: join(stateDir, 'broker-versions.json'),
     artifactDir: join(stateDir, 'artifacts'),
     downloadDir: join(stateDir, 'downloads'),
+    sitesDir: join(stateDir, 'sites'),
   };
 }
 
@@ -105,3 +115,4 @@ export const STARTUP_LOCK_FILE = BROWSER_PILOT_PATHS.startupLockFile;
 export const DAEMON_OWNER_LOCK_FILE = BROWSER_PILOT_PATHS.daemonOwnerLockFile;
 export const ARTIFACT_DIR = BROWSER_PILOT_PATHS.artifactDir;
 export const DOWNLOAD_DIR = BROWSER_PILOT_PATHS.downloadDir;
+export const SITES_DIR = BROWSER_PILOT_PATHS.sitesDir;

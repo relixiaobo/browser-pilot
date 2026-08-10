@@ -45,6 +45,8 @@ import { createBrowserControlPolicy } from './browser-control-policy.js';
 import {
   observationAgentHints,
 } from './agent-hint-service.js';
+import { SiteKnowledgeStore, type SiteKnowledgeMatchResult } from './site-knowledge-store.js';
+import { SiteKnowledgeDeliveryTracker } from './site-knowledge-delivery.js';
 import {
   BrowserWatchdogService,
   DEFAULT_NAVIGATION_TIMEOUT_MS,
@@ -163,6 +165,8 @@ export const ALL_BROWSER_TOOL_NAMES = [
 
 const PREVIEW_MAX_DIMENSION = 1600;
 const PREVIEW_MAX_PIXELS = 2_000_000;
+/** Observation results carry site knowledge from protocol 1.4 onwards. */
+const SITE_KNOWLEDGE_PROTOCOL_MINOR = 4;
 
 interface TargetSession {
   workspaceId: BrowserWorkspaceId;
@@ -204,6 +208,12 @@ interface CreatedObservation {
   snapshot: SnapshotResult;
   record: StoredObservation;
   hints: AgentHint[];
+  /**
+   * Matched knowledge, not yet delivered. Several tool paths create more than
+   * one Observation and return only the last, so consuming delivery state here
+   * would spend a file's one inlined body on a result the Agent never sees.
+   */
+  siteMatches?: SiteKnowledgeMatchResult;
 }
 
 interface ObservationContextIdentity {
@@ -349,6 +359,8 @@ export interface BrowserToolServiceOptions {
   loadWaiter?: typeof waitForLoad;
   connectBrowser?: () => Promise<void>;
   readProfileIdentity?: typeof readVerifiedChromeProfileIdentity;
+  siteKnowledge?: SiteKnowledgeStore;
+  siteKnowledgeDelivery?: SiteKnowledgeDeliveryTracker;
 }
 
 export class BrowserToolService implements BrowserToolExecutor {
@@ -364,6 +376,8 @@ export class BrowserToolService implements BrowserToolExecutor {
     frameId?: string;
     guidance: SnapshotResult['guidance'];
   }>();
+  private readonly siteKnowledge: SiteKnowledgeStore;
+  private readonly siteKnowledgeDelivery: SiteKnowledgeDeliveryTracker;
   private readonly managedWindowIds = new Map<ManagedTabSetId, number>();
   private readonly ownedSessionIds = new Set<string>();
   private readonly framesBySession = new Map<string, SessionFrames>();
@@ -414,6 +428,9 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.network = new WorkspaceNetworkController(transport, {
       publishEvent: event => this.publishEvent(event),
     });
+    this.siteKnowledge = options.siteKnowledge ?? new SiteKnowledgeStore();
+    this.siteKnowledgeDelivery = options.siteKnowledgeDelivery
+      ?? new SiteKnowledgeDeliveryTracker();
     this.supportedTools = this.artifactStore
       ? ALL_BROWSER_TOOL_NAMES
       : BASE_BROWSER_TOOL_NAMES;
@@ -676,6 +693,7 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.downloads?.releaseWorkspace(workspace.id);
     this.inventory.releaseWorkspace(caller);
     this.observations.releaseWorkspace(workspace.id);
+    this.siteKnowledgeDelivery.releaseScope(workspace.id);
     for (const managedTabSet of managedTabSets) this.managedWindowIds.delete(managedTabSet.id);
     this.network.releaseWorkspace(workspace.id);
     for (const [key, session] of this.sessions) {
@@ -2389,7 +2407,27 @@ export class BrowserToolService implements BrowserToolExecutor {
       previous && previous.frameId === frameId ? previous.guidance : undefined,
     );
     this.guidanceBySession.set(session.sessionId, { frameId, guidance: snapshot.guidance });
-    return { snapshot, record, hints };
+    const siteMatches = await this.siteKnowledgeFor(context, snapshot.data.url);
+    return { snapshot, record, hints, ...(siteMatches ? { siteMatches } : {}) };
+  }
+
+  /**
+   * Matches site knowledge against an observed URL without consuming delivery
+   * state; `observationResult` decides what to hand over, because only the
+   * Observation actually returned reaches the Agent. Reading the corpus must
+   * never fail an observation: knowledge is an aid, not a precondition.
+   */
+  private async siteKnowledgeFor(
+    context: BrokerToolCallContext,
+    url: string,
+  ): Promise<SiteKnowledgeMatchResult | undefined> {
+    if (context.connection.protocol.minor < SITE_KNOWLEDGE_PROTOCOL_MINOR) return undefined;
+    if (!context.workspace?.id) return undefined;
+    try {
+      return await this.siteKnowledge.match(url);
+    } catch {
+      return undefined;
+    }
   }
 
   private async resolveObservation(
@@ -2916,8 +2954,22 @@ export class BrowserToolService implements BrowserToolExecutor {
       truncated: created.record.truncated,
       truncationReasons: created.record.truncationReasons,
       hints: [...created.hints, ...additionalHints],
+      ...this.siteKnowledgeResult(context, created),
       ...(evidence ? { evidence } : {}),
     });
+  }
+
+  /**
+   * Consumes delivery state exactly once, for the Observation being returned.
+   */
+  private siteKnowledgeResult(
+    context: BrokerToolCallContext,
+    created: CreatedObservation,
+  ): Record<string, JsonValue> {
+    const workspaceId = context.workspace?.id;
+    if (!created.siteMatches || !workspaceId) return {};
+    const site = this.siteKnowledgeDelivery.deliver(workspaceId, created.siteMatches);
+    return site.length > 0 ? { site: site as unknown as JsonValue } : {};
   }
 
   private targetResult(

@@ -8,6 +8,7 @@ import {
   BrowserToolService,
   MemoryBrokerRuntime,
   PageLoadTimeoutError,
+  SiteKnowledgeStore,
 } from '../dist/services.js';
 
 function png(width, height) {
@@ -2933,4 +2934,221 @@ test('browser reconnection retires CDP sessions, refs, and opaque target IDs bef
   const after = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
   assert.equal(after.targets.length, 1);
   assert.notEqual(after.targets[0].targetId, oldTargetId);
+});
+
+async function siteKnowledgeFixture(t, files) {
+  const directory = await mkdtemp(join(tmpdir(), 'browser-pilot-site-delivery-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const [fileName, content] of Object.entries(files)) {
+    await writeFile(join(directory, fileName), content, 'utf8');
+  }
+  return { directory, store: new SiteKnowledgeStore({ directory }) };
+}
+
+function siteRuntime(transport, siteKnowledge, identity) {
+  return new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: `broker:${identity}`,
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding, { siteKnowledge }),
+  });
+}
+
+function openManaged(runtime, client) {
+  return tool(runtime, client, 'browser.open', {
+    url: 'https://managed.test/task',
+    newTarget: true,
+    observationLimit: 10,
+  });
+}
+
+const MANAGED_SITE_FILE = [
+  '---',
+  'name: managed',
+  'domains: ["managed.test"]',
+  'summary: Managed fixture host',
+  'updated: 2026-08-07',
+  '---',
+  '- Filter via URL query rather than the filter dropdown',
+  '',
+].join('\n');
+
+test('site knowledge rides the observation, then shrinks to a pointer', async t => {
+  const transport = new BrowserFixtureTransport();
+  const { directory, store } = await siteKnowledgeFixture(t, { 'managed.md': MANAGED_SITE_FILE });
+  const runtime = siteRuntime(transport, store, 'site-knowledge');
+  const client = await createClient(
+    runtime,
+    'bridge:site-knowledge',
+    'com.example.agent',
+    'instance:site-knowledge',
+    4,
+  );
+
+  const opened = await openManaged(runtime, client);
+  assert.deepEqual(opened.site, [{
+    status: 'full',
+    name: 'managed',
+    summary: 'Managed fixture host',
+    path: join(directory, 'managed.md'),
+    updated: '2026-08-07',
+    body: '- Filter via URL query rather than the filter dropdown',
+  }]);
+
+  const again = await tool(runtime, client, 'browser.observe', { limit: 10 }, opened.targetId);
+  assert.deepEqual(again.site, [{
+    status: 'seen',
+    name: 'managed',
+    summary: 'Managed fixture host',
+    path: join(directory, 'managed.md'),
+  }]);
+});
+
+test('site knowledge is withheld from clients below protocol 1.4', async t => {
+  const transport = new BrowserFixtureTransport();
+  const { store } = await siteKnowledgeFixture(t, { 'managed.md': MANAGED_SITE_FILE });
+  const runtime = siteRuntime(transport, store, 'site-knowledge-old');
+  const client = await createClient(
+    runtime,
+    'bridge:site-knowledge-old',
+    'com.example.agent',
+    'instance:site-knowledge-old',
+    3,
+  );
+
+  assert.equal((await openManaged(runtime, client)).site, undefined);
+});
+
+test('an observation carries no site field when nothing matches the url', async t => {
+  const transport = new BrowserFixtureTransport();
+  const { store } = await siteKnowledgeFixture(t, {
+    'elsewhere.md': [
+      '---',
+      'name: elsewhere',
+      'domains: ["unrelated.test"]',
+      'summary: Never matches the fixture host',
+      '---',
+      '- note',
+      '',
+    ].join('\n'),
+  });
+  const runtime = siteRuntime(transport, store, 'site-knowledge-miss');
+  const client = await createClient(
+    runtime,
+    'bridge:site-knowledge-miss',
+    'com.example.agent',
+    'instance:site-knowledge-miss',
+    4,
+  );
+
+  assert.equal((await openManaged(runtime, client)).site, undefined);
+});
+
+test('an unusable site file is reported on the observation exactly once', async t => {
+  const transport = new BrowserFixtureTransport();
+  const { store } = await siteKnowledgeFixture(t, { 'broken.md': '# no frontmatter\n' });
+  const runtime = siteRuntime(transport, store, 'site-knowledge-broken');
+  const client = await createClient(
+    runtime,
+    'bridge:site-knowledge-broken',
+    'com.example.agent',
+    'instance:site-knowledge-broken',
+    4,
+  );
+
+  const opened = await openManaged(runtime, client);
+  assert.equal(opened.site.length, 1);
+  assert.equal(opened.site[0].status, 'invalid');
+  assert.match(opened.site[0].reason, /frontmatter block/);
+
+  const again = await tool(runtime, client, 'browser.observe', { limit: 10 }, opened.targetId);
+  assert.equal(again.site, undefined, 'the same complaint is not repeated on every observation');
+});
+
+test('an intermediate observation never spends the one inlined body', async t => {
+  // browser.dropdown.select on an ARIA control observes twice and returns only
+  // the second result. Consuming delivery inside createObservation would spend
+  // the body on the observation the Agent never sees, and the unchanged mtime
+  // would mean it was never inlined again for that Workspace.
+  const transport = new BrowserFixtureTransport();
+  transport.extraAxNodes = [
+    {
+      nodeId: 'city', parentId: 'root', ignored: false,
+      role: { value: 'combobox' }, name: { value: 'City' },
+      properties: [{ name: 'expanded', value: { value: true } }],
+      backendDOMNodeId: 302,
+    },
+    {
+      nodeId: 'owned-option', parentId: 'root', ignored: false,
+      role: { value: 'option' }, name: { value: 'Shanghai' }, properties: [],
+      backendDOMNodeId: 304,
+    },
+  ];
+  transport.onMouseReleased = () => { transport.ariaSelected = true; };
+  // The corpus starts empty so the select is the first result that could carry
+  // the body, which is what makes this discriminating.
+  const { directory, store } = await siteKnowledgeFixture(t, {});
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: 'broker:site-knowledge-intermediate',
+    browsers: [binding],
+    toolExecutor: new BrowserToolService(transport, binding, {
+      siteKnowledge: store,
+      loadWaiter: async () => {},
+    }),
+  });
+  const client = await createClient(
+    runtime,
+    'bridge:site-knowledge-intermediate',
+    'com.example.agent',
+    'instance:site-knowledge-intermediate',
+    4,
+  );
+  const targetId = (await tool(runtime, client, 'browser.tabs.list', { scope: 'all' })).targets[0].targetId;
+  const observed = await tool(runtime, client, 'browser.observe', { limit: 10 }, targetId);
+  assert.equal(observed.site, undefined, 'nothing to deliver yet');
+  const dropdownRef = observed.elements.find(element => element.name === 'City').ref;
+
+  await writeFile(join(directory, 'example.md'), [
+    '---',
+    'name: example',
+    'domains: ["example.test"]',
+    'summary: The host the dropdown fixture serves',
+    '---',
+    '- A note that must survive an intermediate observation',
+    '',
+  ].join('\n'), 'utf8');
+
+  const selected = await tool(runtime, client, 'browser.dropdown.select', {
+    target: { observationId: observed.observationId, ref: dropdownRef },
+    choice: { by: 'label', label: 'Shanghai', exact: true },
+    observationLimit: 10,
+  }, targetId);
+
+  assert.equal(selected.evidence.status, 'verified');
+  assert.equal(selected.site.length, 1);
+  assert.equal(
+    selected.site[0].status,
+    'full',
+    'the body must reach the result the Agent receives, not an Observation it never sees',
+  );
+  assert.match(selected.site[0].body, /must survive an intermediate observation/);
+});
+
+test('an unreadable site corpus never fails an observation', async t => {
+  const transport = new BrowserFixtureTransport();
+  const { store } = await siteKnowledgeFixture(t, {});
+  store.match = async () => { throw new Error('corpus exploded'); };
+  const runtime = siteRuntime(transport, store, 'site-knowledge-throw');
+  const client = await createClient(
+    runtime,
+    'bridge:site-knowledge-throw',
+    'com.example.agent',
+    'instance:site-knowledge-throw',
+    4,
+  );
+
+  const opened = await openManaged(runtime, client);
+  assert.equal(opened.site, undefined);
+  assert.equal(typeof opened.title, 'string');
 });

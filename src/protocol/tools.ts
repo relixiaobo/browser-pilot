@@ -305,6 +305,38 @@ const agentHintSchema: JsonSchema = {
   ],
 };
 
+const siteNameSchema = stringSchema({ minLength: 1, maxLength: 128 });
+const sitePathSchema = sensitive(stringSchema({ minLength: 1, maxLength: 4_096 }), 'user_file');
+const siteSummarySchema = sensitive(stringSchema({ minLength: 1, maxLength: 512 }), 'user_file');
+
+/**
+ * Site knowledge is the user's own prose on disk, so it is `user_file` rather
+ * than `browser_data`. The Broker never interprets a body; it only carries it.
+ */
+const siteKnowledgeSchema: JsonSchema = {
+  oneOf: [
+    objectSchema({
+      status: stringSchema({ const: 'full' }),
+      name: siteNameSchema,
+      summary: siteSummarySchema,
+      path: sitePathSchema,
+      updated: stringSchema({ maxLength: 64 }),
+      body: sensitive(stringSchema({ maxLength: 65_536 }), 'user_file'),
+    }, ['status', 'name', 'summary', 'path', 'body']),
+    objectSchema({
+      status: stringSchema({ const: 'seen' }),
+      name: siteNameSchema,
+      summary: siteSummarySchema,
+      path: sitePathSchema,
+    }, ['status', 'name', 'summary', 'path']),
+    objectSchema({
+      status: stringSchema({ const: 'invalid' }),
+      path: sitePathSchema,
+      reason: stringSchema({ minLength: 1, maxLength: 512 }),
+    }, ['status', 'path', 'reason']),
+  ],
+};
+
 function resultSchema(
   context: ToolContext,
   properties: Record<string, JsonSchema> = {},
@@ -353,6 +385,7 @@ const observationOutput = resultSchema('target', {
     enum: [...OBSERVATION_TRUNCATION_REASONS],
   }), { uniqueItems: true }),
   hints: arraySchema(agentHintSchema, { maxItems: 16 }),
+  site: arraySchema(siteKnowledgeSchema, { maxItems: 32 }),
   evidence: { oneOf: [
     inputEvidenceSchema,
     clickEvidenceSchema,
@@ -553,7 +586,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({
@@ -569,7 +602,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: false,
     idempotency: 'read_only',
     cancellation: 'best_effort',
-    sensitivity: { input: [], output: ['browser_data', 'credential'] },
+    sensitivity: { input: [], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({
@@ -735,7 +768,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({
@@ -774,7 +807,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({
@@ -798,7 +831,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({
@@ -820,7 +853,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data', 'credential'] },
+    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({
@@ -842,7 +875,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data', 'credential'] },
+    sensitivity: { input: ['browser_data', 'credential'], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({
@@ -859,7 +892,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential'] },
+    sensitivity: { input: ['browser_data'], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({
@@ -927,7 +960,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutating: true,
     idempotency: 'non_idempotent',
     cancellation: 'best_effort',
-    sensitivity: { input: ['user_file'], output: ['browser_data', 'credential'] },
+    sensitivity: { input: ['user_file'], output: ['browser_data', 'credential', 'user_file'] },
     artifactKinds: [],
   }),
   tool({

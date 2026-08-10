@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import {
   BrowserPilotError,
   DEFAULT_CAPABILITIES,
+  LATEST_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
   TOOL_DEFINITIONS,
   assertToolDefinitions,
   isToolAvailableInProtocol,
@@ -266,7 +270,11 @@ test('canonical schemas propagate field-level sensitivity without changing value
   const observe = tool('browser.observe');
   const element = observe.outputSchema.properties.elements.items;
   assert.deepEqual(sensitivity(element.properties.value), ['browser_data', 'credential']);
-  assert.deepEqual(observe.sensitivity.output, ['browser_data', 'credential']);
+  // Observations also carry site knowledge, which is the user's own file content.
+  assert.deepEqual(observe.sensitivity.output, ['browser_data', 'credential', 'user_file']);
+  const site = observe.outputSchema.properties.site.items.oneOf;
+  assert.deepEqual(sensitivity(site[0].properties.body), ['user_file']);
+  assert.deepEqual(sensitivity(site[1].properties.path), ['user_file']);
 
   const auth = tool('browser.auth.set');
   assert.deepEqual(sensitivity(auth.inputSchema.properties.username), ['credential']);
@@ -631,5 +639,32 @@ test('action result schemas require discriminated input, press, and upload evide
       evidence: { ...typed.evidence, action: undefined },
     }),
     error => error instanceof BrowserPilotError && error.code === 'invalid_argument',
+  );
+});
+
+test('the CLI asks for the newest protocol this build speaks', async () => {
+  const newest = SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
+  assert.deepEqual({ ...LATEST_PROTOCOL_VERSION }, { ...newest });
+
+  // A CLI that requests less than the Broker offers loses every feature gated
+  // above what it asked for, silently and with no error anywhere. Site
+  // knowledge shipped inert exactly this way, so the source is pinned: the
+  // hard-coded maximum must not creep back in.
+  const source = await readFile(
+    join(resolve(import.meta.dirname, '..'), 'src/compatibility-broker-client.ts'),
+    'utf8',
+  );
+  const requested = /protocol:\s*\{[\s\S]*?max:\s*\{([\s\S]*?)\}/.exec(source);
+  assert.ok(requested, 'the CLI must declare a protocol maximum');
+  assert.match(
+    requested[1],
+    /LATEST_PROTOCOL_VERSION/,
+    'the CLI protocol maximum must derive from LATEST_PROTOCOL_VERSION, never a literal',
+  );
+
+  assert.deepEqual(
+    { ...negotiateProtocol({ min: { major: 1, minor: 1 }, max: LATEST_PROTOCOL_VERSION }) },
+    { ...newest },
+    'the CLI must negotiate the newest version',
   );
 });

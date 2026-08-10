@@ -54,7 +54,9 @@ retry attempts.
 ### `bp status`
 
 Return service, browser, selected profile/tab, active commands, uncertain
-commands, and structured recovery state for the current Agent key.
+commands, and structured recovery state for the current Agent key. `paths.sites`
+is the absolute site knowledge directory for this installation, reported whether
+or not a browser is connected.
 
 ### `bp profiles [--identify] [--refresh]`
 
@@ -99,6 +101,8 @@ tabs, never user-opened tabs.
 ### `bp snapshot [--limit <n>]`
 
 Return bounded interactive elements with numbered refs and page geometry.
+A `site` array carries durable knowledge matching the URL; see the Site
+Knowledge section of `SKILL.md`.
 `truncationReasons` can report element, text, depth, byte, or work limits.
 `work_limit` means Browser Pilot stopped expensive DOM text derivation; use a
 narrower page state representation before inferring that content is absent.
@@ -145,7 +149,8 @@ state. Inspect autocomplete suggestions after typing before choosing one.
 Send trusted key events to the focused control. Use for canvas-style editors or
 controls not represented by a ref. Options are `--click <selector>`, `--clear`,
 `--submit`, `--delay <ms>`, and `--limit`. JSON uses the standard fresh page
-state shape, including page geometry, hints, and Profile context when present.
+state shape, including page geometry, hints, site knowledge, and Profile context
+when present.
 
 ### `bp press <key> [--limit <n>]`
 

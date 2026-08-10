@@ -36,7 +36,16 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [
   { major: 1, minor: 1 },
   { major: 1, minor: 2 },
   { major: 1, minor: 3 },
+  { major: 1, minor: 4 },
 ] as const satisfies readonly ProtocolVersion[];
+
+/**
+ * The newest version this build speaks. Clients must request exactly this as
+ * their maximum: asking for less silently disables every feature gated above
+ * the version they asked for, and nothing reports the mismatch.
+ */
+export const LATEST_PROTOCOL_VERSION: ProtocolVersion =
+  SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
 
 export const CAPABILITIES = [
   'browser.discovery',
@@ -589,6 +598,39 @@ export type AgentHint =
     confidence: 'strong';
     recommendedAction: 'change_strategy';
     streak: number;
+    reason: string;
+  };
+
+/**
+ * Durable per-site knowledge matching the observed URL, delivered on the
+ * observation itself so it reaches the Agent before it acts. Unlike AgentHint,
+ * which is recomputed from the current page every time, a site entry is
+ * user-owned reference prose the Broker never interprets. Protocol 1.4.
+ */
+export type SiteKnowledgeDelivery =
+  | {
+    /** First delivery of this version to this Agent: the whole file body. */
+    status: 'full';
+    name: string;
+    summary: string;
+    path: string;
+    updated?: string;
+    body: string;
+  }
+  | {
+    /**
+     * Already delivered at this version, or too large for the inline budget.
+     * `path` lets an Agent whose context was compacted read the file again.
+     */
+    status: 'seen';
+    name: string;
+    summary: string;
+    path: string;
+  }
+  | {
+    /** A file that cannot be used, reported so its author can repair it. */
+    status: 'invalid';
+    path: string;
     reason: string;
   };
 
