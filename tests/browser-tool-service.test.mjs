@@ -29,6 +29,9 @@ class BrowserFixtureTransport {
       type: 'page',
       title: 'User Form',
       url: 'https://example.test/form',
+      // Real Chrome reports a browser-context id on every ordinary tab, and it
+      // belongs to the Profile rather than to the debugging session.
+      browserContextId: 'context-default',
     }],
   ]);
   loaders = new Map([['user-form', 'loader:user-form:1']]);
@@ -744,7 +747,13 @@ test('tools/call lists user tabs, creates a managed target, and preserves user t
   assert.equal(opened.url, 'https://managed.test/task');
   assert.equal(opened.elements[0].name, 'Submit');
   assert.match(opened.observationId, /^observation:/);
-  assert.deepEqual(managedTargetCreates, [{ url: 'about:blank', newWindow: true }]);
+  // Chrome reports a browser-context id on ordinary tabs, so the Profile the
+  // Agent is routed to carries one and creation asks for it.
+  assert.deepEqual(managedTargetCreates, [{
+    url: 'about:blank',
+    newWindow: true,
+    browserContextId: 'context-default',
+  }]);
 
   const listed = await tool(runtime, client, 'browser.tabs.list', { scope: 'all' });
   assert.deepEqual(listed.targets.map(target => target.origin).sort(), ['managed', 'user_tab']);
@@ -3151,4 +3160,81 @@ test('an unreadable site corpus never fails an observation', async t => {
   const opened = await openManaged(runtime, client);
   assert.equal(opened.site, undefined);
   assert.equal(typeof opened.title, 'string');
+});
+
+async function managedWindowFixture(t, identity) {
+  const transport = new BrowserFixtureTransport();
+  const reconnectBinding = structuredClone(binding);
+  reconnectBinding.instance.connectionGeneration = 1;
+  reconnectBinding.instance.processIdentity = 'process:chrome:original';
+  const runtime = new MemoryBrokerRuntime({
+    serviceVersion: '1.0.0',
+    brokerProcessIdentity: `broker:${identity}`,
+    browsers: [reconnectBinding],
+    toolExecutor: new BrowserToolService(transport, reconnectBinding),
+  });
+  const client = await createClient(
+    runtime,
+    `bridge:${identity}`,
+    'com.example.agent',
+    `instance:${identity}`,
+    4,
+  );
+  t.after(() => {});
+
+  const windowOf = result => transport.windows.get(
+    [...transport.targets.keys()].find(id => transport.targets.get(id).url === result.url),
+  );
+  const open = async url => {
+    const result = await tool(runtime, client, 'browser.open', {
+      url, newTarget: true, observationLimit: 5,
+    });
+    return windowOf(result);
+  };
+  const reconnect = processIdentity => {
+    runtime.updateBrowserConnection(reconnectBinding.instance.id, {
+      state: 'disconnected',
+      connectionGeneration: 1,
+    });
+    runtime.updateBrowserConnection(reconnectBinding.instance.id, {
+      state: 'connected',
+      connectionGeneration: 2,
+      processIdentity,
+    });
+  };
+  // Profile contexts are deliberately invalidated by a reconnect, so an Agent
+  // re-resolves them before its next command; the window mapping is what this
+  // test is about.
+  const refreshProfiles = async () => {
+    const { profiles } = await tool(runtime, client, 'browser.profiles.list', {});
+    await tool(runtime, client, 'browser.profiles.select', {
+      profileContextId: profiles[0].profileContextId,
+    });
+  };
+  return { open, reconnect, refreshProfiles };
+}
+
+test('a reconnect to the same browser keeps the Workspace window it already opened', async t => {
+  const { open, reconnect, refreshProfiles } = await managedWindowFixture(t, 'window-survives');
+
+  const first = await open('https://managed.test/one');
+  reconnect('process:chrome:original');
+  await refreshProfiles();
+  const second = await open('https://managed.test/two');
+
+  // Forgetting the window here is what stranded it: Chrome keeps it open, so a
+  // fresh one leaves an orphan behind and re-runs the bootstrap that can land a
+  // managed tab in a window the user is working in.
+  assert.equal(second, first, 'the Workspace must reuse the window it already owns');
+});
+
+test('a reconnect to a different browser process starts a new window', async t => {
+  const { open, reconnect, refreshProfiles } = await managedWindowFixture(t, 'window-replaced');
+
+  const first = await open('https://managed.test/one');
+  reconnect('process:chrome:restarted');
+  await refreshProfiles();
+  const second = await open('https://managed.test/two');
+
+  assert.notEqual(second, first, 'a restarted browser really has lost the old window');
 });

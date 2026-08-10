@@ -378,7 +378,16 @@ export class BrowserToolService implements BrowserToolExecutor {
   }>();
   private readonly siteKnowledge: SiteKnowledgeStore;
   private readonly siteKnowledgeDelivery: SiteKnowledgeDeliveryTracker;
-  private readonly managedWindowIds = new Map<ManagedTabSetId, number>();
+  /**
+   * Windows this Broker opened, keyed so the mapping outlives a reconnect.
+   *
+   * A ManagedTabSet is bound to a ProfileContext, and a `profileContextId` is
+   * only valid for its connection generation — so keying on either loses the
+   * window every time the connection drops, while Chrome keeps the window open.
+   * Chrome's own browser-context id survives, because it belongs to the Profile
+   * rather than to the debugging session.
+   */
+  private readonly managedWindowIds = new Map<string, number>();
   private readonly ownedSessionIds = new Set<string>();
   private readonly framesBySession = new Map<string, SessionFrames>();
   private readonly childFrameSessions = new Map<string, Map<string, ChildFrameSession>>();
@@ -545,7 +554,15 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
     if (previous.state === 'connected' || current.connectionGeneration === previous.connectionGeneration) return;
 
-    this.managedWindowIds.clear();
+    // A dropped connection does not close the windows this Workspace opened —
+    // Chrome keeps them, so forgetting them here strands them and forces the
+    // next command to build another one. Only a different browser process means
+    // they are really gone. A window that vanished for any other reason still
+    // costs nothing: creating into a stale windowId is rejected, and
+    // `ensureManagedTarget` already drops the mapping and falls through.
+    if (current.processIdentity !== previous.processIdentity) {
+      this.managedWindowIds.clear();
+    }
     for (const invalidation of this.registry.invalidateBrowserConnection(current.id)) {
       this.observations.invalidateTarget(invalidation.targetId, 'browser_reconnected');
       this.publishEvent({
@@ -694,7 +711,14 @@ export class BrowserToolService implements BrowserToolExecutor {
     this.inventory.releaseWorkspace(caller);
     this.observations.releaseWorkspace(workspace.id);
     this.siteKnowledgeDelivery.releaseScope(workspace.id);
-    for (const managedTabSet of managedTabSets) this.managedWindowIds.delete(managedTabSet.id);
+    // The key is workspace-scoped, so releasing a Workspace drops every window
+    // it owned regardless of which Profile each one belonged to.
+    for (const key of [...this.managedWindowIds.keys()]) {
+      if (key.startsWith(`${workspace.id} `)) this.managedWindowIds.delete(key);
+    }
+    for (const managedTabSet of managedTabSets) {
+      this.managedWindowIds.delete(`tabset ${managedTabSet.id}`);
+    }
     this.network.releaseWorkspace(workspace.id);
     for (const [key, session] of this.sessions) {
       if (session.workspaceId !== workspace.id) continue;
@@ -1875,14 +1899,15 @@ export class BrowserToolService implements BrowserToolExecutor {
       throw new BrowserPilotError('internal_error', 'Broker cannot bind a ManagedTabSet to a Profile context');
     }
     const managedTabSet = context.managedTabSetForProfile(profile.id);
-    const windowId = this.managedWindowIds.get(managedTabSet.id);
+    const windowKey = this.managedWindowKey(managedTabSet, profile);
+    const windowId = this.managedWindowIds.get(windowKey);
     let createdTargetId: string | undefined;
 
     if (windowId !== undefined) {
       try {
         createdTargetId = await this.tryCreateManagedTarget({ url: 'about:blank', windowId }, profile);
       } catch (error) {
-        this.managedWindowIds.delete(managedTabSet.id);
+        this.managedWindowIds.delete(windowKey);
         if (!(error instanceof ManagedTargetCreationRejectedError)) throw error;
       }
     }
@@ -1907,12 +1932,12 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
 
     try {
-      if (!this.managedWindowIds.has(managedTabSet.id)) {
+      if (!this.managedWindowIds.has(windowKey)) {
         const window = await this.transport.send('Browser.getWindowForTarget', { targetId: createdTargetId });
         if (!Number.isSafeInteger(window?.windowId)) {
           throw new BrowserPilotError('internal_error', 'Chrome returned an invalid managed window ID');
         }
-        this.managedWindowIds.set(managedTabSet.id, window.windowId);
+        this.managedWindowIds.set(windowKey, window.windowId);
       }
       const registered = this.inventory.registerManagedTarget({
         ...inventoryContext,
@@ -2017,6 +2042,20 @@ export class BrowserToolService implements BrowserToolExecutor {
         );
       }
     }
+  }
+
+  /**
+   * Keys a Workspace's managed window on Chrome's own browser-context id, which
+   * outlives a reconnect, falling back to the ManagedTabSet when Chrome does not
+   * report one — no worse than before in that case.
+   */
+  private managedWindowKey(
+    managedTabSet: { id: ManagedTabSetId; workspaceId: BrowserWorkspaceId },
+    profile: ProfileContextRecord,
+  ): string {
+    return profile.cdpBrowserContextId
+      ? `${managedTabSet.workspaceId} ${profile.cdpBrowserContextId}`
+      : `tabset ${managedTabSet.id}`;
   }
 
   private async tryCreateManagedTarget(
