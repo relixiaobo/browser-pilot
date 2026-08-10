@@ -526,14 +526,38 @@ export function elementRect(selector: string): string {
  */
 export function readContent(selector: string | null, limit: number): string {
   return `JSON.stringify((() => {
+    const NOISE = 'script,style,noscript,nav,footer,aside,svg,iframe,[role="navigation"],[role="banner"],[role="contentinfo"],[aria-hidden="true"]';
+    // An iframe element contributes no text to its parent document, so content
+    // held in a same-origin frame -- help-centre articles, embedded reports,
+    // editor bodies -- is absent rather than merely noisy. A snapshot cannot
+    // stand in for it either: a frame carrying prose and no controls produces
+    // an empty element list, leaving nothing for a reader to pull on.
+    const extract = (node, depth) => {
+      // Clone so we don't mutate the live DOM
+      const clone = node.cloneNode(true);
+      if (depth < 8) {
+        const live = node.querySelectorAll('iframe');
+        const copies = clone.querySelectorAll('iframe');
+        // A faithful deep clone preserves iframe order, so index pairs a copy
+        // with the live element that still owns a contentDocument.
+        for (let index = 0; index < copies.length && index < live.length; index += 1) {
+          let childDocument = null;
+          try { childDocument = live[index].contentDocument; } catch (error) { childDocument = null; }
+          const childRoot = childDocument && (childDocument.body || childDocument.documentElement);
+          if (!childRoot) continue;
+          const inner = extract(childRoot, depth + 1);
+          if (!inner) continue;
+          // Substituted in place, so frame text reads where the frame sits
+          // rather than appended after everything else.
+          copies[index].replaceWith((clone.ownerDocument || document).createTextNode('\\n' + inner + '\\n'));
+        }
+      }
+      clone.querySelectorAll(NOISE).forEach(el => el.remove());
+      return (clone.innerText || clone.textContent || '').replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim();
+    };
     const root = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : `(document.querySelector('main') || document.querySelector('article') || document.querySelector('[role="main"]') || document.body)`};
     if (!root) return {ok:false, error:'No content root found'};
-    // Clone so we don't mutate the live DOM
-    const clone = root.cloneNode(true);
-    const drop = clone.querySelectorAll('script,style,noscript,nav,footer,aside,svg,iframe,[role="navigation"],[role="banner"],[role="contentinfo"],[aria-hidden="true"]');
-    drop.forEach(el => el.remove());
-    // Collapse whitespace
-    let text = (clone.innerText || clone.textContent || '').replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim();
+    let text = extract(root, 0);
     const truncated = text.length > ${limit};
     if (truncated) text = text.slice(0, ${limit});
     return {

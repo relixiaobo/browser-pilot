@@ -67,7 +67,8 @@ export const BROWSER_CAPABILITY_FIXTURES = Object.freeze([
     html: () => `<title>Nested frame host</title>
 <button id="nested-top">Nested Top Command</button>
 <iframe id="nested-child" src="/capability/frame-nested-inner"
-  style="position:absolute;left:137px;top:211px;width:420px;height:320px;border:0"></iframe>`,
+  style="position:absolute;left:137px;top:211px;width:420px;height:320px;border:0"></iframe>
+<p id="nested-tail">Nested Tail Text</p>`,
   },
   {
     id: 'cross_origin_oopif',

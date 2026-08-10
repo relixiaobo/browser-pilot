@@ -101,28 +101,45 @@ function searchScript(input: {
     const word=value=>/^[\\p{L}\\p{N}_]$/u.test(value||'');
     const visible=element=>{
       if(!element||element.nodeType!==1)return false;
+      const view=element.ownerDocument?.defaultView||window;
       for(let current=element;current;current=current.parentElement){
-        const style=getComputedStyle(current);
+        const style=view.getComputedStyle(current);
         if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
         if(current.hidden||current.getAttribute?.('aria-hidden')==='true'||current.inert)return false;
       }
       return element.getClientRects().length>0;
     };
-    const roots=[root];
+    // Roots carry the page offset of the frame holding them, so a match inside
+    // a same-origin frame reports where it actually sits. Text that a snapshot
+    // cannot surface -- a frame with prose and no controls -- is otherwise
+    // unsearchable, and a zero result reads as "not on this page".
+    const roots=[{node:root,dx:0,dy:0}];
     const matches=[];
     let totalMatches=0;
     let visitedNodes=0;
     let visitedCharacters=0;
     let scanTruncated=false;
     while(roots.length&&visitedNodes<20000&&visitedCharacters<2000000){
-      const currentRoot=roots.shift();
-      const walker=document.createTreeWalker(currentRoot,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
+      const currentEntry=roots.shift();
+      const currentRoot=currentEntry.node;
+      const dx=currentEntry.dx;
+      const dy=currentEntry.dy;
+      const ownerDocument=currentRoot.ownerDocument||currentRoot;
+      const walker=ownerDocument.createTreeWalker(currentRoot,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
       let node;
       while((node=walker.nextNode())){
         visitedNodes+=1;
         if(visitedNodes>=20000){scanTruncated=true;break;}
         if(node.nodeType===1){
-          if(node.shadowRoot)roots.push(node.shadowRoot);
+          if(node.shadowRoot)roots.push({node:node.shadowRoot,dx,dy});
+          if(String(node.tagName||'').toLowerCase()==='iframe'){
+            let childDocument=null;
+            try{childDocument=node.contentDocument;}catch(error){childDocument=null;}
+            if(childDocument){
+              const frameRect=node.getBoundingClientRect();
+              roots.push({node:childDocument,dx:dx+frameRect.x,dy:dy+frameRect.y});
+            }
+          }
           continue;
         }
         const parent=node.parentElement;
@@ -149,7 +166,7 @@ function searchScript(input: {
             text:text.slice(offset,offset+normalizedQuery.length).slice(0,4096),
             context:text.slice(contextStart,contextEnd).slice(0,500),
             tagName:tag.slice(0,64),visible:true,
-            x:Math.round(rect.x),y:Math.round(rect.y),
+            x:Math.round(rect.x+dx),y:Math.round(rect.y+dy),
             width:Math.max(0,Math.round(rect.width)),height:Math.max(0,Math.round(rect.height)),
           });
         }
@@ -171,7 +188,10 @@ function findElementsScript(input: {
     const limit=${input.limit};
     const requestedAttributes=${JSON.stringify(input.attributeNames)};
     const pierceShadow=${input.pierceShadow};
-    const roots=[document];
+    // Each root carries the page offset of the frame it lives in. A child
+    // document reports rects relative to its own viewport, so without this the
+    // coordinates would be wrong in exactly the way a click cannot survive.
+    const roots=[{node:document,dx:0,dy:0}];
     const matches=[];
     const seen=new Set();
     let totalMatches=0;
@@ -208,8 +228,9 @@ function findElementsScript(input: {
     const state=element=>{
       let visible=true;
       let enabled=true;
+      const view=element.ownerDocument?.defaultView||window;
       for(let current=element;current;current=current.parentElement){
-        const style=getComputedStyle(current);
+        const style=view.getComputedStyle(current);
         if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0||current.hidden||current.inert){visible=false;break;}
         if(current.matches?.(':disabled')||current.getAttribute?.('aria-disabled')==='true'||current.inert)enabled=false;
       }
@@ -217,7 +238,10 @@ function findElementsScript(input: {
       return{visible,enabled};
     };
     while(roots.length&&scannedRoots<512){
-      const root=roots.shift();
+      const entry=roots.shift();
+      const root=entry.node;
+      const dx=entry.dx;
+      const dy=entry.dy;
       scannedRoots+=1;
       let selected;
       try{selected=root.querySelectorAll(selector);}catch(error){return{ok:false,field:'selector',error:String(error&&error.message||error)};}
@@ -237,14 +261,28 @@ function findElementsScript(input: {
           role:normalize(element.getAttribute?.('role')||implicitRole(element),128),
           name:accessibleName(element),text:normalize(element.innerText||element.textContent,500),
           visible:currentState.visible,enabled:currentState.enabled,
-          x:Math.round(rect.x),y:Math.round(rect.y),width:Math.max(0,Math.round(rect.width)),height:Math.max(0,Math.round(rect.height)),
+          x:Math.round(rect.x+dx),y:Math.round(rect.y+dy),width:Math.max(0,Math.round(rect.width)),height:Math.max(0,Math.round(rect.height)),
           attributes,
         });
       }
-      if(!pierceShadow)continue;
-      const walker=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT);
+      // Walk for nested roots even when shadow piercing is off: a snapshot
+      // reports controls inside same-origin frames, so a selector for one of
+      // them must resolve rather than return nothing.
+      const ownerDocument=root.ownerDocument||root;
+      const walker=ownerDocument.createTreeWalker(root,NodeFilter.SHOW_ELEMENT);
       let element;
-      while((element=walker.nextNode()))if(element.shadowRoot)roots.push(element.shadowRoot);
+      while((element=walker.nextNode())){
+        if(pierceShadow&&element.shadowRoot)roots.push({node:element.shadowRoot,dx,dy});
+        if(String(element.tagName||'').toLowerCase()!=='iframe')continue;
+        // Cross-origin frames throw or yield null here, which is the boundary
+        // a snapshot draws too -- they are simply not reachable from this
+        // document, and nothing else in this script can see them.
+        let childDocument=null;
+        try{childDocument=element.contentDocument;}catch(error){childDocument=null;}
+        if(!childDocument)continue;
+        const frameRect=element.getBoundingClientRect();
+        roots.push({node:childDocument,dx:dx+frameRect.x,dy:dy+frameRect.y});
+      }
     }
     return{ok:true,title:String(document.title||'').slice(0,4096),url:String(location.href).slice(0,16384),
       totalMatches,elements:matches,truncated:roots.length>0||totalMatches>matches.length};

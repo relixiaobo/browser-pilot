@@ -297,11 +297,12 @@ to clear them, not as routine end-of-task cleanup.
 Use `bp frame`, `bp frame <index>`, and `bp frame 0` to list, select, and leave
 frames. Refresh the snapshot after changing frames.
 
-A snapshot covers same-process iframes automatically, at any nesting depth —
-in practice, every frame sharing the page's origin. Their controls appear as
-ordinary refs and are clicked the same way, so selecting a frame is not required
-to reach them. Select a frame only to narrow what a snapshot returns, or to
-scope a selector.
+Every observation command covers same-process iframes automatically, at any
+nesting depth — in practice, every frame sharing the page's origin. `bp snapshot`
+returns their controls as ordinary refs, `bp read` includes their text in
+reading order, and `bp search`, `bp find`, and `bp locate` resolve into them, so
+selecting a frame is not required to reach anything inside one. Select a frame
+only to narrow what those commands return.
 
 Cross-origin iframes are different, and nothing reports the difference. Their
 contents are never in a snapshot, `bp frame` does not list them, and the result

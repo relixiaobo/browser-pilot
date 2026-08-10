@@ -85,7 +85,37 @@ export class ObservationService {
   async locate(selector: string): Promise<ElementLocation> {
     if (!selector) throw invalidArgument('Selector must not be empty', 'selector');
     const params: Record<string, unknown> = {
-      expression: `JSON.stringify((function(){var el=document.querySelector(${JSON.stringify(selector)});if(!el)return null;el.scrollIntoView({block:'center',inline:'center'});var r=el.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2),top:Math.round(r.top),left:Math.round(r.left),width:Math.round(r.width),height:Math.round(r.height)}})())`,
+      // Searches this document and its same-origin frames, matching what a
+      // snapshot reports and what `bp find` resolves. Coordinates are measured
+      // relative to THIS context's document, not the page: the caller adds the
+      // observed frame's own page offset when dispatching, so walking past
+      // `window` here would count that offset twice.
+      //
+      // The frame chain is summed after scrollIntoView, never before -- scrolling
+      // an element into view can move the frames above it, which would leave a
+      // pre-computed offset describing where the frame used to be.
+      expression: `JSON.stringify((function(){
+        var queue=[document];var scanned=0;
+        while(queue.length&&scanned<512){
+          var doc=queue.shift();scanned+=1;
+          var el=doc.querySelector(${JSON.stringify(selector)});
+          if(el){
+            el.scrollIntoView({block:'center',inline:'center'});
+            var r=el.getBoundingClientRect();var x=r.x;var y=r.y;
+            for(var w=doc.defaultView;w&&w!==window&&w.frameElement;w=w.parent){
+              var f=w.frameElement.getBoundingClientRect();x+=f.x;y+=f.y;
+            }
+            return{x:Math.round(x+r.width/2),y:Math.round(y+r.height/2),top:Math.round(y),left:Math.round(x),width:Math.round(r.width),height:Math.round(r.height)};
+          }
+          var frames=doc.querySelectorAll('iframe');
+          for(var i=0;i<frames.length;i++){
+            var child=null;
+            try{child=frames[i].contentDocument;}catch(error){child=null;}
+            if(child)queue.push(child);
+          }
+        }
+        return null;
+      })())`,
       returnByValue: true,
     };
     if (this.executionContextId) params.contextId = this.executionContextId;
