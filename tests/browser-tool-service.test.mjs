@@ -107,8 +107,19 @@ class BrowserFixtureTransport {
           throw new Error('Failed to find browser context');
         }
         const id = `managed-${this.nextTarget++}`;
-        const windowId = Number.isSafeInteger(params.windowId) ? params.windowId : this.nextWindow++;
-        const windowPeer = [...this.windows].find(([, candidate]) => candidate === windowId)?.[0];
+        // Target.createTarget has no windowId parameter. Real Chrome silently
+        // ignores one and chooses an existing window for tab creation, so the
+        // fixture must not invent routing behavior that CDP does not provide.
+        const requestedContext = typeof params.browserContextId === 'string'
+          ? params.browserContextId
+          : undefined;
+        const windowPeer = [...this.targets].find(([, candidate]) => (
+          candidate.type === 'page' &&
+          (!requestedContext || candidate.browserContextId === requestedContext)
+        ))?.[0];
+        const windowId = params.newWindow === true
+          ? this.nextWindow++
+          : this.windows.get(windowPeer) ?? this.nextWindow++;
         const browserContextId = typeof params.browserContextId === 'string'
           ? this.misrouteDirectProfileContexts.has(params.browserContextId)
             ? `misrouted:${params.browserContextId}`
@@ -211,7 +222,12 @@ class BrowserFixtureTransport {
               : {}),
           });
           this.fallbackWindowNames.set(id, this.fallbackWindowNameOverride ?? windowName);
-          this.windows.set(id, this.nextWindow++);
+          this.windows.set(
+            id,
+            String(params.expression).includes('popup=yes')
+              ? this.nextWindow++
+              : this.windows.get(targetId) ?? this.nextWindow++,
+          );
           this.loaders.set(id, `loader:${id}:1`);
           return { result: { value: true } };
         }
@@ -3211,11 +3227,17 @@ async function managedWindowFixture(t, identity) {
       profileContextId: profiles[0].profileContextId,
     });
   };
-  return { open, reconnect, refreshProfiles };
+  const release = async () => {
+    await runtime.call(client.bridge, 'workspaces/release', { workspaceId: client.workspace.id });
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  return { transport, open, reconnect, refreshProfiles, release };
 }
 
 test('a reconnect to the same browser keeps the Workspace window it already opened', async t => {
-  const { open, reconnect, refreshProfiles } = await managedWindowFixture(t, 'window-survives');
+  const {
+    transport, open, reconnect, refreshProfiles, release,
+  } = await managedWindowFixture(t, 'window-survives');
 
   const first = await open('https://managed.test/one');
   reconnect('process:chrome:original');
@@ -3226,6 +3248,19 @@ test('a reconnect to the same browser keeps the Workspace window it already open
   // fresh one leaves an orphan behind and re-runs the bootstrap that can land a
   // managed tab in a window the user is working in.
   assert.equal(second, first, 'the Workspace must reuse the window it already owns');
+  assert.equal(
+    transport.calls.some(call => (
+      call.method === 'Target.createTarget' && Object.hasOwn(call.params, 'windowId')
+    )),
+    false,
+    'window reuse must not pass a parameter that Target.createTarget does not support',
+  );
+  await release();
+  assert.equal(
+    [...transport.targets.values()].some(target => target.url.startsWith('https://managed.test/')),
+    false,
+    'Workspace release must close managed targets retained across generations',
+  );
 });
 
 test('a reconnect to a different browser process starts a new window', async t => {

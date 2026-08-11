@@ -3,12 +3,15 @@
 // cookies, frames, upload, auth, tabs, dialogs, and output format.
 import { test, expect } from '@playwright/test';
 import { open, click, type as bpType, press, evaluate, snapshot, bp, startBp } from './bp.js';
+import { execFileSync } from 'node:child_process';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { connectLiveCdp } from './helpers/live-cdp.js';
 import { TEST_BASE_URL as BASE } from './helpers/playwright.js';
+import { forceKillProcess } from './helpers/platform.mjs';
 
 const testOutputPath = (name: string): string => join(
   process.env.BROWSER_PILOT_TEST_ROOT ?? tmpdir(),
@@ -22,6 +25,103 @@ test.describe('lifecycle', () => {
     bp('disconnect');
     const result = bp('connect');
     expect(result.ok).toBe(true);
+  });
+
+  test('same-process reconnect reuses the exact managed Chrome window', async () => {
+    test.skip(process.platform === 'win32', 'The janitor disconnect probe uses POSIX process signals');
+    const browsers = bp('browsers').browsers as Array<{
+      userDataRoot?: string;
+      profile?: string;
+      state?: string;
+    }>;
+    const browser = browsers.find(candidate => candidate.state === 'ready') ?? browsers[0];
+    const userDataRoot = browser?.userDataRoot ?? browser?.profile;
+    expect(userDataRoot).toBeDefined();
+    const cdp = await connectLiveCdp(userDataRoot!);
+    let browserContextId: string | undefined;
+
+    const marker = `window-reconnect-${Date.now()}`;
+    const decoyUrl = `${BASE}/input/keyboard?${marker}-decoy`;
+    const firstUrl = `${BASE}/input/types?${marker}-first`;
+    const secondUrl = `${BASE}/input/number?${marker}-second`;
+    const targetFor = async (url: string): Promise<any> => {
+      const result = await cdp.send('Target.getTargets');
+      return result.targetInfos.find((target: any) => target.url === url);
+    };
+    const windowFor = async (targetId: string): Promise<number> => (
+      await cdp.send('Browser.getWindowForTarget', { targetId })
+    ).windowId;
+    const selectProfileContaining = (url: string): void => {
+      const profiles = bp('profiles').profiles as Array<{
+        index: number;
+        representativeTabs: Array<{ url: string }>;
+      }>;
+      const profile = profiles.find(candidate => (
+        candidate.representativeTabs.some(tab => tab.url === url)
+      ));
+      expect(profile).toBeDefined();
+      expect(bp(`profile ${profile!.index}`).ok).toBe(true);
+    };
+
+    try {
+      ({ browserContextId } = await cdp.send('Target.createBrowserContext'));
+      expect(browserContextId).toBeTruthy();
+      const decoy = await cdp.send('Target.createTarget', {
+        url: decoyUrl,
+        newWindow: true,
+        browserContextId,
+      });
+      selectProfileContaining(decoyUrl);
+
+      expect(bp(`open ${JSON.stringify(firstUrl)} --new`).ok).toBe(true);
+      const first = await targetFor(firstUrl);
+      expect(first).toBeDefined();
+      const managedWindowId = await windowFor(first.targetId);
+      const decoyWindowId = await windowFor(decoy.targetId);
+      expect(managedWindowId).not.toBe(decoyWindowId);
+      await cdp.send('Target.activateTarget', { targetId: decoy.targetId });
+
+      const brokerHome = process.env.BROWSER_PILOT_HOME;
+      expect(brokerHome).toBeDefined();
+      const locator = JSON.parse(await readFile(join(brokerHome!, 'broker-locator.json'), 'utf8'));
+      const processes = execFileSync('ps', ['ax', '-o', 'pid=,ppid=,command='], { encoding: 'utf8' });
+      const janitor = processes.split('\n').map(line => (
+        line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)
+      )).find(match => (
+        match && Number(match[2]) === locator.pid && /managed-target-janitor/.test(match[3])
+      ));
+      expect(janitor).toBeDefined();
+      forceKillProcess(Number(janitor![1]));
+
+      let disconnected = false;
+      for (let attempt = 0; attempt < 50 && !disconnected; attempt += 1) {
+        await delay(50);
+        disconnected = bp('status').browser?.state === 'disconnected';
+      }
+      expect(disconnected).toBe(true);
+      expect(bp('connect').ok).toBe(true);
+      selectProfileContaining(decoyUrl);
+
+      expect(bp(`open ${JSON.stringify(secondUrl)} --new`).ok).toBe(true);
+      const second = await targetFor(secondUrl);
+      expect(second).toBeDefined();
+      expect(await windowFor(second.targetId)).toBe(managedWindowId);
+      const afterReconnect = await cdp.send('Target.getTargets');
+      const orphanedBlankTargets = afterReconnect.targetInfos.filter((target: any) => (
+        target.type === 'page' &&
+        target.browserContextId === browserContextId &&
+        target.url === 'about:blank'
+      ));
+      expect(orphanedBlankTargets).toHaveLength(0);
+    } finally {
+      if (browserContextId) {
+        await cdp.send('Target.disposeBrowserContext', { browserContextId }).catch(() => {});
+      }
+      await cdp.close();
+      if (bp('status').browser?.state === 'disconnected') expect(bp('connect').ok).toBe(true);
+      const profiles = bp('profiles').profiles as Array<{ index: number }>;
+      if (profiles.length > 0) expect(bp(`profile ${profiles[0].index}`).ok).toBe(true);
+    }
   });
 });
 

@@ -27,8 +27,11 @@ against a user-authorized Chrome endpoint:
   target's Profile context;
 - an isolated-world `window.open` with `userGesture: true` created a target in
   the representative tab's exact Profile context;
-- popup window features created a separate normal Chrome window, and subsequent
-  `Target.createTarget({ windowId })` calls stayed in that Profile context;
+- popup window features created a separate normal Chrome window;
+- `Target.createTarget` has no `windowId` parameter. Chrome can silently ignore
+  that unknown field and create a tab in an existing user window, so retained
+  windows must be reused through an owned target and verified by
+  `Browser.getWindowForTarget`;
 - a temporary `chrome://version` target could map a runtime context to Chrome
   `Local State`, but doing that is user-visible and therefore is not permitted
   during passive Profile discovery.
@@ -153,8 +156,10 @@ CLI JSON mode exits without reading interactive stdin.
 Creation is serialized by Workspace/Profile context and remains owned by the
 managed-target janitor:
 
-1. If the context's ManagedTabSet already has a live window ID, create
-   `about:blank` with that `windowId` and verify the returned target context.
+1. If the Workspace retains a live managed window, resolve an owned page target
+   whose `Browser.getWindowForTarget` result equals that window ID. Re-adopt it
+   after a reconnect, open a uniquely marked sibling tab from an isolated world,
+   and verify both the Profile context and exact window ID.
 2. For the first target, try browser-level creation with `newWindow: true` and
    the raw browser-context ID. Verification is mandatory because Chrome support
    varies by regular Profile context.
@@ -170,7 +175,7 @@ managed-target janitor:
 5. Explicitly adopt the verified target into the janitor before registering it
    publicly, so Broker crash cleanup still closes it.
 6. Read and retain its window ID, bind the ManagedTabSet, register the opaque
-   target, then navigate through the normal target actor.
+   target and owned raw target ID, then navigate through the normal target actor.
 
 The fallback does not execute page-defined JavaScript, inject DOM content, read
 page data, or navigate the representative user tab. It may cause ordinary

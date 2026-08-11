@@ -221,6 +221,27 @@ test('janitor closes only owned targets and popup descendants after parent EOF',
   assert.deepEqual([...cdp.targets.keys()].sort(), ['user-popup', 'user-tab']);
 });
 
+test('janitor rejects the nonexistent Target.createTarget window selector', async t => {
+  const cdp = await startCdpFixture();
+  const { child, waitFor } = startWorker(cdp.wsUrl);
+  t.after(async () => {
+    forceKillChild(child);
+    await cdp.close();
+  });
+
+  await waitFor(message => message.event === 'ready');
+  child.stdin.write(`${JSON.stringify({
+    id: 1,
+    method: 'create',
+    params: { url: 'about:blank', windowId: 71 },
+  })}\n`);
+  const rejected = await waitFor(message => message.id === 1);
+
+  assert.equal(rejected.error.code, 'janitor_error');
+  assert.match(rejected.error.message, /explicit new window/);
+  assert.equal(cdp.receivedMethods.includes('Target.createTarget'), false);
+});
+
 test('a replacement janitor adopts live in-memory target IDs without disk state', async t => {
   const cdp = await startCdpFixture();
   const first = startWorker(cdp.wsUrl);

@@ -2,8 +2,7 @@ import type { Transport } from '../transport.js';
 
 export interface ManagedTargetCreateParams {
   url: string;
-  newWindow?: boolean;
-  windowId?: number;
+  newWindow: true;
   browserContextId?: string;
 }
 

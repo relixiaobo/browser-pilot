@@ -179,6 +179,12 @@ interface TargetSession {
   activeFrame?: ActiveFrame;
 }
 
+interface ManagedWindowRecord {
+  workspaceId: BrowserWorkspaceId;
+  windowId: number;
+  targetIds: Set<string>;
+}
+
 interface ActiveFrame {
   id: FrameId;
   cdpFrameId: string;
@@ -379,15 +385,11 @@ export class BrowserToolService implements BrowserToolExecutor {
   private readonly siteKnowledge: SiteKnowledgeStore;
   private readonly siteKnowledgeDelivery: SiteKnowledgeDeliveryTracker;
   /**
-   * Windows this Broker opened, keyed so the mapping outlives a reconnect.
-   *
-   * A ManagedTabSet is bound to a ProfileContext, and a `profileContextId` is
-   * only valid for its connection generation — so keying on either loses the
-   * window every time the connection drops, while Chrome keeps the window open.
-   * Chrome's own browser-context id survives, because it belongs to the Profile
-   * rather than to the debugging session.
+   * Windows this Broker opened and the owned targets that can safely create a
+   * sibling tab there. Chrome has no Target.createTarget window selector, so a
+   * retained windowId is evidence to verify, not a creation parameter.
    */
-  private readonly managedWindowIds = new Map<string, number>();
+  private readonly managedWindows = new Map<string, ManagedWindowRecord>();
   private readonly ownedSessionIds = new Set<string>();
   private readonly framesBySession = new Map<string, SessionFrames>();
   private readonly childFrameSessions = new Map<string, Map<string, ChildFrameSession>>();
@@ -558,10 +560,10 @@ export class BrowserToolService implements BrowserToolExecutor {
     // Chrome keeps them, so forgetting them here strands them and forces the
     // next command to build another one. Only a different browser process means
     // they are really gone. A window that vanished for any other reason still
-    // costs nothing: creating into a stale windowId is rejected, and
-    // `ensureManagedTarget` already drops the mapping and falls through.
+    // costs nothing: its retained targets no longer resolve to that window, so
+    // the next creation drops the stale mapping and bootstraps a replacement.
     if (current.processIdentity !== previous.processIdentity) {
-      this.managedWindowIds.clear();
+      this.managedWindows.clear();
     }
     for (const invalidation of this.registry.invalidateBrowserConnection(current.id)) {
       this.observations.invalidateTarget(invalidation.targetId, 'browser_reconnected');
@@ -702,31 +704,32 @@ export class BrowserToolService implements BrowserToolExecutor {
   releaseWorkspace(
     principal: BrokerToolCallContext['principal'],
     workspace: NonNullable<BrokerToolCallContext['workspace']>,
-    managedTabSets: readonly NonNullable<BrokerToolCallContext['managedTabSet']>[],
+    _managedTabSets: readonly NonNullable<BrokerToolCallContext['managedTabSet']>[],
   ): void {
     const caller = { principalId: principal.id, workspaceId: workspace.id };
     const records = this.registry.activeRecords(caller);
+    const managedCdpTargetIds = new Set(
+      records
+        .filter(target => target.origin !== 'user_tab')
+        .map(target => target.cdpTargetId),
+    );
     this.watchdogs.releaseWorkspace(workspace.id);
     this.downloads?.releaseWorkspace(workspace.id);
     this.inventory.releaseWorkspace(caller);
     this.observations.releaseWorkspace(workspace.id);
     this.siteKnowledgeDelivery.releaseScope(workspace.id);
-    // The key is workspace-scoped, so releasing a Workspace drops every window
-    // it owned regardless of which Profile each one belonged to.
-    for (const key of [...this.managedWindowIds.keys()]) {
-      if (key.startsWith(`${workspace.id} `)) this.managedWindowIds.delete(key);
-    }
-    for (const managedTabSet of managedTabSets) {
-      this.managedWindowIds.delete(`tabset ${managedTabSet.id}`);
+    for (const [key, managedWindow] of this.managedWindows) {
+      if (managedWindow.workspaceId !== workspace.id) continue;
+      for (const targetId of managedWindow.targetIds) managedCdpTargetIds.add(targetId);
+      this.managedWindows.delete(key);
     }
     this.network.releaseWorkspace(workspace.id);
     for (const [key, session] of this.sessions) {
       if (session.workspaceId !== workspace.id) continue;
       this.retireSession(key, session);
     }
-    for (const target of records) {
-      if (target.origin === 'user_tab') continue;
-      void this.transport.send('Target.closeTarget', { targetId: target.cdpTargetId }).catch(() => {});
+    for (const targetId of managedCdpTargetIds) {
+      void this.transport.send('Target.closeTarget', { targetId }).catch(() => {});
     }
     this.deleteDialogs(dialog => dialog.workspaceId === workspace.id);
   }
@@ -944,8 +947,10 @@ export class BrowserToolService implements BrowserToolExecutor {
   private async closeTab(context: BrokerToolCallContext): Promise<JsonValue> {
     const inventoryContext = this.inventoryContext(context);
     const targetId = this.requireTargetId(context);
+    const target = this.registry.get(inventoryContext, targetId);
     this.markDispatched(context);
     await this.inventory.close(inventoryContext, targetId);
+    this.forgetManagedWindowTarget(target.cdpTargetId);
     this.cleanupTarget(targetId, 'target_closed');
     return asJson({
       workspaceId: inventoryContext.workspaceId,
@@ -1900,15 +1905,19 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
     const managedTabSet = context.managedTabSetForProfile(profile.id);
     const windowKey = this.managedWindowKey(managedTabSet, profile);
-    const windowId = this.managedWindowIds.get(windowKey);
+    let managedWindow = this.managedWindows.get(windowKey);
     let createdTargetId: string | undefined;
 
-    if (windowId !== undefined) {
-      try {
-        createdTargetId = await this.tryCreateManagedTarget({ url: 'about:blank', windowId }, profile);
-      } catch (error) {
-        this.managedWindowIds.delete(windowKey);
-        if (!(error instanceof ManagedTargetCreationRejectedError)) throw error;
+    if (managedWindow) {
+      const representative = await this.managedWindowRepresentative(managedWindow, profile);
+      if (representative) {
+        await this.managedTargets.adoptTarget(representative.cdpTargetId);
+        createdTargetId = await this.openManagedTargetFromRepresentative(profile, representative, {
+          expectedWindowId: managedWindow.windowId,
+        });
+      } else {
+        this.managedWindows.delete(windowKey);
+        managedWindow = undefined;
       }
     }
 
@@ -1932,12 +1941,12 @@ export class BrowserToolService implements BrowserToolExecutor {
     }
 
     try {
-      if (!this.managedWindowIds.has(windowKey)) {
-        const window = await this.transport.send('Browser.getWindowForTarget', { targetId: createdTargetId });
-        if (!Number.isSafeInteger(window?.windowId)) {
-          throw new BrowserPilotError('internal_error', 'Chrome returned an invalid managed window ID');
-        }
-        this.managedWindowIds.set(windowKey, window.windowId);
+      const window = await this.transport.send('Browser.getWindowForTarget', { targetId: createdTargetId });
+      if (!Number.isSafeInteger(window?.windowId)) {
+        throw new BrowserPilotError('internal_error', 'Chrome returned an invalid managed window ID');
+      }
+      if (managedWindow && window.windowId !== managedWindow.windowId) {
+        throw this.managedWindowRoutingError(profile);
       }
       const registered = this.inventory.registerManagedTarget({
         ...inventoryContext,
@@ -1949,6 +1958,13 @@ export class BrowserToolService implements BrowserToolExecutor {
       });
       this.publishTargetEvent('target.attached', registered);
       await this.inventory.activate(inventoryContext, registered.id);
+      const record = managedWindow ?? {
+        workspaceId: managedTabSet.workspaceId,
+        windowId: window.windowId,
+        targetIds: new Set<string>(),
+      };
+      record.targetIds.add(createdTargetId);
+      this.managedWindows.set(windowKey, record);
       return registered.id;
     } catch (error) {
       await this.transport.send('Target.closeTarget', { targetId: createdTargetId }).catch(() => {});
@@ -2152,6 +2168,54 @@ export class BrowserToolService implements BrowserToolExecutor {
     return rawContextId === profile.cdpBrowserContextId;
   }
 
+  private async managedWindowRepresentative(
+    managedWindow: ManagedWindowRecord,
+    profile: ProfileContextRecord,
+  ): Promise<{ cdpTargetId: string } | undefined> {
+    const result = await this.transport.send('Target.getTargets');
+    const targets = new Map<string, any>(
+      Array.isArray(result?.targetInfos)
+        ? result.targetInfos
+          .filter((target: any) => target && typeof target.targetId === 'string')
+          .map((target: any) => [target.targetId, target])
+        : [],
+    );
+    for (const cdpTargetId of [...managedWindow.targetIds].reverse()) {
+      const target = targets.get(cdpTargetId);
+      const rawContextId = typeof target?.browserContextId === 'string'
+        ? target.browserContextId
+        : undefined;
+      if (target?.type !== 'page' || rawContextId !== profile.cdpBrowserContextId) {
+        managedWindow.targetIds.delete(cdpTargetId);
+        continue;
+      }
+      try {
+        const window = await this.transport.send('Browser.getWindowForTarget', { targetId: cdpTargetId });
+        if (window?.windowId === managedWindow.windowId) return { cdpTargetId };
+      } catch {
+        // A target can disappear between inventory and window lookup.
+      }
+      managedWindow.targetIds.delete(cdpTargetId);
+    }
+    return undefined;
+  }
+
+  private managedWindowRoutingError(profile: ProfileContextRecord): BrowserPilotError {
+    return new BrowserPilotError(
+      'profile_context_unavailable',
+      'Chrome created the managed tab outside the retained Workspace window',
+      {
+        retryable: true,
+        context: { profileContextId: profile.id },
+        remediation: {
+          code: 'inspect_profile_tabs',
+          message: 'Inspect the Profile windows before retrying managed tab creation.',
+          actionRequired: true,
+        },
+      },
+    );
+  }
+
   private async createManagedProfileWindow(profile: ProfileContextRecord): Promise<string> {
     const representative = profile.targets.find(target => target.type === 'page');
     if (!representative) {
@@ -2166,6 +2230,14 @@ export class BrowserToolService implements BrowserToolExecutor {
       });
     }
 
+    return this.openManagedTargetFromRepresentative(profile, representative);
+  }
+
+  private async openManagedTargetFromRepresentative(
+    profile: ProfileContextRecord,
+    representative: { cdpTargetId: string },
+    options: { expectedWindowId?: number } = {},
+  ): Promise<string> {
     const attached = await this.transport.send('Target.attachToTarget', {
       targetId: representative.cdpTargetId,
       flatten: true,
@@ -2211,8 +2283,10 @@ export class BrowserToolService implements BrowserToolExecutor {
             .map((target: any) => target.targetId)
           : [],
       );
-      const expression = `window.open(${JSON.stringify(marker)}, ${JSON.stringify(windowName)}, ` +
-        `${JSON.stringify('popup=yes,width=1280,height=900')}) !== null`;
+      const expression = options.expectedWindowId === undefined
+        ? `window.open(${JSON.stringify(marker)}, ${JSON.stringify(windowName)}, ` +
+          `${JSON.stringify('popup=yes,width=1280,height=900')}) !== null`
+        : `window.open(${JSON.stringify(marker)}, ${JSON.stringify(windowName)}) !== null`;
       const opened = await this.transport.send('Runtime.evaluate', {
         expression,
         contextId: isolated.executionContextId,
@@ -2281,6 +2355,14 @@ export class BrowserToolService implements BrowserToolExecutor {
                 },
               },
             );
+          }
+          if (options.expectedWindowId !== undefined) {
+            const window = await this.transport.send('Browser.getWindowForTarget', {
+              targetId: candidate.targetId,
+            });
+            if (window?.windowId !== options.expectedWindowId) {
+              throw this.managedWindowRoutingError(profile);
+            }
           }
           candidateTargetId = candidate.targetId;
           break;
@@ -3285,6 +3367,13 @@ export class BrowserToolService implements BrowserToolExecutor {
       throw new BrowserPilotError('internal_error', 'Chrome returned an invalid document URL');
     }
     return result.value;
+  }
+
+  private forgetManagedWindowTarget(cdpTargetId: string): void {
+    for (const [key, managedWindow] of this.managedWindows) {
+      if (!managedWindow.targetIds.delete(cdpTargetId)) continue;
+      if (managedWindow.targetIds.size === 0) this.managedWindows.delete(key);
+    }
   }
 
   private cleanupTarget(targetId: ControlledTargetId, reason: 'target_closed'): void {

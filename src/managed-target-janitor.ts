@@ -120,11 +120,9 @@ async function trackTarget(
 async function createTarget(params: Record<string, unknown>): Promise<{ targetId: string }> {
   if (params.url !== 'about:blank') throw new Error('Managed targets must start at about:blank');
   const newWindow = params.newWindow === true;
-  const windowId = params.windowId;
   const browserContextId = params.browserContextId;
-  if (newWindow === (windowId !== undefined)) throw new Error('Exactly one managed target window selector is required');
-  if (windowId !== undefined && (!Number.isSafeInteger(windowId) || Number(windowId) < 0)) {
-    throw new Error('Invalid managed target window ID');
+  if (!newWindow || params.windowId !== undefined) {
+    throw new Error('Managed target creation requires an explicit new window');
   }
   if (browserContextId !== undefined && (
     typeof browserContextId !== 'string' || browserContextId.length === 0 || browserContextId.length > 1024
@@ -133,7 +131,7 @@ async function createTarget(params: Record<string, unknown>): Promise<{ targetId
   }
   const created = await cdp.send('Target.createTarget', {
     url: 'about:blank',
-    ...(newWindow ? { newWindow: true } : { windowId }),
+    newWindow: true,
     ...(browserContextId ? { browserContextId } : {}),
   });
   if (typeof created?.targetId !== 'string' || created.targetId.length === 0) {

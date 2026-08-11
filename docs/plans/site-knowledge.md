@@ -385,6 +385,11 @@ the habit above.
   `href` removed.
   Mitigated — not eliminated — by evidence-carrying notes and age
   discounting. Inherent to any stored knowledge, structured or not.
+- **Shipped seed decay has no upstream feedback loop.** All seven current seeds
+  were field-verified on 2026-08-10, while automated checks only prove that the
+  files parse and match their declared hosts. A user Agent may repair its local
+  copy, but that correction never reaches the plugin source, so a later release
+  can still seed stale guidance for new users.
 - **Write rate depends on instruction adherence.** The design promises
   monotone accumulation, not coverage.
 - **Concurrent edits** to one file are last-write-wins. Rare, low-stakes
@@ -421,17 +426,13 @@ the habit above.
 - [x] **S5** Seeds: author 4–6 files meeting the selection criteria;
   validate the validatable ones against the real-site canary suite; review
   each as a format exemplar.
-  - Complete at two files, not four to six, and the shortfall is the honest
-    result of the selection criteria rather than an omission. The real-site
-    canary suite covers exactly one synthetic host
-    (`the-internet.herokuapp.com`), so its branch of the criteria yields
-    nothing a user would ever visit. Only the capability-warning branch was
-    shippable: `google-docs-editors` and `google-search`, whose every claim
-    rests on Browser Pilot's own documented behaviour or on a stable public
-    URL contract. Site-specific DOM and flow claims were deliberately not
-    written, because inventing them would break the same doctrine S4 ships —
-    record only what was reproduced. Growing the set needs live verification
-    with a real browser, or new canary hosts.
+  - Complete at seven files, one above the original range. All seven were
+    field-verified with a real browser on 2026-08-10. The real-site canary suite
+    still covers only one synthetic host (`the-internet.herokuapp.com`), so it
+    does not continuously revalidate any shipped seed; current automated tests
+    cover format, store acceptance, and host matching only. Growing or
+    refreshing the set therefore still needs live verification or new canary
+    hosts.
 - [x] **S6** Guardrails: assert no install/upgrade/uninstall path writes to
   `sites/`; document the user-data (not cache) classification for future
   uninstall work.
