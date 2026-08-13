@@ -1,6 +1,7 @@
 # Site Knowledge Plan
 
-Status: **Implemented; S7 directional baselines complete; checkpoint calibration recorded**
+Status: **Implemented; S7 directional baselines complete; durable checkpoint
+baseline complete**
 Baseline: `v0.7.0`
 Target: Browser Pilot `v0.8.0`, protocol `1.4` (additive)
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
@@ -376,9 +377,12 @@ the habit above.
   evidence from CC Switch's Codex `OpenAI_1` provider with
   `openai/gpt-5.6-sol`: delivered knowledge produced a 3/3 treatment versus 0/3
   control split, and the latest all-native repair run corrected 3/3
-  contradictions, but the all-native write-after-recovery run wrote 0/3 notes.
-  These N=3 results establish direction, not a cross-model confidence claim.
-  Spontaneous write coverage is now the largest measured doctrine risk.
+  contradictions. The passive all-native write-after-recovery run wrote 0/3
+  notes, while a doctrine-aligned recovery checkpoint on a tightened durable
+  trap produced 3/3 valid treatment writes versus 0/3 control writes. These N=3
+  results establish direction, not a cross-model confidence claim. Spontaneous
+  initiation remains the largest measured doctrine risk, and checkpoint
+  effectiveness has only been measured on one fixture and model setup.
 - **Quietly wrong conclusions.** A note like "absence of `rel=next` means
   last page" can mislead after a redesign without producing an error. This is
   not hypothetical: that exact claim was written into this plan, and field
@@ -391,15 +395,19 @@ the habit above.
   files parse and match their declared hosts. A user Agent may repair its local
   copy, but that correction never reaches the plugin source, so a later release
   can still seed stale guidance for new users.
-- **Spontaneous write adherence measured 0/3.** The write tool was available on
-  every model request and the page task succeeded every time, so the current
-  design cannot rely on passive doctrine text to produce corpus coverage. The
-  first paired prompt calibration also found no lift from a minimal end-of-task
-  doctrine reminder: treatment 0/1 versus control 0/1. A recovery-time
-  checkpoint prompted one malformed write in its first treatment, then no write
-  at all in the skill-refresh rerun. The checkpoint therefore has not
-  established reliable valid-write coverage. The design still promises
-  monotone accumulation, not complete coverage.
+- **Passive spontaneous write adherence measured 0/3.** The write tool was
+  available on every model request and the page task succeeded every time, so
+  the current design cannot rely on passive doctrine text to produce corpus
+  coverage. The first paired prompt calibration also found no lift from a
+  minimal end-of-task doctrine reminder: treatment 0/1 versus control 0/1. That
+  fixture left its recovery control observable and did not unambiguously meet
+  the doctrine's invisible, expensive-to-discover, and slow-to-decay gates, so
+  its 0/3 remains a passive-behavior baseline rather than a clean adherence
+  test. After the fixture was tightened around a transient tenant-wide policy
+  diagnosis, the recovery checkpoint produced valid writes in 3/3 treatments
+  and 0/3 controls. This establishes a reliable directional lift for that
+  checkpoint and setup, not spontaneous or general write adherence. The design
+  still promises monotone accumulation, not complete coverage.
 - **Concurrent edits** to one file are last-write-wins. Rare, low-stakes
   (notes, not code); accepted.
 - **Coincidence-backed superstition** that keeps reproducing survives
@@ -718,12 +726,61 @@ the habit above.
       hostname guidance; it moves the observed failure back to the write
       decision itself. There is no evidence here for changing the store or
       adding a canonical-host affordance.
+    - That fixture was then found to be an ambiguous doctrine probe: opening its
+      Delivery options exposed the recovery control directly, so the candidate
+      knowledge did not clearly satisfy the three write gates. The tightened
+      fixture now reveals only diagnostic `D417` after the first failure. The
+      Agent must open Diagnostics, run the policy diagnostic, learn that
+      Workspace Atlas policy AP-9 rejects Standard transport for every dispatch
+      receipt, open Advanced routing, enable Tenant compatibility relay, and
+      retry. After recovery, both the diagnostic evidence and relay control are
+      removed from the DOM. Contract tests pin the failed, diagnosed,
+      tenant-wide, and recovered states. This measures a verified, repeatable,
+      site-level trap whose cause and fix are no longer observable at the write
+      moment, rather than strengthening the checkpoint wording around an
+      ambiguous candidate note.
+    - Durable-trap paired N=1 completed on 2026-08-13 with CC Switch's Codex
+      `OpenAI_1` provider (`023a77b3-d85f-466a-b93c-9732e74f7c9f`),
+      `openai/gpt-5.6-sol`, `xhigh` reasoning, the native browser and write
+      tools, and the same process-local Responses compatibility adapter. Both
+      samples diagnosed AP-9, recovered the task, returned `ember-417`, and
+      passed both deterministic page checks. Treatment emitted the checkpoint,
+      called `site_knowledge_write` exactly once, and produced a store-accepted
+      `dispatch-console.md` matching `domains: ["127.0.0.1"]`; control emitted
+      no checkpoint and made no write. Results: treatment valid write 1/1,
+      control write 0/1, write lift 1.0, treatment and control task success 1/1,
+      pair balance 1.0, and zero HTTP retries, using 209,571 tokens. The log is
+      caliper's
+      `logs/site-knowledge-s7-write-checkpoint-durable-trap-all-native-n1-openai1/2026-08-13T10-15-02-00-00_site-knowledge-write-checkpoint_VKdUbhqzdj7gEWEFR2gby6.eval`.
+    - Durable-trap directional N=3 then completed with the same setup. All six
+      samples diagnosed the tenant policy, recovered the page task, returned
+      `ember-417`, and passed the page and answer checks. Each treatment emitted
+      the checkpoint and called `site_knowledge_write` exactly once; every note
+      was accepted and matched the current host with
+      `domains: ["127.0.0.1"]`. No control emitted a checkpoint or called the
+      writer, and every control corpus remained empty. Results: treatment valid
+      write 3/3, control write 0/3, write lift 1.0, treatment and control task
+      success 3/3, pair balance 1.0, and zero HTTP retries, using 639,590 tokens.
+      The N=1 note and one N=3 note used `updated: 2026-08-12` during the
+      2026-08-13 runs; both remained valid and host-matching, but the one-day
+      date lag is a note-quality observation. The successful log is caliper's
+      `logs/site-knowledge-s7-write-checkpoint-durable-trap-all-native-n3-openai1/2026-08-13T10-20-34-00-00_site-knowledge-write-checkpoint_G3fgv5AmFybGW2VagStBDE.eval`.
+      This is the first stable directional valid-write lift for the checkpoint;
+      it supersedes the two earlier N=1 checkpoint calibrations without erasing
+      their evidence about malformed domains and ambiguous write decisions.
+    - The immediately preceding N=3 attempt stopped during Chrome authorization
+      before any model request. Its control failed the clean-state prologue with
+      `browser_disconnected`, treatment was cancelled, the run produced no
+      scores and used zero model tokens, and it is excluded from the rate. The
+      audit artifact remains at caliper's
+      `logs/site-knowledge-s7-write-checkpoint-durable-trap-all-native-n3-openai1/2026-08-13T10-19-33-00-00_site-knowledge-write-checkpoint_CZwwDwQ7kXitL5f8HKLhJv.eval`.
 
-  All eleven successful native follow-up logs were checked byte-for-byte against
+  All thirteen successful native follow-up logs were checked byte-for-byte against
   the selected `OpenAI_1` credential after completion. None contains the key,
-  the `ANTHROPIC_API_KEY` marker, or a Claude Code auth marker. Each real sample
-  ran serially with `--max-samples 1`; no Anthropic or Claude Code
-  authentication was used. The seven all-native logs used Inspect 0.3.205's
+  an `ANTHROPIC_*` marker, or a Claude Code auth marker. The zero-token failed
+  artifact above passed the same checks. Each real sample ran serially with
+  `--max-samples 1`; no Anthropic or Claude Code authentication was used. The
+  nine all-native logs used Inspect 0.3.205's
   same process-local compatibility adapter, removing only the unsupported
   Responses field `truncation: "auto"` and leaving site-packages unchanged.
 
