@@ -395,8 +395,11 @@ the habit above.
   every model request and the page task succeeded every time, so the current
   design cannot rely on passive doctrine text to produce corpus coverage. The
   first paired prompt calibration also found no lift from a minimal end-of-task
-  doctrine reminder: treatment 0/1 versus control 0/1. The design still
-  promises monotone accumulation, not complete coverage.
+  doctrine reminder: treatment 0/1 versus control 0/1. A recovery-time
+  checkpoint prompted one malformed write in its first treatment, then no write
+  at all in the skill-refresh rerun. The checkpoint therefore has not
+  established reliable valid-write coverage. The design still promises
+  monotone accumulation, not complete coverage.
 - **Concurrent edits** to one file are last-write-wins. Rare, low-stakes
   (notes, not code); accepted.
 - **Coincidence-backed superstition** that keeps reproducing survives
@@ -695,12 +698,32 @@ the habit above.
       on generating legal, host-matching frontmatter (and on whether the write
       tool should expose a canonical host value), rather than adding another
       end-of-task reminder.
+    - The paired N=1 was rerun on 2026-08-13 after SKILL.md made the domain
+      contract explicit: write only a hostname or hostname/path glob, never a
+      scheme, origin, or port, and use `127.0.0.1` for loopback URLs with a
+      dynamic port. The run again used the current `OpenAI_1` provider,
+      `openai/gpt-5.6-sol`, `xhigh` reasoning, native browser and write tools,
+      and the process-local Responses compatibility adapter. Both samples
+      recovered the page task, returned `ember-417`, and passed both
+      deterministic page checks. The treatment received the checkpoint and all
+      eight of its model requests advertised
+      `[browser_pilot, site_knowledge_write]`; the control advertised both tools
+      on all nine requests. The treatment made seven native browser calls and
+      the control made eight, but neither called `site_knowledge_write`, so both
+      isolated corpora remained empty. Results: treatment write 0/1, control
+      write 0/1, write lift 0.0, treatment and control task success 1/1, and
+      pair balance 1.0, using 173,162 tokens. The successful log is caliper's
+      `logs/site-knowledge-s7-write-checkpoint-skill-refresh-all-native-n1-openai1/2026-08-13T09-31-05-00-00_site-knowledge-write-checkpoint_QLbSjs2MdTT52TMVrcfs4F.eval`.
+      Because no frontmatter was generated, this run does not validate the new
+      hostname guidance; it moves the observed failure back to the write
+      decision itself. There is no evidence here for changing the store or
+      adding a canonical-host affordance.
 
-  All ten successful native follow-up logs were checked byte-for-byte against
+  All eleven successful native follow-up logs were checked byte-for-byte against
   the selected `OpenAI_1` credential after completion. None contains the key,
   the `ANTHROPIC_API_KEY` marker, or a Claude Code auth marker. Each real sample
   ran serially with `--max-samples 1`; no Anthropic or Claude Code
-  authentication was used. The six all-native logs used Inspect 0.3.205's
+  authentication was used. The seven all-native logs used Inspect 0.3.205's
   same process-local compatibility adapter, removing only the unsupported
   Responses field `truncation: "auto"` and leaving site-packages unchanged.
 
