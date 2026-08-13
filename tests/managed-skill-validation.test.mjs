@@ -159,6 +159,16 @@ test('the seeding instruction names a directory that actually ships', async () =
   );
 });
 
+test('the skill routes shipped-seed contradictions through explicit redacted consent', async () => {
+  const skill = await readFile(join(managedSkill, 'SKILL.md'), 'utf8');
+
+  assert.match(skill, /Stale shipped site note/);
+  assert.match(skill, /Never submit anything automatically/);
+  assert.match(skill, /show the exact draft/);
+  assert.match(skill, /Do not attach\s+the user's file or corpus/);
+  assert.match(skill, /local-only contradiction remains local/);
+});
+
 test('every shipped seed is accepted by the store that will read it', async () => {
   const store = new SiteKnowledgeStore({ directory: join(managedSkill, 'sites') });
   const { records, invalid } = await store.scan();

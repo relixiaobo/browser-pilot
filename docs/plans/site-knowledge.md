@@ -1,7 +1,7 @@
 # Site Knowledge Plan
 
-Status: **Implemented; S7 directional baselines complete; durable checkpoint
-baseline complete**
+Status: **Implemented; S7 directional baselines and S8 seed freshness loop
+complete**
 Baseline: `v0.7.0`
 Target: Browser Pilot `v0.8.0`, protocol `1.4` (additive)
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
@@ -278,11 +278,12 @@ deletion requires telling the user first; prefer correcting to deleting.
 A small seed set (4–6 files) ships in the plugin under
 `plugin/skills/browser-pilot/sites/`:
 
-- Selection criteria: only knowledge our own CI can validate (the
-  real-site canary suite) or capability warnings (canvas-rendered apps
-  where snapshot is blind, e.g. Google Docs/Sheets). Every seed passes the
-  same three-condition test and doubles as a format exemplar — Agents learn
-  what good notes look like by reading them.
+- Selection criteria: only knowledge maintainers can safely field-verify or
+  capability warnings (canvas-rendered apps where snapshot is blind, e.g.
+  Google Docs/Sheets). Every seed passes the same three-condition test and
+  doubles as a format exemplar — Agents learn what good notes look like by
+  reading them. CI binds each original to that verification evidence; it does
+  not pretend to re-establish live truth without visiting the site.
 - Seeding is **directory-level copy-once**, performed by the Agent per
   SKILL.md: if `~/.browser-pilot/sites/` does not exist, create it and copy
   the seed originals from the plugin; if it exists, do nothing. The Broker
@@ -300,7 +301,14 @@ A small seed set (4–6 files) ships in the plugin under
 - Installed seeds have no privileged status: same directory, same format,
   same modification rights, same decay doctrine as Agent-authored files.
   Stale seeds are repaired locally by the same loop as any other file —
-  local repair is faster and better-validated than vendor pushes.
+  local repair is faster and better-validated than vendor pushes. If the same
+  disputed claim is also wrong in the current shipped original, the user may
+  explicitly approve a redacted upstream report; nothing is sent
+  automatically.
+- Shipped originals, unlike installed copies, have a repository-owned
+  verification ledger. The exact bytes, `updated` date, verification date, and
+  evidence reference stay bound together. Weekly automation warns at 75 days,
+  and releases stop at 90 days until the original is reverified or removed.
 - The system is designed for zero seeds; they are a detachable accelerant.
   Hosts without the plugin (universal Agent integration) simply start with
   an empty corpus.
@@ -322,6 +330,9 @@ A new "Site Knowledge" section, normative content:
   adoption (prompt-injection surface).
 - Seeding instruction: directory-level copy-once from the plugin's
   `sites/` directory.
+- Upstream contradiction reporting: compare only a disputed same-named shipped
+  claim, distinguish it from a local-only edit, show a redacted public draft,
+  and submit only with explicit user approval.
 
 ## Deliberately excluded
 
@@ -332,6 +343,7 @@ A new "Site Knowledge" section, normative content:
 | Stored executable JavaScript (sitegeist `library`) | Decay + import-equals-RCE + validation-gate complexity; heavy web apps deserve semantic commands (`bp dropdown`, `bp select`) instead — a conscious trade |
 | Save-time validation gates | Nothing executes the files; runtime validation is the verify-against-observation doctrine itself |
 | Central registry / CDN distribution | Sharing is sending a file; Kimi's empty channel is the cautionary case |
+| Automatic corpus telemetry or uploads | The corpus is user data; upstream feedback is repository verification plus explicit redacted reports |
 | Server-side disclosure state beyond mtime dedup | The client-key session already exists; anything more is machinery without a consumer |
 
 ## Verify the shipped path, not only the mechanism
@@ -390,11 +402,12 @@ the habit above.
   `href` removed.
   Mitigated — not eliminated — by evidence-carrying notes and age
   discounting. Inherent to any stored knowledge, structured or not.
-- **Shipped seed decay has no upstream feedback loop.** All seven current seeds
-  were field-verified on 2026-08-10, while automated checks only prove that the
-  files parse and match their declared hosts. A user Agent may repair its local
-  copy, but that correction never reaches the plugin source, so a later release
-  can still seed stale guidance for new users.
+- **Shipped seed truth still depends on human verification.** S8 closes the
+  silent feedback gap with a hash-bound ledger, weekly warning, release expiry,
+  and an explicit redacted issue path. It cannot prove that a maintainer's live
+  evidence is true, detect drift immediately after verification, or make users
+  report contradictions. The 75/90-day policy is an initial operating choice
+  to revisit after two cycles, not a claim about how quickly every site decays.
 - **Passive spontaneous write adherence measured 0/3.** The write tool was
   available on every model request and the page task succeeded every time, so
   the current design cannot rely on passive doctrine text to produce corpus
@@ -787,3 +800,14 @@ the habit above.
   Implementation lives in caliper, not here. What belongs in this repo is the
   fixture corpus each probe seeds, kept beside the tests rather than in
   `plugin/.../sites/`, so probe fixtures are never confused with shipped seeds.
+- [x] **S8** Shipped-seed freshness and upstream feedback. The selected
+  brownfield design preserves local ownership: automation reads only tracked
+  shipped originals and their verification ledger, while a user-side
+  contradiction becomes a public issue only after the shipped claim is also
+  disproved, a minimal draft is redacted and shown, and the user explicitly
+  approves submission. The ledger covers every shipped seed, binds its exact
+  SHA-256 to the note's `updated` and live-verification dates, warns weekly at
+  75 days, and blocks release at 90 days. Ordinary CI checks structure and
+  binding without letting seed age block unrelated emergency fixes. The full
+  decisions, flows, privacy constraints, edge cases, and acceptance criteria
+  are in `docs/plans/site-seed-freshness.md`.

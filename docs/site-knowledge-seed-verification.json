@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "policy": {
+    "warningAgeDays": 75,
+    "maximumAgeDays": 90
+  },
+  "seeds": [
+    {
+      "name": "github-issues",
+      "contentSha256": "8526c5fc953da838e1f664e382a5782ac85ca8d898760189c32d0aeace538a8d",
+      "verifiedOn": "2026-08-10",
+      "evidence": "Live Browser Pilot verification recorded in commit 9e50730"
+    },
+    {
+      "name": "google-calendar",
+      "contentSha256": "66f893e20e816471cc86bf90d467210bb013ee16f67ea320e6caa84de7249faf",
+      "verifiedOn": "2026-08-10",
+      "evidence": "Live Browser Pilot verification recorded in commit 9e50730"
+    },
+    {
+      "name": "google-docs-editors",
+      "contentSha256": "1814d5cbf2a87f753c3c784c85b1eb6e1bd4e9a2308cb49b6be5f526eb1c937b",
+      "verifiedOn": "2026-08-10",
+      "evidence": "Live Browser Pilot verification recorded in commit 9e50730"
+    },
+    {
+      "name": "google-search",
+      "contentSha256": "cc50a9c01eb43c330cb45ccaf4166163fac227d40bb5da4e5c7180cd80d5bd26",
+      "verifiedOn": "2026-08-10",
+      "evidence": "Live Browser Pilot verification recorded in commit 9e50730"
+    },
+    {
+      "name": "npm-package",
+      "contentSha256": "05f9687de9917fff9a2f2b535f682b749fbdf820e3bad79bfdabffb3d324d28b",
+      "verifiedOn": "2026-08-10",
+      "evidence": "Live Browser Pilot verification recorded in commit 9e50730"
+    },
+    {
+      "name": "stackoverflow",
+      "contentSha256": "77970d56ebc4f23e9549f3c60a63ce03d6a8c67b1acf70e9c21e40ff91bac20e",
+      "verifiedOn": "2026-08-10",
+      "evidence": "Live Browser Pilot verification recorded in commit 9e50730"
+    },
+    {
+      "name": "youtube",
+      "contentSha256": "5700170eee4e76e241a0818d74d475198a92015f0c005a45201658f2a725dc13",
+      "verifiedOn": "2026-08-10",
+      "evidence": "Live Browser Pilot verification recorded in commit 9e50730"
+    }
+  ]
+}

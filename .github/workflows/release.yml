@@ -37,6 +37,8 @@ jobs:
 
       - run: npm ci
       - if: runner.os == 'Linux'
+        run: npm run verify:site-seeds:release
+      - if: runner.os == 'Linux'
         run: npm run test:unit
       - if: runner.os == 'Linux'
         run: npx tsc --noEmit
@@ -176,6 +178,7 @@ jobs:
 
       - run: npm ci
       - run: npm run validate:skill
+      - run: npm run verify:site-seeds:release
       - run: npm run build
       - name: Package versioned Agent plugin
         run: npm run package:agent-plugin -- --output release-assets

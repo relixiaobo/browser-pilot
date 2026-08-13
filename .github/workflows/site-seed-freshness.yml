@@ -1,0 +1,20 @@
+name: Site Seed Freshness
+
+on:
+  schedule:
+    - cron: '17 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.17.0
+      - run: npm run verify:site-seeds:scheduled

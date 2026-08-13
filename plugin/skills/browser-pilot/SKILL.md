@@ -209,6 +209,19 @@ shows, correct the file, tell the user in one line, and continue the original
 task. Never silently work around a stale note — the next task then pays for it
 again.
 
+If the contradicted local file has the same name as a note in this skill's
+`sites/` directory, compare only the disputed claim with that shipped original.
+When the shipped original is also wrong, tell the user it is an upstream seed
+defect and offer the repository's [Stale shipped site note](https://github.com/relixiaobo/browser-pilot/issues/new?template=stale-site-seed.yml)
+GitHub issue form.
+Never submit anything automatically. Before the user approves a public report,
+show the exact draft and remove credentials, account identifiers, private or
+signed URLs, private page content, screenshots, and local paths. Do not attach
+the user's file or corpus; the smallest contradicted shipped sentence, current
+observable evidence, a redacted host/path pattern, reproduction steps, and `bp
+--version` are sufficient. A local-only contradiction remains local and is not
+an upstream report.
+
 ### Record only what observation cannot show
 
 Write a note only when all three hold: it is invisible to observation, expensive

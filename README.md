@@ -381,6 +381,7 @@ npm run test:capabilities # isolated-Chrome quantitative capability gate
 npm run test:distribution # packed global/local/bundled CLI verification
 npm run test:canary       # non-blocking real-site drift report
 npm run test:canary:strict
+npm run verify:site-seeds # ledger coverage and content verification binding
 ```
 
 Automated browser tests use isolated temporary Chrome profiles and Broker homes.
@@ -403,6 +404,16 @@ Agent evaluations are maintainer-only and use a separate Caliper checkout:
 ```bash
 CALIPER_ROOT=/absolute/path/to/caliper npm run test:agent:dry
 ```
+
+Shipped site notes are bound to live-verification evidence in
+`docs/site-knowledge-seed-verification.json`. A weekly check alerts maintainers
+at 75 days; a release is blocked once any seed reaches 90 days without a new
+live verification. Updating a shipped note invalidates its recorded hash until
+the ledger and note's `updated` date are refreshed from the same verification.
+Users can report a contradicted shipped note through the repository's
+[Stale shipped site note](https://github.com/relixiaobo/browser-pilot/issues/new?template=stale-site-seed.yml)
+issue form after removing private page data and local paths.
+Browser Pilot never uploads a user's site-knowledge corpus.
 
 The root `package.json` version is the release source of truth. The npm version
 lifecycle synchronizes the lockfile, plugin manifests, skill compatibility

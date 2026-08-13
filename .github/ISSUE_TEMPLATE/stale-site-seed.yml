@@ -1,0 +1,55 @@
+name: Stale shipped site note
+description: Report a shipped Browser Pilot site note contradicted by current observation
+title: "[site seed] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report only a note shipped in `plugin/skills/browser-pilot/sites/`.
+        Remove account names, private URLs, page content, cookies, credentials, and local file paths.
+        Do not attach your whole `~/.browser-pilot/sites` directory or screenshots containing private data.
+  - type: input
+    id: seed
+    attributes:
+      label: Shipped seed name
+      description: The filename without `.md`, such as `github-issues`.
+      placeholder: github-issues
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: Contradicted shipped claim
+      description: Quote only the smallest relevant sentence from the shipped original.
+    validations:
+      required: true
+  - type: textarea
+    id: observation
+    attributes:
+      label: Current observable evidence
+      description: Describe the current behavior and the Browser Pilot commands that reproduced it, after redaction.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide a redacted public host/path pattern and short steps. Do not include signed or private URLs.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Browser Pilot version
+      description: Output of `bp --version`.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I reviewed this report and removed credentials, account identifiers, private URLs, private page content, and local paths.
+          required: true
+        - label: I understand this report is public and I am not uploading my local site-knowledge corpus.
+          required: true
