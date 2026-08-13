@@ -438,7 +438,7 @@ the habit above.
   uninstall work.
   - Complete: `tests/site-knowledge-guardrails.test.mjs`. Each assertion was
     checked by violating the property it protects.
-- [ ] **S7** Doctrine-adherence probes. Redefined: the original wording asked
+- [x] **S7** Doctrine-adherence probes. Redefined: the original wording asked
   for a turn-count delta and pointed at `tests/agent/`, and both were wrong.
   `tests/agent/` is legacy — its README marks the JSON tasks non-authoritative
   and the harness now lives in the separate caliper checkout under
@@ -454,21 +454,176 @@ the habit above.
   pointed at its skill, with an isolated `BROWSER_PILOT_HOME` per sample so the
   corpus starts in a known state.
 
-  - [ ] **S7.1** *Repair on contradiction* — the highest-stakes rule and the
+  - [x] **S7.1** *Repair on contradiction* — the highest-stakes rule and the
     easiest to score. Pre-seed a file whose note is demonstrably false for the
     page. Give a task that must act on what the note describes. Afterwards,
     check whether the false line was corrected. Three outcomes are worth
     distinguishing and all are observable: corrected, silently worked around
     (task done, file untouched), and obeyed anyway (task failed).
-  - [ ] **S7.2** *Read before acting* — pre-seed a note that is the only cheap
+    - Initial baseline on 2026-08-11: the caliper adapter completed three
+      independent serial `anthropic/claude-sonnet-4-6` samples. Every sample
+      received the full false note and the host's scoped file-edit capability,
+      observed the post-click `Loading...` state, completed the page task, and
+      left the note untouched: corrected 0/3, worked around 3/3, failed with
+      the false note 0/3, invalid 0/3. The three valid samples used 89,510
+      tokens in total and are recorded under caliper's
+      `logs/site-knowledge-s7-valid/`. This establishes the first directional
+      baseline, not a confidence claim; the task's default N=10 remains
+      available when a tighter estimate is worth the model cost.
+    - Three earlier samples are excluded: caliper's output formatter removed
+      the delivered `site` field and its text-protocol host exposed no file
+      edit capability. Both measurement defects now have regression tests.
+    - Native-tool follow-up completed on 2026-08-12 with CC Switch's current
+      Codex `OpenAI_1` provider, `openai/gpt-5.6-sol`, and `xhigh` reasoning.
+      The N=1 calibration advertised `site_knowledge_replace` on both model
+      requests, but the model never called it, never acted on the page, and
+      scored `failed_with_false_note`; it used 18,720 tokens. The directional
+      N=3 run advertised the tool on all eight model requests. Two samples each
+      called it once and removed the false claim with a factually correct
+      replacement; the third never called it. None clicked Start, so the two
+      repaired samples were `corrected_task_failed` and the untouched sample was
+      `failed_with_false_note`: complete repair adherence 0/3, successful native
+      replacement 2/3, untouched task failure 1/3. The N=3 samples used 78,581
+      tokens. Logs are caliper's
+      `logs/site-knowledge-s7-repair-native-calibration/2026-08-12T09-27-15-00-00_site-knowledge-repair_eLufjQdEbodMb32YM7GtWA.eval`
+      and
+      `logs/site-knowledge-s7-repair-native-n3-openai1/2026-08-12T09-31-39-00-00_site-knowledge-repair_N6URSoRGEzSg7BjN7xx853.eval`.
+      This is evidence that the native editor is usable and can improve repair
+      behavior, but the mixed protocol still leaves `bp` as text-only while the
+      editor is a native API tool; the model repeatedly claimed no browser tool
+      was available. Therefore these runs do not isolate doctrine adherence from
+      command-affordance recognition, and they do not supersede the original
+      all-text baseline.
+    - All-native channel calibration completed on 2026-08-12 with the same
+      current Codex `OpenAI_1` provider, `openai/gpt-5.6-sol`, and `xhigh`
+      reasoning. Caliper exposed both page operations and note repair as native
+      API tools, disabled model-emitted textual `bp ...` execution, and still
+      used structured argv without a shell. All seven model requests advertised
+      `[browser_pilot, site_knowledge_replace]`. The model called
+      `browser_pilot` six times, clicked Start, observed `Hello World!`, and
+      answered correctly, but called `site_knowledge_replace` zero times and
+      left the false claim untouched. Result: corrected 0/1, worked around 1/1,
+      failed with false note 0/1, invalid 0/1, using 71,325 tokens. The log is
+      caliper's
+      `logs/site-knowledge-s7-repair-all-native-n1-openai1/2026-08-12T10-45-45-00-00_site-knowledge-repair_JANQ4mHoMALxWEfBTRG5jL.eval`.
+      This removes the mixed-channel affordance confound from the earlier
+      native-editor follow-up: the browser tool was both available and used,
+      while the contradicted note still was not repaired. N=1 remains a channel
+      calibration rather than a confidence estimate.
+  - [x] **S7.2** *Read before acting* — pre-seed a note that is the only cheap
     route to a correct answer, and pair every sample with a control run that
     has an empty corpus. Without the control the probe proves nothing, because
     a capable model may reach the answer unaided.
-  - [ ] **S7.3** *Write after recovery* — start from an empty corpus, give a
+    - Harness implemented on 2026-08-11. Each epoch pairs two isolated model
+      samples against a local Archive Lookup fixture: treatment receives a
+      valid note containing an otherwise undiscoverable release-record route;
+      control receives an empty corpus. The visible index leaks neither the
+      route nor the answer, and the scorer requires both the exact answer and
+      deterministic final-page evidence. It reports treatment success, control
+      success, their `knowledge_lift`, and pair balance.
+    - One-pair real-model calibration completed on 2026-08-11 with CC Switch's
+      current Codex `OpenAI_1` provider, `openai/gpt-5.6-sol`, and `xhigh`
+      reasoning. Treatment succeeded 1/1, control succeeded 0/1,
+      `knowledge_lift` was 1.0, and pair balance was 1.0. The treatment's
+      initial observation delivered the route note as `status: full`; its first
+      browser action opened that route and it answered `cobalt-lantern` from the
+      live page. The control received no `site` entry, never reached the route,
+      and produced no answer. The pair used 87,698 tokens and is recorded under
+      caliper's `logs/site-knowledge-s7-read-calibration/`.
+    - Evaluation transport caveat: this provider returns 502 for Inspect
+      0.3.205's automatic Responses field `truncation: "auto"`, while the same
+      request succeeds without that field. The runs used a process-local
+      compatibility adapter that removed only that field; provider credentials
+      remained process-local and were not persisted.
+    - Directional N=3 baseline completed on 2026-08-11 with the same provider,
+      model, and reasoning setting. Treatment succeeded 3/3, control succeeded
+      0/3, `knowledge_lift` was 1.0, and pair balance was 1.0. Every treatment
+      received `status: full`, opened the hidden route, observed the live
+      codename, and answered correctly; no control received a `site` entry,
+      reached the route, or observed the codename. The six samples used 240,147
+      tokens. The merged successful log is caliper's
+      `logs/2026-08-11T10-08-03-00-00_site-knowledge-read_fTnVGNhXAq227sj4ajPXnv.eval`.
+    - The first N=3 attempt was interrupted after one valid treatment because
+      the next Chrome authorization was not approved. Inspect retry preserved
+      that completed sample and ran the remaining five. The interrupted log
+      under caliper's `logs/site-knowledge-s7-read-n3-openai1/` remains as an
+      audit record and is not counted as an additional sample.
+    - This closes the directional S7.2 baseline. The task's default N=5 remains
+      available if a tighter estimate becomes worth another ten model samples.
+  - [x] **S7.3** *Write after recovery* — start from an empty corpus, give a
     task containing a non-obvious trap, and check afterwards whether a file
     appeared that the store accepts and whose patterns match the host. Expect a
     low rate; the design only claims monotone accumulation, so the number to
     record is the baseline, not a threshold to pass.
+    - Harness implemented on 2026-08-11. Each sample starts with an empty corpus
+      and a local Dispatch Console fixture. Standard transport must fail before
+      the otherwise hidden Legacy option can recover the task. The final
+      stimulus reports only the rejected transport and policy code; it does not
+      reveal the recovery steps. The scorer separately requires the failed-then-
+      recovered page state, the exact live receipt, and a note accepted by the
+      product's `SiteKnowledgeStore` whose domains match the loopback host.
+    - The finalized one-sample calibration used CC Switch's current Codex
+      `OpenAI_1` provider, `openai/gpt-5.6-sol`, and `xhigh` reasoning. The task
+      succeeded, the corpus remained empty, and the sample therefore scored
+      `not_written`; it used 47,324 tokens. The log is caliper's
+      `logs/site-knowledge-s7-write-calibration/2026-08-11T10-40-41-00-00_site-knowledge-write_8PGL3RNxw2RBG3cHmzwgs5.eval`.
+    - Directional N=3 completed on 2026-08-11 with the same provider, model,
+      reasoning setting, and process-local Responses compatibility adapter used
+      by S7.2. All three samples first reproduced the Standard-transport failure,
+      independently explored and enabled Legacy transport, generated and
+      reported `ember-417`, and passed both deterministic page checks. None
+      attempted `file-write`; all three corpora remained empty. Results: valid
+      write 0/3, not written 3/3, invalid write 0/3, task failure 0/3, probe
+      error 0/3. The samples used 251,500 tokens in total and are recorded in
+      caliper's
+      `logs/site-knowledge-s7-write-n3-openai1/2026-08-11T10-44-02-00-00_site-knowledge-write_J23qygq5tWfcRTXvbaPvfq.eval`.
+    - Two earlier calibration artifacts are excluded. One completed no sample
+      because Inspect parsed the profile task argument as an integer; all S7
+      tasks now normalize it before subprocess dispatch and have a regression
+      test. The next ran a valid harness but its error message disclosed the
+      exact Legacy recovery steps, making a missing note doctrinally ambiguous;
+      the final fixture and its contract test prohibit that leakage.
+    - Native-tool follow-up completed on 2026-08-12 with the same `OpenAI_1`
+      provider, model, reasoning setting, and process-local Responses
+      compatibility adapter. The N=1 calibration completed the page task and
+      reported `ember-417`, but left the corpus empty: valid write 0/1,
+      not written 1/1. `site_knowledge_write` was advertised on all 10 model
+      requests and called zero times; the sample used 99,195 tokens. The N=3
+      run advertised it on every model request (16/16) and again received zero
+      calls. Two samples recovered the page task and left the corpus empty; one
+      stopped before any page action after reporting that no `bp` runner was
+      available. Results: valid write 0/3, not written 2/3, invalid write 0/3,
+      task failure 1/3, probe error 0/3, using 159,532 tokens. Logs are caliper's
+      `logs/site-knowledge-s7-write-native-calibration/2026-08-12T08-04-59-00-00_site-knowledge-write_mkQDBVq89DCt9CyonKWNe6.eval`
+      and
+      `logs/site-knowledge-s7-write-native-n3-openai1/2026-08-12T09-02-05-00-00_site-knowledge-write_7YQhLmLniBLmKqPaEAFZLn.eval`.
+      Five earlier N=3 artifacts in that directory completed zero samples after
+      Chrome authorization failed and are excluded. The native tool's presence
+      is proven, but it did not improve write adherence; this follow-up remains
+      separate from the original all-text baseline because the browser command
+      channel was still text-only.
+    - All-native channel calibration completed on 2026-08-12 with the same
+      provider, model, and reasoning setting. All seven model requests
+      advertised `[browser_pilot, site_knowledge_write]`. The model called
+      `browser_pilot` six times, reproduced the Standard-transport failure,
+      opened Delivery options, enabled Legacy transport, generated
+      `ember-417`, and passed both deterministic page checks. It called
+      `site_knowledge_write` zero times and left the corpus empty. Result: valid
+      write 0/1, not written 1/1, invalid write 0/1, task failure 0/1, probe
+      error 0/1, using 69,504 tokens. The log is caliper's
+      `logs/site-knowledge-s7-write-all-native-n1-openai1/2026-08-12T10-50-19-00-00_site-knowledge-write_kwbrWkyHv86jpEBNPKbCTQ.eval`.
+      As in S7.1, the model used the native browser channel successfully but did
+      not use the simultaneously available native corpus tool. The earlier
+      "no bp runner" ambiguity is therefore absent; N=1 still measures only a
+      calibrated observation, not a stable rate.
+
+  All six successful native follow-up logs were checked byte-for-byte against
+  the selected `OpenAI_1` credential after completion. None contains the key,
+  the `ANTHROPIC_API_KEY` marker, or a Claude Code auth marker. Each real sample
+  ran serially with `--max-samples 1`; no Anthropic or Claude Code
+  authentication was used. The two all-native samples used Inspect 0.3.205's
+  same process-local compatibility adapter, removing only the unsupported
+  Responses field `truncation: "auto"` and leaving site-packages unchanged.
 
   Implementation lives in caliper, not here. What belongs in this repo is the
   fixture corpus each probe seeds, kept beside the tests rather than in

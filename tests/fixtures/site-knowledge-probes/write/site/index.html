@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dispatch Console</title>
+  </head>
+  <body>
+    <main>
+      <h1>Dispatch Console</h1>
+      <p>Batch 417 is ready. Generate its dispatch receipt and report the exact code.</p>
+
+      <label for="batch-id">Batch ID</label>
+      <input id="batch-id" value="417" readonly>
+
+      <button id="generate" type="button">Generate receipt</button>
+      <button id="options-toggle" type="button" aria-expanded="false">
+        Delivery options
+      </button>
+
+      <section id="options" hidden>
+        <h2>Delivery options</h2>
+        <label>
+          <input id="legacy-transport" type="checkbox">
+          Use Legacy transport
+        </label>
+      </section>
+
+      <p id="status" role="status">Ready to generate.</p>
+      <section id="result" hidden>
+        <h2>Dispatch receipt</h2>
+        <p>Receipt code: <strong data-receipt></strong></p>
+      </section>
+    </main>
+
+    <script>
+      const optionsToggle = document.querySelector('#options-toggle');
+      const options = document.querySelector('#options');
+      const legacyTransport = document.querySelector('#legacy-transport');
+      const generate = document.querySelector('#generate');
+      const status = document.querySelector('#status');
+      const result = document.querySelector('#result');
+      const receipt = document.querySelector('[data-receipt]');
+      let trapSeen = false;
+
+      optionsToggle.addEventListener('click', () => {
+        options.hidden = !options.hidden;
+        optionsToggle.setAttribute('aria-expanded', String(!options.hidden));
+      });
+
+      generate.addEventListener('click', () => {
+        if (!legacyTransport.checked) {
+          trapSeen = true;
+          document.body.dataset.trapSeen = 'true';
+          status.textContent =
+            'Generation failed: tenant policy D417 rejects Standard transport.';
+          result.hidden = true;
+          receipt.textContent = '';
+          return;
+        }
+
+        const batchId = document.querySelector('#batch-id').value.trim();
+        receipt.textContent = ['ember', batchId].join('-');
+        result.hidden = false;
+        document.body.dataset.recovered = String(trapSeen);
+        status.textContent = 'Receipt generated with Legacy transport.';
+      });
+    </script>
+  </body>
+</html>

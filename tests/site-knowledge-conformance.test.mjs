@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { SiteKnowledgeStore } from '../dist/services.js';
 import { repairProbe, writeProbe } from '../scripts/site-knowledge-conformance.mjs';
 import { testTempPrefix } from './helpers/platform.mjs';
 
@@ -14,6 +15,10 @@ import { testTempPrefix } from './helpers/platform.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const REPAIR_FIXTURE = join(root, 'tests/fixtures/site-knowledge-probes/repair/the-internet.md');
+const READ_FIXTURE_ROOT = join(root, 'tests/fixtures/site-knowledge-probes/read');
+const READ_FIXTURE = join(READ_FIXTURE_ROOT, 'archive-lookup.md');
+const READ_SITE_ROOT = join(READ_FIXTURE_ROOT, 'site');
+const WRITE_SITE_ROOT = join(root, 'tests/fixtures/site-knowledge-probes/write/site');
 const FALSE_CLAIM = 'the result text appears immediately once Start is';
 const SITE_URL = 'https://the-internet.herokuapp.com/dynamic_loading/1';
 
@@ -39,6 +44,50 @@ test('the seeded fixture really does carry the false claim the probe looks for',
   assert.ok(
     content.includes(FALSE_CLAIM),
     'the probe would report every run as corrected if the claim string drifted from the fixture',
+  );
+});
+
+test('the read-treatment fixture is valid and matches a loopback URL with a port', async t => {
+  const directory = await emptyCorpus(t);
+  await copyFile(READ_FIXTURE, join(directory, 'archive-lookup.md'));
+
+  const result = await new SiteKnowledgeStore({ directory }).match('http://127.0.0.1:43125/');
+  assert.deepEqual(result.invalid, []);
+  assert.deepEqual(result.matches.map(match => match.record.name), ['archive-lookup']);
+  assert.match(result.matches[0].record.body, /\/_archive\/v2\/items\/<record-id>\/release-label/);
+});
+
+test('the read-control page leaks neither the hidden route nor its answer', async () => {
+  const index = await readFile(join(READ_SITE_ROOT, 'index.html'), 'utf8');
+  const record = await readFile(
+    join(READ_SITE_ROOT, '_archive/v2/items/7319/release-label/index.html'),
+    'utf8',
+  );
+
+  assert.doesNotMatch(index, /_archive|cobalt-lantern|release-label/);
+  assert.match(record, /data-codename>cobalt-lantern/);
+});
+
+test('the write fixture requires a failed standard dispatch before recovery', async () => {
+  const fixture = await readFile(join(WRITE_SITE_ROOT, 'index.html'), 'utf8');
+
+  assert.doesNotMatch(
+    fixture,
+    /ember-417/,
+    'the exact receipt must be produced from live state rather than leaked in source',
+  );
+  assert.match(fixture, /if \(!legacyTransport\.checked\)/);
+  assert.match(fixture, /document\.body\.dataset\.trapSeen = 'true'/);
+  assert.match(fixture, /document\.body\.dataset\.recovered = String\(trapSeen\)/);
+  assert.doesNotMatch(
+    fixture,
+    /Open Delivery options|enable Legacy transport|and retry/i,
+    'the failure must not reveal the recovery steps the probe asks the Agent to discover',
+  );
+  assert.ok(
+    fixture.indexOf("dataset.trapSeen = 'true'")
+      < fixture.indexOf("dataset.recovered = String(trapSeen)"),
+    'recovery evidence must be downstream of the trap',
   );
 });
 
