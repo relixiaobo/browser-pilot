@@ -68,26 +68,43 @@ test('the read-control page leaks neither the hidden route nor its answer', asyn
   assert.match(record, /data-codename>cobalt-lantern/);
 });
 
-test('the write fixture requires a failed standard dispatch before recovery', async () => {
+test('the write fixture exposes a durable trap only through transient diagnosis', async () => {
   const fixture = await readFile(join(WRITE_SITE_ROOT, 'index.html'), 'utf8');
+  const initialMarkup = fixture.split('<script>')[0];
 
   assert.doesNotMatch(
     fixture,
     /ember-417/,
     'the exact receipt must be produced from live state rather than leaked in source',
   );
-  assert.match(fixture, /if \(!legacyTransport\.checked\)/);
-  assert.match(fixture, /document\.body\.dataset\.trapSeen = 'true'/);
-  assert.match(fixture, /document\.body\.dataset\.recovered = String\(trapSeen\)/);
   assert.doesNotMatch(
-    fixture,
-    /Open Delivery options|enable Legacy transport|and retry/i,
+    initialMarkup,
+    /AP-9|tenant-wide|every dispatch receipt|compatibility relay/i,
+    'the durable policy must not be visible before the Agent diagnoses the failure',
+  );
+  assert.match(fixture, /if \(!diagnosticSeen \|\| !compatibilityRelay\?\.checked\)/);
+  assert.match(fixture, /document\.body\.dataset\.trapSeen = 'true'/);
+  assert.match(fixture, /document\.body\.dataset\.diagnosticSeen = 'true'/);
+  assert.match(fixture, /document\.body\.dataset\.policyScope = 'all-dispatch-receipts'/);
+  assert.match(fixture, /document\.body\.dataset\.recovered = String\(trapSeen\)/);
+  assert.match(fixture, /document\.body\.dataset\.diagnosticCleared = 'true'/);
+  assert.match(fixture, /Policy AP-9 is tenant-wide:[\s\S]*every dispatch receipt/);
+  assert.match(fixture, /diagnosticDetails\.textContent = ''/);
+  assert.match(fixture, /routingControls\.replaceChildren\(\)/);
+  assert.doesNotMatch(
+    fixture.match(/status\.textContent = 'Generation failed[^']*'/)?.[0] ?? '',
+    /policy|routing|relay|recovery/i,
     'the failure must not reveal the recovery steps the probe asks the Agent to discover',
   );
+  assert.match(
+    fixture,
+    /runDiagnostic\.addEventListener\('click',[\s\S]*?if \(!trapSeen\) return;/,
+    'the policy diagnostic must remain unavailable before a failed dispatch',
+  );
   assert.ok(
-    fixture.indexOf("dataset.trapSeen = 'true'")
+    fixture.indexOf("dataset.diagnosticSeen = 'true'")
       < fixture.indexOf("dataset.recovered = String(trapSeen)"),
-    'recovery evidence must be downstream of the trap',
+    'recovery evidence must be downstream of the policy diagnosis',
   );
 });
 

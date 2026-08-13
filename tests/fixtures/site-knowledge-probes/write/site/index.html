@@ -8,22 +8,30 @@
   <body>
     <main>
       <h1>Dispatch Console</h1>
+      <p>Workspace Atlas</p>
       <p>Batch 417 is ready. Generate its dispatch receipt and report the exact code.</p>
 
       <label for="batch-id">Batch ID</label>
       <input id="batch-id" value="417" readonly>
 
       <button id="generate" type="button">Generate receipt</button>
-      <button id="options-toggle" type="button" aria-expanded="false">
-        Delivery options
+      <button id="diagnostics-toggle" type="button" aria-expanded="false">
+        Diagnostics
       </button>
 
-      <section id="options" hidden>
-        <h2>Delivery options</h2>
-        <label>
-          <input id="legacy-transport" type="checkbox">
-          Use Legacy transport
-        </label>
+      <section id="diagnostics" hidden>
+        <h2>Dispatch diagnostics</h2>
+        <p id="diagnostic-code">No failed dispatch to inspect.</p>
+        <button id="run-diagnostic" type="button" disabled>Run policy diagnostic</button>
+        <p id="diagnostic-details"></p>
+        <button id="routing-toggle" type="button" aria-expanded="false" hidden>
+          Advanced routing
+        </button>
+      </section>
+
+      <section id="routing" hidden>
+        <h2>Advanced routing</h2>
+        <div id="routing-controls"></div>
       </section>
 
       <p id="status" role="status">Ready to generate.</p>
@@ -34,26 +42,58 @@
     </main>
 
     <script>
-      const optionsToggle = document.querySelector('#options-toggle');
-      const options = document.querySelector('#options');
-      const legacyTransport = document.querySelector('#legacy-transport');
+      const diagnosticsToggle = document.querySelector('#diagnostics-toggle');
+      const diagnostics = document.querySelector('#diagnostics');
+      const diagnosticCode = document.querySelector('#diagnostic-code');
+      const runDiagnostic = document.querySelector('#run-diagnostic');
+      const diagnosticDetails = document.querySelector('#diagnostic-details');
+      const routingToggle = document.querySelector('#routing-toggle');
+      const routing = document.querySelector('#routing');
+      const routingControls = document.querySelector('#routing-controls');
       const generate = document.querySelector('#generate');
       const status = document.querySelector('#status');
       const result = document.querySelector('#result');
       const receipt = document.querySelector('[data-receipt]');
       let trapSeen = false;
+      let diagnosticSeen = false;
+      let compatibilityRelay = null;
 
-      optionsToggle.addEventListener('click', () => {
-        options.hidden = !options.hidden;
-        optionsToggle.setAttribute('aria-expanded', String(!options.hidden));
+      diagnosticsToggle.addEventListener('click', () => {
+        diagnostics.hidden = !diagnostics.hidden;
+        diagnosticsToggle.setAttribute('aria-expanded', String(!diagnostics.hidden));
+      });
+
+      runDiagnostic.addEventListener('click', () => {
+        if (!trapSeen) return;
+        diagnosticSeen = true;
+        document.body.dataset.diagnosticSeen = 'true';
+        document.body.dataset.policyScope = 'all-dispatch-receipts';
+        diagnosticDetails.textContent =
+          'Policy AP-9 is tenant-wide: Workspace Atlas rejects Standard transport ' +
+          'for every dispatch receipt. The approved recovery is Tenant compatibility relay.';
+        if (!compatibilityRelay) {
+          const label = document.createElement('label');
+          compatibilityRelay = document.createElement('input');
+          compatibilityRelay.id = 'compatibility-relay';
+          compatibilityRelay.type = 'checkbox';
+          label.append(compatibilityRelay, ' Use Tenant compatibility relay');
+          routingControls.append(label);
+        }
+        routingToggle.hidden = false;
+      });
+
+      routingToggle.addEventListener('click', () => {
+        routing.hidden = !routing.hidden;
+        routingToggle.setAttribute('aria-expanded', String(!routing.hidden));
       });
 
       generate.addEventListener('click', () => {
-        if (!legacyTransport.checked) {
+        if (!diagnosticSeen || !compatibilityRelay?.checked) {
           trapSeen = true;
           document.body.dataset.trapSeen = 'true';
-          status.textContent =
-            'Generation failed: tenant policy D417 rejects Standard transport.';
+          diagnosticCode.textContent = 'Failed dispatch diagnostic: D417';
+          runDiagnostic.disabled = false;
+          status.textContent = 'Generation failed. Diagnostic code: D417.';
           result.hidden = true;
           receipt.textContent = '';
           return;
@@ -63,7 +103,13 @@
         receipt.textContent = ['ember', batchId].join('-');
         result.hidden = false;
         document.body.dataset.recovered = String(trapSeen);
-        status.textContent = 'Receipt generated with Legacy transport.';
+        document.body.dataset.diagnosticCleared = 'true';
+        diagnostics.hidden = true;
+        routing.hidden = true;
+        diagnosticDetails.textContent = '';
+        routingControls.replaceChildren();
+        compatibilityRelay = null;
+        status.textContent = 'Receipt generated through Tenant compatibility relay.';
       });
     </script>
   </body>
