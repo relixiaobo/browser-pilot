@@ -1,6 +1,6 @@
 # Site Knowledge Plan
 
-Status: **Implemented except the S7 benchmark**
+Status: **Implemented; S7 directional baselines complete**
 Baseline: `v0.7.0`
 Target: Browser Pilot `v0.8.0`, protocol `1.4` (additive)
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
@@ -372,12 +372,13 @@ the habit above.
 
 - **Seams are still only guarded where they broke.** Two have guards; the rest
   are covered by nothing but the practice above.
-- **The doctrine itself is untested.** Whether Agents read a delivered entry
-  before acting, write at the two prescribed moments, and repair rather than
-  work around a stale note are all reasoned claims with no evidence behind
-  them. Sitegeist at least shipped its confirmation loop to users; this design
-  discarded that shape for a reasoned one and has measured nothing. This is the
-  largest unverified surface in the feature and the subject of S7.
+- **Doctrine adherence is uneven and model-dependent.** S7 now has directional
+  evidence from CC Switch's Codex `OpenAI_1` provider with
+  `openai/gpt-5.6-sol`: delivered knowledge produced a 3/3 treatment versus 0/3
+  control split, and the latest all-native repair run corrected 3/3
+  contradictions, but the all-native write-after-recovery run wrote 0/3 notes.
+  These N=3 results establish direction, not a cross-model confidence claim.
+  Spontaneous write coverage is now the largest measured doctrine risk.
 - **Quietly wrong conclusions.** A note like "absence of `rel=next` means
   last page" can mislead after a redesign without producing an error. This is
   not hypothetical: that exact claim was written into this plan, and field
@@ -390,8 +391,10 @@ the habit above.
   files parse and match their declared hosts. A user Agent may repair its local
   copy, but that correction never reaches the plugin source, so a later release
   can still seed stale guidance for new users.
-- **Write rate depends on instruction adherence.** The design promises
-  monotone accumulation, not coverage.
+- **Spontaneous write adherence measured 0/3.** The write tool was available on
+  every model request and the page task succeeded every time, so the current
+  design cannot rely on passive doctrine text to produce corpus coverage. The
+  design still promises monotone accumulation, not complete coverage.
 - **Concurrent edits** to one file are last-write-wins. Rare, low-stakes
   (notes, not code); accepted.
 - **Coincidence-backed superstition** that keeps reproducing survives
@@ -510,6 +513,21 @@ the habit above.
       native-editor follow-up: the browser tool was both available and used,
       while the contradicted note still was not repaired. N=1 remains a channel
       calibration rather than a confidence estimate.
+    - All-native directional N=3 completed on 2026-08-13 with the same current
+      `OpenAI_1` provider, model, reasoning setting, and process-local Responses
+      compatibility adapter. Before this run, the repair scorer was tightened
+      to require the exact page answer `Hello World!`; the previous non-empty
+      answer check could produce a false positive, and four regression tests now
+      pin the corrected contract. All three samples passed the live page check,
+      returned the exact answer, and removed the false claim with exactly one
+      `site_knowledge_replace` call. They made 5, 5, and 3 native browser calls,
+      emitted no textual `bp` command, retried no model request, and used 194,459
+      tokens. Result: corrected 3/3, worked around 0/3, failed with false note
+      0/3, invalid repair 0/3. The log is caliper's
+      `logs/site-knowledge-s7-repair-all-native-n3-openai1/2026-08-13T02-51-41-00-00_site-knowledge-repair_Ea8n5mafjWjTAYaH8xsGnG.eval`.
+      This is the first unconfounded directional repair result; it supersedes
+      the N=1 calibration as the working baseline without claiming stability
+      beyond this model and setup.
   - [x] **S7.2** *Read before acting* — pre-seed a note that is the only cheap
     route to a correct answer, and pair every sample with a control run that
     has an empty corpus. Without the control the probe proves nothing, because
@@ -616,12 +634,28 @@ the habit above.
       not use the simultaneously available native corpus tool. The earlier
       "no bp runner" ambiguity is therefore absent; N=1 still measures only a
       calibrated observation, not a stable rate.
+    - All-native directional N=3 completed on 2026-08-13 with the same current
+      `OpenAI_1` provider, model, reasoning setting, and process-local Responses
+      compatibility adapter. All 22 model requests advertised
+      `[browser_pilot, site_knowledge_write]`. The three samples made 7, 6, and
+      6 native browser calls, each reproduced and recovered from the trap,
+      passed both deterministic page checks, and returned the exact
+      `ember-417` answer. None called `site_knowledge_write`; every corpus
+      remained empty. Result: valid write 0/3, not written 3/3, invalid write
+      0/3, task failure 0/3, probe error 0/3, with no textual `bp` commands,
+      model retries, or sample errors. The samples used 224,386 tokens. The log
+      is caliper's
+      `logs/site-knowledge-s7-write-all-native-n3-openai1/2026-08-13T02-57-19-00-00_site-knowledge-write_f7fBTq94H4HA87ovTnfhSj.eval`.
+      This confirms the N=1 signal without the mixed-channel confound: the next
+      experiment should be a minimal, paired prompt treatment that explicitly
+      triggers the end-of-task write decision, with the unchanged task as its
+      control. There is no evidence yet for redesigning the store or writer.
 
-  All six successful native follow-up logs were checked byte-for-byte against
+  All eight successful native follow-up logs were checked byte-for-byte against
   the selected `OpenAI_1` credential after completion. None contains the key,
   the `ANTHROPIC_API_KEY` marker, or a Claude Code auth marker. Each real sample
   ran serially with `--max-samples 1`; no Anthropic or Claude Code
-  authentication was used. The two all-native samples used Inspect 0.3.205's
+  authentication was used. The four all-native logs used Inspect 0.3.205's
   same process-local compatibility adapter, removing only the unsupported
   Responses field `truncation: "auto"` and leaving site-packages unchanged.
 
