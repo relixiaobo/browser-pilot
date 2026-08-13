@@ -394,7 +394,9 @@ the habit above.
 - **Spontaneous write adherence measured 0/3.** The write tool was available on
   every model request and the page task succeeded every time, so the current
   design cannot rely on passive doctrine text to produce corpus coverage. The
-  design still promises monotone accumulation, not complete coverage.
+  first paired prompt calibration also found no lift from a minimal end-of-task
+  doctrine reminder: treatment 0/1 versus control 0/1. The design still
+  promises monotone accumulation, not complete coverage.
 - **Concurrent edits** to one file are last-write-wins. Rare, low-stakes
   (notes, not code); accepted.
 - **Coincidence-backed superstition** that keeps reproducing survives
@@ -650,12 +652,33 @@ the habit above.
       experiment should be a minimal, paired prompt treatment that explicitly
       triggers the end-of-task write decision, with the unchanged task as its
       control. There is no evidence yet for redesigning the store or writer.
+    - That paired prompt calibration completed on 2026-08-13. Control and
+      treatment used the same user task, fixture, native tools, scorer, and
+      serial execution; treatment alone received a minimal system-prompt suffix
+      asking it to check the doctrine's two write moments before answering.
+      Both samples reproduced and recovered from the trap, made six native
+      browser calls, passed both deterministic page checks, and returned the
+      exact `ember-417` answer. Both advertised
+      `[browser_pilot, site_knowledge_write]` on every model request, emitted no
+      textual `bp` commands, called `site_knowledge_write` zero times, and left
+      their isolated corpora empty. Result: treatment write 0/1, control write
+      0/1, write lift 0.0, treatment task success 1/1, control task success 1/1,
+      and pair balance 1.0. One model request in each condition retried once;
+      both completed with no event or sample error. The pair used 149,498
+      tokens. Its log is caliper's
+      `logs/site-knowledge-s7-write-prompt-all-native-n1-openai1/2026-08-13T04-22-25-00-00_site-knowledge-write-prompt_gARCu2JRQUs9CzX3cr423X.eval`.
+      Five earlier attempts in that directory completed zero samples and used
+      zero model tokens after Chrome authorization was not accepted in time;
+      they are excluded. The predeclared expansion condition was a successful
+      treatment write against an unwritten control, so this zero-lift result did
+      not proceed to N=3. It is evidence against adding this reminder as-is,
+      not evidence that every explicit trigger is ineffective.
 
-  All eight successful native follow-up logs were checked byte-for-byte against
+  All nine successful native follow-up logs were checked byte-for-byte against
   the selected `OpenAI_1` credential after completion. None contains the key,
   the `ANTHROPIC_API_KEY` marker, or a Claude Code auth marker. Each real sample
   ran serially with `--max-samples 1`; no Anthropic or Claude Code
-  authentication was used. The four all-native logs used Inspect 0.3.205's
+  authentication was used. The five all-native logs used Inspect 0.3.205's
   same process-local compatibility adapter, removing only the unsupported
   Responses field `truncation: "auto"` and leaving site-packages unchanged.
 
