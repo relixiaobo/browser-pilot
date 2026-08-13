@@ -1,6 +1,6 @@
 # Site Knowledge Plan
 
-Status: **Implemented; S7 directional baselines complete**
+Status: **Implemented; S7 directional baselines complete; checkpoint calibration recorded**
 Baseline: `v0.7.0`
 Target: Browser Pilot `v0.8.0`, protocol `1.4` (additive)
 Source of truth: `docs/architecture/browser-pilot-platform-spec.md`
@@ -673,12 +673,34 @@ the habit above.
       treatment write against an unwritten control, so this zero-lift result did
       not proceed to N=3. It is evidence against adding this reminder as-is,
       not evidence that every explicit trigger is ineffective.
+    - Recovery-checkpoint follow-up completed on 2026-08-13 with the same current
+      `OpenAI_1` provider, model, reasoning setting, and process-local Responses
+      compatibility adapter. Control and treatment used the same task, native
+      tool schemas, system prompt, fixture, and scorer. Treatment alone received
+      a one-shot hint immediately after the first Browser Pilot result containing
+      `Receipt generated with Legacy transport.` Both samples recovered the page
+      task, returned `ember-417`, and passed every deterministic page check. The
+      control made no `site_knowledge_write` call; treatment emitted the
+      checkpoint and called `site_knowledge_write` once. Its note was rejected as
+      `invalid_write`/`unmatched`, because it used
+      `domains: ["127.0.0.1:54508/*"]` while the store matches the current URL
+      `http://127.0.0.1:54508/` against hostname-only patterns. Results: valid
+      write 0/1 in both conditions, attempted treatment write 1/1,
+      checkpoint emitted true, task success 1/1 in both conditions, and pair
+      balance 1.0. The run used 172,360 tokens with two HTTP retries and is
+      recorded in caliper's
+      `logs/site-knowledge-s7-write-checkpoint-all-native-n1-openai1/2026-08-13T06-29-45-00-00_site-knowledge-write-checkpoint_7sSihQioHSBBjhYp4sgyLL.eval`.
+      This is an attempt-rate change, not a valid-write lift; it should not be
+      reported as successful write adherence. The next measurement should focus
+      on generating legal, host-matching frontmatter (and on whether the write
+      tool should expose a canonical host value), rather than adding another
+      end-of-task reminder.
 
-  All nine successful native follow-up logs were checked byte-for-byte against
+  All ten successful native follow-up logs were checked byte-for-byte against
   the selected `OpenAI_1` credential after completion. None contains the key,
   the `ANTHROPIC_API_KEY` marker, or a Claude Code auth marker. Each real sample
   ran serially with `--max-samples 1`; no Anthropic or Claude Code
-  authentication was used. The five all-native logs used Inspect 0.3.205's
+  authentication was used. The six all-native logs used Inspect 0.3.205's
   same process-local compatibility adapter, removing only the unsupported
   Responses field `truncation: "auto"` and leaving site-packages unchanged.
 

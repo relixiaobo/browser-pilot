@@ -254,12 +254,14 @@ updated: 2026-08-10
 ```
 
 `name` must equal the file name without `.md`, or the file is reported
-`invalid`. `domains` are `host` or `host/path-glob` patterns without a scheme: a
-bare host also matches its subdomains, `www.` and letter case never decide a
-match, and `*` spans `/`. `summary` accompanies every entry and is all a `seen`
-entry carries, so make it name the file's subject. Set `updated` when you change
-a file; it only informs how much a reader should trust the note, and never
-controls redelivery.
+`invalid`. `domains` are `host` or `host/path-glob` patterns without a scheme:
+write the hostname only, never an origin, scheme, or port. For example, use
+`127.0.0.1` for a loopback page even when the current URL has a dynamic port;
+the bare host matches that host on any port. A bare host also matches its
+subdomains, `www.` and letter case never decide a match, and `*` spans `/`.
+`summary` accompanies every entry and is all a `seen` entry carries, so make it
+name the file's subject. Set `updated` when you change a file; it only informs
+how much a reader should trust the note, and never controls redelivery.
 
 ### Where files live
 
