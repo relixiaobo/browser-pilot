@@ -147,6 +147,16 @@ test('a seed updated date must equal the verification date', async t => {
   );
 });
 
+test('shipped seed bytes keep LF line endings on every platform', async () => {
+  const attributes = await readFile(join(repositoryRoot, '.gitattributes'), 'utf8');
+
+  assert.ok(
+    attributes
+      .split(/\r?\n/u)
+      .includes('plugin/skills/browser-pilot/sites/*.md text eol=lf'),
+  );
+});
+
 test('repository automation applies the structural, scheduled, and release gates', async () => {
   const packageManifest = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'));
   const ci = await readFile(join(repositoryRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
